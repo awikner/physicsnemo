@@ -36,9 +36,9 @@ class TestGetShiftWindowMask3D:
     @pytest.mark.parametrize(
         "input_resolution, window_size, shift_size",
         [
-            ((8, 24, 48), (2, 6, 12), (1, 3, 6)),   # default Pangu config
-            ((4, 12, 24), (2, 6, 12), (1, 3, 6)),   # smaller resolution
-            ((8, 24, 48), (2, 6, 6), (1, 3, 3)),    # square lon window
+            ((8, 24, 48), (2, 6, 12), (1, 3, 6)),  # default Pangu config
+            ((4, 12, 24), (2, 6, 12), (1, 3, 6)),  # smaller resolution
+            ((8, 24, 48), (2, 6, 6), (1, 3, 3)),  # square lon window
         ],
     )
     def test_output_shape(self, input_resolution, window_size, shift_size):
@@ -75,8 +75,16 @@ class TestGetShiftWindowMask3D:
 
         # Reconstruct the underlying region-ID map directly
         img_mask = torch.zeros((1, Pl, Lat, Lon, 1))
-        pl_slices = (slice(0, -win_pl), slice(-win_pl, -shift_pl), slice(-shift_pl, None))
-        lat_slices = (slice(0, -win_lat), slice(-win_lat, -shift_lat), slice(-shift_lat, None))
+        pl_slices = (
+            slice(0, -win_pl),
+            slice(-win_pl, -shift_pl),
+            slice(-shift_pl, None),
+        )
+        lat_slices = (
+            slice(0, -win_lat),
+            slice(-win_lat, -shift_lat),
+            slice(-shift_lat, None),
+        )
         cnt = 0
         for pl in pl_slices:
             for lat in lat_slices:
@@ -104,10 +112,14 @@ class TestGetShiftWindowMask3D:
         # not error.)
         # We only check it does not raise.
         try:
-            mask = get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3)
+            mask = get_shift_window_mask(
+                input_resolution, window_size, shift_size, ndim=3
+            )
             assert mask is not None
         except Exception as exc:
-            pytest.fail(f"get_shift_window_mask raised unexpectedly with zero shift: {exc}")
+            pytest.fail(
+                f"get_shift_window_mask raised unexpectedly with zero shift: {exc}"
+            )
 
 
 class TestGetShiftWindowMask2D:
@@ -116,7 +128,7 @@ class TestGetShiftWindowMask2D:
     @pytest.mark.parametrize(
         "input_resolution, window_size, shift_size",
         [
-            ((24, 48), (6, 12), (3, 6)),   # default FengWu config (scaled)
+            ((24, 48), (6, 12), (3, 6)),  # default FengWu config (scaled)
             ((12, 24), (6, 12), (3, 6)),
         ],
     )
@@ -139,11 +151,15 @@ class TestGetShiftWindowMask2D:
     def test_longitude_unmasked_region_count(self):
         """Longitude must not be partitioned: only Lat region IDs (3)."""
         Lat, Lon = 24, 48
-        win_lat, win_lon = 6, 12
-        shift_lat, shift_lon = 3, 6
+        win_lat = 6
+        shift_lat = 3
 
         img_mask = torch.zeros((1, Lat, Lon, 1))
-        lat_slices = (slice(0, -win_lat), slice(-win_lat, -shift_lat), slice(-shift_lat, None))
+        lat_slices = (
+            slice(0, -win_lat),
+            slice(-win_lat, -shift_lat),
+            slice(-shift_lat, None),
+        )
         cnt = 0
         for lat in lat_slices:
             img_mask[:, lat, :, :] = cnt
@@ -162,8 +178,8 @@ class TestWindowPartitionReverse:
     @pytest.mark.parametrize(
         "shape, window_size",
         [
-            ((2, 8, 24, 48, 16), (2, 6, 12)),   # (B, Pl, Lat, Lon, C) 3D
-            ((2, 24, 48, 16), (6, 12)),          # (B, Lat, Lon, C) 2D
+            ((2, 8, 24, 48, 16), (2, 6, 12)),  # (B, Pl, Lat, Lon, C) 3D
+            ((2, 24, 48, 16), (6, 12)),  # (B, Lat, Lon, C) 2D
         ],
     )
     def test_roundtrip(self, shape, window_size):
@@ -185,4 +201,6 @@ class TestWindowPartitionReverse:
                 partitioned, window_size, Lat=Lat, Lon=Lon, ndim=ndim
             )
 
-        assert torch.allclose(x, recovered), "window_reverse did not invert window_partition"
+        assert torch.allclose(x, recovered), (
+            "window_reverse did not invert window_partition"
+        )
