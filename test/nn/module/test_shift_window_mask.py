@@ -65,37 +65,22 @@ class TestGetShiftWindowMask3D:
         assert unique == [-100.0, 0.0]
 
     def test_longitude_unmasked_region_count(self):
-        """Longitude must not be partitioned: only Pl x Lat region IDs (9)."""
-        input_resolution = (8, 24, 48)
-        window_size = (2, 6, 12)
-        shift_size = (1, 3, 6)
-        Pl, Lat, Lon = input_resolution
-        win_pl, win_lat, win_lon = window_size
-        shift_pl, shift_lat, shift_lon = shift_size
+        """Longitude must not be partitioned: mask must be identical for every n_lon index.
 
-        # Reconstruct the underlying region-ID map directly
-        img_mask = torch.zeros((1, Pl, Lat, Lon, 1))
-        pl_slices = (
-            slice(0, -win_pl),
-            slice(-win_pl, -shift_pl),
-            slice(-shift_pl, None),
+        If the longitude axis were masked, different longitude window positions would
+        have different attention patterns. With longitude unmasked, the mask depends
+        only on (Pl, Lat) region membership, so all n_lon slices must be equal.
+        """
+        mask = get_shift_window_mask(
+            input_resolution=(8, 24, 48),
+            window_size=(2, 6, 12),
+            shift_size=(1, 3, 6),
+            ndim=3,
         )
-        lat_slices = (
-            slice(0, -win_lat),
-            slice(-win_lat, -shift_lat),
-            slice(-shift_lat, None),
-        )
-        cnt = 0
-        for pl in pl_slices:
-            for lat in lat_slices:
-                img_mask[:, pl, lat, :, :] = cnt
-                cnt += 1
-
-        n_regions = len(torch.unique(img_mask))
-        # 3 Pl bands x 3 Lat bands = 9; longitude must NOT add more partitions
-        assert n_regions == 9, (
-            f"Expected 9 region IDs (Pl x Lat only), got {n_regions}. "
-            "Longitude axis must not be partitioned in the mask."
+        # mask shape: (n_lon, n_pl*n_lat, W, W)
+        assert torch.all(mask == mask[0].unsqueeze(0)), (
+            "Mask differs across longitude window indices — longitude axis is being "
+            "partitioned. All n_lon slices must be identical when longitude is cyclic."
         )
 
     def test_no_shift_produces_zero_mask(self):
@@ -149,26 +134,22 @@ class TestGetShiftWindowMask2D:
         assert unique == [-100.0, 0.0]
 
     def test_longitude_unmasked_region_count(self):
-        """Longitude must not be partitioned: only Lat region IDs (3)."""
-        Lat, Lon = 24, 48
-        win_lat = 6
-        shift_lat = 3
+        """Longitude must not be partitioned: mask must be identical for every n_lon index.
 
-        img_mask = torch.zeros((1, Lat, Lon, 1))
-        lat_slices = (
-            slice(0, -win_lat),
-            slice(-win_lat, -shift_lat),
-            slice(-shift_lat, None),
+        If the longitude axis were masked, different longitude window positions would
+        have different attention patterns. With longitude unmasked, the mask depends
+        only on Lat region membership, so all n_lon slices must be equal.
+        """
+        mask = get_shift_window_mask(
+            input_resolution=(24, 48),
+            window_size=(6, 12),
+            shift_size=(3, 6),
+            ndim=2,
         )
-        cnt = 0
-        for lat in lat_slices:
-            img_mask[:, lat, :, :] = cnt
-            cnt += 1
-
-        n_regions = len(torch.unique(img_mask))
-        assert n_regions == 3, (
-            f"Expected 3 region IDs (Lat only), got {n_regions}. "
-            "Longitude axis must not be partitioned in the mask."
+        # mask shape: (n_lon, n_lat, W, W)
+        assert torch.all(mask == mask[0].unsqueeze(0)), (
+            "Mask differs across longitude window indices — longitude axis is being "
+            "partitioned. All n_lon slices must be identical when longitude is cyclic."
         )
 
 

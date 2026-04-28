@@ -107,13 +107,13 @@ def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
     if ndim == 3:
         Pl, Lat, Lon = input_resolution
         win_pl, win_lat, win_lon = window_size
-        shift_pl, shift_lat, shift_lon = shift_size
+        shift_pl, shift_lat, _ = shift_size  # longitude is cyclic; lon shift unused
 
         img_mask = torch.zeros((1, Pl, Lat, Lon, 1))
     elif ndim == 2:
         Lat, Lon = input_resolution
         win_lat, win_lon = window_size
-        shift_lat, shift_lon = shift_size
+        shift_lat, _ = shift_size  # longitude is cyclic; lon shift unused
 
         img_mask = torch.zeros((1, Lat, Lon, 1))
 
