@@ -418,8 +418,10 @@ FullyConnected = "physicsnemo.models.mlp:FullyConnected"
 Pangu = "physicsnemo.models.pangu:Pangu"
 
 # Pangu_Plasim (ai-rossby fork: faithful ports of PanguWeather v2.0)
-PanguPlasim = "physicsnemo.models.pangu_plasim:PanguPlasim"
-PanguPlasimLegacy = "physicsnemo.models.pangu_plasim:PanguPlasimLegacy"
+# Experimental per MOD-002a — promote to physicsnemo.models after >= 1 release cycle
+# and once the MOD-008b reference-tensor non-regression tests are stable.
+PanguPlasim = "physicsnemo.experimental.models.pangu_plasim:PanguPlasim"
+PanguPlasimLegacy = "physicsnemo.experimental.models.pangu_plasim:PanguPlasimLegacy"
 
 # Pix2Pix
 Pix2Pix = "physicsnemo.models.pix2pix:Pix2Pix"

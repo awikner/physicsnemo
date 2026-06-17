@@ -150,23 +150,54 @@ ai-rossby (= awikner/physicsnemo, branch ai-rossby)
 
 ## 3. Phased delivery
 
-### Phase 1 — Pangu_Plasim faithful ports (BOTH architectures, weight-compatible) ← in progress
-Port both PanguWeather Pangu networks into `physicsnemo/models/pangu_plasim/` as `physicsnemo.Module`s,
-faithful flavor:
+### Phase 1 — Pangu_Plasim faithful ports (BOTH architectures, weight-compatible) ← *substantively complete*
+Port both PanguWeather Pangu networks into `physicsnemo/experimental/models/pangu_plasim/` as
+`physicsnemo.Module`s, faithful flavor:
 - **`PanguPlasim`** — faithful port of the current `pangu.py` model (with the training-only VAE dual-encoder + KL).
 - **`PanguPlasimLegacy`** — faithful port of the predecessor `pangu_legacy.py` model (no VAE; forward returns
-  4–5 values, `mu2`/`sigma2` = None; VAE loss skipped). Ported *together* with `PanguPlasim` so they share
-  the `layers.py` building blocks.
+  the same six- (or seven- with diagnostics) tuple shape as `PanguPlasim` eval mode, with **all four** latent
+  slots zero-tensor placeholders — matches the original source so downstream code targets one return shape).
+  Ported *together* with `PanguPlasim` so they share the `layers.py` building blocks.
+
+Per MOD-002a, both models live in `physicsnemo/experimental/models/` while iteration is ongoing. They are
+re-exported via entry-points in `pyproject.toml` so `Module.from_checkpoint` and the smoke-test workflow
+work as for production models. **Promotion** to `physicsnemo/models/pangu_plasim/` happens once (a) the
+MOD-008b non-regression fixtures stabilize across ≥1 fork release cycle, and (b) the Phase-5 fidelity gate
+validates the faithful flavor against a real PanguWeather checkpoint.
 
 Shared Earth-Specific blocks / patch embed-recovery / up-down sample / mask / Integrator go in `layers.py`.
 Refactor both constructors from the `params`/YParams blob to explicit **JSON-serializable kwargs** while keeping
 internal math and **submodule names bit-identical** (so checkpoints map cleanly). Preserve the
 `(surface, const_boundary, varying_boundary, upper_air, ...)` forward contract for both.
+
+**Coding-standards compliance** (`CODING_STANDARDS/MODELS_IMPLEMENTATION.md`):
+- **MOD-003** docstrings: `r"""` prefix, NumPy-style sections (`Parameters` / `Forward` / `Outputs` /
+  `Notes` / `Examples`), tensor shapes in `:math:` LaTeX, double-backtick inline code,
+  `name : type, optional, default=value` single-line param format.
+- **MOD-005** shape validation at the top of `forward`, guarded by
+  `if not torch.compiler.is_compiling():` and using the standardized
+  ``"Expected ... got shape {actual_shape}"`` format.
+- **MOD-006** `jaxtyping.Float[torch.Tensor, "..."]` annotations on `__init__` and public-method
+  tensor arguments.
+- **MOD-007** both models declare `__model_checkpoint_version__ = "1.0"`.
+- **MOD-011** the original source's broken `USE_TE` opt-in (referenced `te.Linear` etc. without a guarded
+  `transformer_engine` import) is **removed** from `layers.py`. Reintroduce cleanly behind
+  `check_version_spec("transformer_engine", ...)` if/when FP8 is actually wanted.
+
 **Tests** (per model):
-- *Unit* (CPU, login-node-runnable): `validate_forward_accuracy` (commit reference), `_constructor`,
-  `validate_checkpoint` roundtrip, `_optims`; conservative `ModelMetaData` flags (amp/bf16), expanded as validated.
-- *Smoke* (Delta `gpuA40x4-interactive`): per the smoke-test contract in `hpc/delta.md` — instantiate on CUDA,
-  forward + backward + AdamW step on synthetic tiny tensors, `save_checkpoint`/`from_checkpoint` roundtrip.
+- *Unit* (CPU, login-node-runnable):
+  - **MOD-008a** `test_pangu_plasim_constructor` — 3-variant sweep (baseline / `upper_air_boundary` /
+    `diagnostic_variables`).
+  - **MOD-008b** `test_pangu_plasim_non_regression` — load committed reference
+    `test/models/pangu_plasim/data/<ClassName>_v1.0.pth` (seeded by `init_seed=0`, `input_seed=42`,
+    `forward_seed=123`) and compare forward output. Note: MOD-008b's example template overrides params
+    with raw `randn` — that saturates this transformer to `NaN`, so we seed `torch.manual_seed` *before*
+    the constructor (letting the default trunc-normal / Kaiming initializers run deterministically) and
+    document the deviation.
+  - **MOD-008c** `test_pangu_plasim_checkpoint` — `.mdlus` roundtrip via `Module.from_checkpoint`.
+- *Smoke* (Delta `gpuA40x4-interactive`): per the smoke-test contract in `hpc/delta.md` — instantiate on
+  CUDA, forward + backward + AdamW step on synthetic tiny tensors, `save_checkpoint`/`from_checkpoint`
+  roundtrip.
 
 ### Phase 2 — `PlasimClimateDatapipe`
 Custom datapipe reading the native per-timestep HDF5 + NetCDF z-score stats, reproducing channel routing

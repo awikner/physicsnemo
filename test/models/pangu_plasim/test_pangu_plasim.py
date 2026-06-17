@@ -16,19 +16,35 @@
 
 """Tests for the faithful ``PanguPlasim`` and ``PanguPlasimLegacy`` ports.
 
-The Phase-1 unit tests (constructor parameter coverage, forward shape against
-committed reference tensors, checkpoint roundtrip) will go here too. This file
-currently carries the smoke tests that prove both models wire together on a
-real A40 — submitted via the ``delta-smoke-test`` skill on Delta's
-``gpuA40x4-interactive`` partition (see ``hpc/delta.md``).
+Coverage:
+
+* MOD-008a constructor sweep (3 variants × 2 model classes)
+* MOD-008b non-regression against committed reference tensors under
+  ``test/models/pangu_plasim/data/<ClassName>_v1.0.pth``
+* MOD-008c checkpoint roundtrip via ``Module.from_checkpoint``
+* GPU smoke test (``@pytest.mark.smoke @pytest.mark.cuda``) submitted on Delta
+  ``gpuA40x4-interactive`` via the ``delta-smoke-test`` skill
 """
+
+import warnings
+from pathlib import Path
 
 import pytest
 import torch
 
-import physicsnemo
-from physicsnemo.models.pangu_plasim import PanguPlasim, PanguPlasimLegacy
+# Importing from physicsnemo.experimental emits ExperimentalFeatureWarning once
+# per session; we know these models are experimental and don't need the noise.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
+    import physicsnemo
+    from physicsnemo.experimental.models.pangu_plasim import (
+        PanguPlasim,
+        PanguPlasimLegacy,
+    )
+
 from test import common
+
+_REFERENCE_DATA_DIR = Path(__file__).parent / "data"
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +182,65 @@ def test_pangu_plasim_checkpoint(device, model_cls, tmp_path):
     assert common.compare_output(out_pre_save, out_loaded, rtol=1e-5, atol=1e-5)
 
     del model, loaded
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+
+
+# ---------------------------------------------------------------------------
+# MOD-008b non-regression: load committed reference tensors and compare.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "model_cls", [PanguPlasim, PanguPlasimLegacy], ids=["vae", "legacy"]
+)
+def test_pangu_plasim_non_regression(device, model_cls):
+    """Forward pass with seeded weights matches committed reference output.
+
+    Per MOD-008b. Reference ``.pth`` files at
+    ``test/models/pangu_plasim/data/<ClassName>_v1.0.pth`` were generated under
+    ``init_seed=0`` (seeds the model's default initializers — trunc-normal,
+    Kaiming), ``input_seed=42``, and ``forward_seed=123`` (seeds the VAE
+    ``reparameterize`` draw for PanguPlasim; harmless for PanguPlasimLegacy).
+    The MOD-008b example overrides parameters with raw ``randn`` — that
+    saturates this transformer to ``NaN``, so we seed the constructor instead.
+    """
+    ref_path = _REFERENCE_DATA_DIR / f"{model_cls.__name__}_v1.0.pth"
+    if not ref_path.exists():
+        pytest.skip(f"reference data missing: {ref_path}")
+
+    # Fixtures are CPU-generated. PanguPlasim is stochastic in eval mode
+    # (reparameterize calls torch.randn_like), and CPU vs CUDA RNG draws differ
+    # even under the same torch.manual_seed — so the bitwise reference only
+    # holds on CPU. PanguPlasimLegacy is deterministic and matches on both.
+    if device.startswith("cuda") and model_cls is PanguPlasim:
+        pytest.skip(
+            "PanguPlasim is stochastic in eval mode (reparameterize) and the "
+            "reference fixture is CPU-generated; CUDA non-regression would "
+            "compare against CPU-seeded latent draws. Checkpoint roundtrip + "
+            "smoke test cover CUDA fidelity instead."
+        )
+
+    data = torch.load(ref_path, weights_only=False)
+
+    torch.manual_seed(data["init_seed"])
+    model = model_cls(**data["kwargs"]).to(device).eval()
+
+    inputs = tuple(
+        data["inputs"][k].to(device)
+        for k in ("surface_in", "constant_boundary", "varying_boundary", "upper_air_in")
+    )
+    out_ref = tuple(t.to(device) for t in data["output"])
+
+    torch.manual_seed(data["forward_seed"])
+    with torch.no_grad():
+        out = model(*inputs)
+
+    # Reference fixtures are generated on CPU; CUDA vs. CPU floating-point drift
+    # through a transformer-depth network easily exceeds 1e-5. Use 5e-3 atol
+    # (matches the precedent set by the shipped `Pangu` model's
+    # validate_forward_accuracy tolerance in test/models/pangu/test_pangu.py).
+    assert common.compare_output(out, out_ref, rtol=1e-3, atol=5e-3)
+
+    del model
     if device.startswith("cuda"):
         torch.cuda.empty_cache()
 

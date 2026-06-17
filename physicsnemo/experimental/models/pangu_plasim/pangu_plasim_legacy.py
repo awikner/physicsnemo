@@ -14,47 +14,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Faithful, weight-compatible port of PanguWeather v2.0 ``PanguModel_Plasim``
-(the current VAE-augmented 3D Swin / Earth-Specific transformer) into a
-``physicsnemo.Module``.
+r"""Faithful port of `PanguWeather v2.0
+<https://github.com/198808xc/Pangu-Weather>`_ ``pangu_legacy.py`` (the
+no-VAE predecessor Pangu_Plasim architecture) into a
+:class:`~physicsnemo.core.module.Module`.
 
-Fidelity contract
------------------
-This is the **faithful** flavor of the Pangu_Plasim port: every ``nn.Module``
-submodule name, parameter/buffer name, and tensor shape is preserved so that
-checkpoints trained with the original PanguWeather repo load via the Phase-5
-translation script. The only intentional differences from the source are:
-
-* the constructor takes explicit **JSON-serializable** keyword arguments instead
-  of a ``params``/``YParams`` blob (required by :class:`physicsnemo.Module`);
-* land/ocean ``Mask`` buffers — which are persisted in the checkpoint — are
-  created here as correctly-shaped zero placeholders (populated by the
-  checkpoint load, or by :meth:`set_land_ocean_masks` for from-scratch
-  training) rather than loaded from ``lsm.nc`` inside ``__init__``;
-* a stray debug ``print`` was removed (see ``layers.py``).
-
-Adapted from the Pangu-Weather architecture
-(https://github.com/198808xc/Pangu-Weather).
+Same Earth-Specific dual-stream encoder/decoder, boundary conditioning, and
+TOA-solar routing as :class:`PanguPlasim`, **without the VAE dual-encoder**.
+Forward returns the same six- (or seven- with diagnostics) tuple shape as
+:class:`PanguPlasim`'s eval mode, with all four latent slots zero-filled — so
+downstream code targets one return shape across both flavors.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
+from jaxtyping import Float
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from physicsnemo.core.meta import ModelMetaData
 from physicsnemo.core.module import Module
 
-from . import layers as _layers
-from .layers import DownSample, EarthSpecificLayer, Mask, UpSample
 from ._pangu_utils import (
     PatchEmbed2D,
     PatchEmbed3D,
     PatchRecovery2D,
     PatchRecovery3D,
 )
+from .layers import DownSample, EarthSpecificLayer, Mask, UpSample
 
 
 @dataclass
@@ -69,86 +59,80 @@ class MetaData(ModelMetaData):
     onnx: bool = False
 
 
-class PanguPlasim(Module):
-    r"""Pangu_Plasim weather emulator (faithful port of PanguWeather v2.0).
+class PanguPlasimLegacy(Module):
+    r"""Pangu_Plasim weather emulator — predecessor no-VAE architecture.
 
-    A Pangu-Weather-style 3D Swin / Earth-Specific transformer with a
-    training-only VAE dual-encoder. Surface and upper-air fields are kept as
-    separate streams; constant and time-varying boundary conditions are
-    concatenated into the surface stream, with the TOA solar-radiation varying
-    boundary routed into the 3D (upper-air) stream when ``upper_air_boundary``
-    is set.
-
-    Parameters
-    ----------
-    surface_variables, upper_air_variables : list[str]
-        Prognostic surface and upper-air variable names (channel order).
-    constant_boundary_variables, varying_boundary_variables : list[str]
-        Static and time-varying boundary variable names. ``varying_boundary_variables``
-        must contain a solar-radiation field (``rsdt`` or ``toa_incident_solar_radiation``).
-    levels : list
-        Vertical levels for the upper-air stream (length sets the 3D depth).
-    horizontal_resolution : list[int]
-        ``[n_lat, n_lon]`` of the lat-lon grid.
-    patch_size : list[int]
-        Patch size ``[p_level, p_lat, p_lon]``.
-    depths : list[int], optional
-        Transformer depths per stage. Default ``(2, 6, 6, 2)``.
-    num_heads : tuple[int, int, int, int], optional
-        Attention heads per stage. Default ``(6, 12, 12, 6)``.
-    embed_dim : int, optional
-        Patch-embedding dimension. Default ``192``.
-    window_size : list[int], optional
-        Window size ``[w_level, w_lat, w_lon]``. Default ``(2, 6, 12)``.
-    updown_scale_factor : int, optional
-        Spatial down/up-sample factor between stages. Default ``2``.
-    vertical_windowing : bool, optional
-        Whether windows shift along the vertical (pressure) axis. Default ``True``.
-    upper_air_boundary : bool, optional
-        Route the solar-radiation varying boundary into the 3D stream. Default ``False``.
-    predict_delta : bool, optional
-        Predict normalized tendencies (integrated externally) rather than full
-        fields. Default ``False``.
-    land_variables, ocean_variables, diagnostic_variables : list[str], optional
-        Optional land-only, ocean-only, and diagnostic (output-only) variables.
-    has_diagnostic : bool or None, optional
-        Override for whether diagnostics are produced. Defaults to
-        ``len(diagnostic_variables) > 0``.
-    mask_output : bool, optional
-        Apply land/ocean masking to the corresponding output channels. Default ``False``.
-    mask_fill : dict or None, optional
-        Per-variable fill values used when populating land/ocean masks for
-        from-scratch training (ignored when loading a checkpoint).
-    drop_rate, drop_path : float / list or None, optional
-        Dropout and stochastic-depth schedules.
-    subpixel_deconv, polar_pad, grid_has_poles, recovery_head, diagnostic_head : bool, optional
-        Patch-recovery options (sub-pixel deconvolution head variants).
-    checkpointing : int, optional
-        Activation-checkpointing depth (0 disables). Default ``0``.
-    use_reentrant : bool, optional
-        ``use_reentrant`` flag for ``torch.utils.checkpoint``. Default ``False``.
-    use_transformer_engine : bool, optional
-        Enable NVIDIA Transformer Engine layers (FP8). Default ``False``.
+    Faithful port of PanguWeather v2.0 ``pangu_legacy.py``. Same constructor
+    contract and forward signature as :class:`PanguPlasim` (so configs are
+    interchangeable), but with **no VAE dual-encoder submodules** and a
+    simplified forward. See :class:`PanguPlasim` for the description of all
+    constructor parameters — they are identical.
 
     Forward
     -------
     surface_in : torch.Tensor
-        ``(B, C_surface, H, W)`` prognostic surface fields.
+        Prognostic surface fields of shape :math:`(B, C_s, H, W)`.
     constant_boundary : torch.Tensor
-        ``(C_const, H, W)`` or ``(B, C_const, H, W)`` static boundary fields.
+        Static boundary fields of shape :math:`(C_b^c, H, W)` or
+        :math:`(B, C_b^c, H, W)`.
     varying_boundary : torch.Tensor
-        ``(B, C_varying, H, W)`` time-varying boundary fields.
+        Time-varying boundary fields of shape :math:`(B, C_b^v, H, W)`.
     upper_air_in : torch.Tensor
-        ``(B, C_upper, L, H, W)`` prognostic upper-air fields.
+        Prognostic upper-air fields of shape :math:`(B, C_u, L, H, W)`.
+    target_surface : torch.Tensor, optional
+        Unused (kept for signature compatibility with :class:`PanguPlasim`).
+    target_upper_air : torch.Tensor, optional
+        Unused (kept for signature compatibility with :class:`PanguPlasim`).
+    train : bool, optional, default=False
+        Toggles activation checkpointing in patch recovery (see
+        ``checkpointing``); no VAE encoder-2 branch exists here.
+    return_latent : bool, optional, default=False
+        Append the post-downsample bottleneck latent to the return tuple.
 
-    Returns
+    Outputs
     -------
-    tuple
-        ``(out_surface, out_upper_air[, out_diagnostic], mu, sigma, mu2, sigma2)``
-        — the diagnostic tensor is present only when ``diagnostic_variables`` is
-        non-empty; ``mu2, sigma2`` carry the second-encoder VAE statistics in
-        training mode and zeros at evaluation.
+    tuple of torch.Tensor
+        ``(out_surface, out_upper_air[, out_diagnostic], 0, 0, 0, 0)`` — a six-
+        or seven-element tuple. The trailing four scalar zero-tensor placeholders
+        preserve positional compatibility with :class:`PanguPlasim`'s eval-mode
+        return so downstream code targets one return shape. When
+        ``return_latent=True`` the bottleneck latent is appended at the end.
+
+    Notes
+    -----
+    Unlike :class:`PanguPlasim`, this model is deterministic in eval mode (there
+    is no :meth:`reparameterize` step). Checkpoint roundtrip tests do not need
+    seeding for fidelity, but the smoke-test contract seeds for symmetry across
+    both flavors.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from physicsnemo.experimental.models.pangu_plasim import PanguPlasimLegacy
+    >>> model = PanguPlasimLegacy(
+    ...     surface_variables=["t2m", "u10", "v10"],
+    ...     upper_air_variables=["t", "u", "v", "q", "z"],
+    ...     constant_boundary_variables=["lsm"],
+    ...     varying_boundary_variables=["rsdt"],
+    ...     levels=[200, 300, 500, 700, 850, 925, 1000, 1015],
+    ...     horizontal_resolution=[32, 64],
+    ...     patch_size=[2, 4, 4],
+    ...     depths=[1, 1, 1, 1],
+    ...     num_heads=[2, 4, 4, 2],
+    ...     embed_dim=64,
+    ...     window_size=[2, 4, 8],
+    ... ).eval()
+    >>> surface_in = torch.randn(1, 3, 32, 64)
+    >>> constant_boundary = torch.randn(1, 32, 64)
+    >>> varying_boundary = torch.randn(1, 1, 32, 64)
+    >>> upper_air_in = torch.randn(1, 5, 8, 32, 64)
+    >>> with torch.no_grad():
+    ...     out = model(surface_in, constant_boundary, varying_boundary, upper_air_in)
+    >>> out[0].shape, out[1].shape
+    (torch.Size([1, 3, 32, 64]), torch.Size([1, 5, 8, 32, 64]))
     """
+
+    __model_checkpoint_version__ = "1.0"
 
     def __init__(
         self,
@@ -183,13 +167,8 @@ class PanguPlasim(Module):
         diagnostic_head: bool = False,
         checkpointing: int = 0,
         use_reentrant: bool = False,
-        use_transformer_engine: bool = False,
     ) -> None:
         super().__init__(meta=MetaData())
-
-        # Transformer Engine is a module-global flag read by the building blocks.
-        _layers.USE_TE = use_transformer_engine
-        self.use_transformer_engine = use_transformer_engine
 
         self.checkpointing = checkpointing
         self.use_reentrant = use_reentrant
@@ -206,8 +185,6 @@ class PanguPlasim(Module):
         if drop_rate > 0.0:
             drop_path = np.zeros(int(np.sum(depths))).tolist()
 
-        # --- channel / resolution bookkeeping (set predict_delta early so the
-        # land/ocean mask construction below can branch on it) ---
         self.predict_delta = predict_delta
         self.mask_output = mask_output
 
@@ -232,9 +209,6 @@ class PanguPlasim(Module):
         self._land_variables = list(land_variables)
         self._ocean_variables = list(ocean_variables)
 
-        # Non-persistent buffer: moves to the model's device but is kept out of
-        # the state_dict (the original stored this as a plain CPU attribute, so
-        # excluding it preserves checkpoint-key compatibility).
         self.register_buffer(
             "surface_prognostic_idxs",
             torch.cat(
@@ -252,11 +226,6 @@ class PanguPlasim(Module):
             persistent=False,
         )
 
-        # --- land / ocean output masks -------------------------------------
-        # ``Mask`` stores its (non-trainable) buffers in the state_dict, so they
-        # arrive from the checkpoint. Here we build correctly-shaped zero
-        # placeholders; ``set_land_ocean_masks`` populates real values for
-        # from-scratch training.
         n_lat, n_lon = horizontal_resolution
         if self.has_land and self.mask_output:
             if self.predict_delta:
@@ -276,7 +245,6 @@ class PanguPlasim(Module):
                 )
         self._mask_fill = mask_fill
 
-        # --- geometry / windowing ------------------------------------------
         self.window_size = list(window_size)
         self.vertical_windowing = vertical_windowing
         self.updown_scale_factor = updown_scale_factor
@@ -286,7 +254,6 @@ class PanguPlasim(Module):
         self.recovery_head = recovery_head
         self.diagnostic_head = diagnostic_head
 
-        # --- varying-boundary routing (solar radiation -> 3D stream) --------
         self.upper_air_boundary = upper_air_boundary
         self.varying_boundary_variables = list(varying_boundary_variables)
         self.num_varying_boundary_vars = len(varying_boundary_variables)
@@ -310,7 +277,6 @@ class PanguPlasim(Module):
             if i != self.idx_upper_air_var_bound
         ]
 
-        # --- patch embeddings ----------------------------------------------
         if self.upper_air_boundary:
             self.patchembed2d_upper_air_boundary = PatchEmbed2D(
                 img_size=horizontal_resolution,
@@ -374,7 +340,7 @@ class PanguPlasim(Module):
         if not self.vertical_windowing:
             self.window_size[0] = EST_input_resolution[0]
 
-        # --- encoder 1 ------------------------------------------------------
+        # --- encoder (single branch — no VAE encoder-2) --------------------
         self.layer1 = EarthSpecificLayer(
             dim=embed_dim,
             input_resolution=EST_input_resolution,
@@ -415,82 +381,6 @@ class PanguPlasim(Module):
             drop=drop_rate,
             checkpointing=self.checkpointing,
             use_reentrant=self.use_reentrant,
-        )
-
-        # --- VAE part (encoder 1) ------------------------------------------
-        self.layer_mu = nn.Conv3d(
-            in_channels=self.embed_dim * updown_scale_factor,
-            out_channels=self.embed_dim,
-            kernel_size=1,
-        )
-        self.layer_sigma = nn.Conv3d(
-            in_channels=self.embed_dim * updown_scale_factor,
-            out_channels=self.embed_dim,
-            kernel_size=1,
-        )
-        self.layer_purturbation = nn.Conv3d(
-            in_channels=embed_dim, out_channels=embed_dim * 2, kernel_size=1
-        )
-        self.layer_perturbation2 = nn.Conv3d(
-            in_channels=embed_dim + embed_dim * updown_scale_factor,
-            out_channels=embed_dim * updown_scale_factor,
-            kernel_size=1,
-        )
-
-        # --- 2nd encoder (training-only VAE branch) ------------------------
-        self.layer1_e2 = EarthSpecificLayer(
-            dim=embed_dim,
-            input_resolution=EST_input_resolution,
-            depth=depths[0],
-            num_heads=num_heads[0],
-            window_size=self.window_size,
-            drop_path=drop_path[: depths_cumsum[0]],
-            vertical_windowing=vertical_windowing,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
-        )
-        self.layer2_e2 = EarthSpecificLayer(
-            dim=embed_dim * updown_scale_factor,
-            input_resolution=downscale_resolution,
-            depth=depths[1],
-            num_heads=num_heads[1],
-            window_size=self.window_size,
-            drop_path=drop_path[depths_cumsum[0] : depths_cumsum[1]],
-            vertical_windowing=vertical_windowing,
-            drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
-        )
-        self.layer3_e3 = EarthSpecificLayer(
-            dim=embed_dim * updown_scale_factor,
-            input_resolution=downscale_resolution,
-            depth=depths[2],
-            num_heads=num_heads[2],
-            window_size=self.window_size,
-            drop_path=drop_path[depths_cumsum[1] : depths_cumsum[2]],
-            vertical_windowing=vertical_windowing,
-            drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
-        )
-        self.downsample_e2 = DownSample(
-            in_dim=embed_dim,
-            input_resolution=EST_input_resolution,
-            output_resolution=downscale_resolution,
-            downsample_factor=updown_scale_factor,
-        )
-        self.layer_mu_e2 = nn.Conv3d(
-            in_channels=self.embed_dim * updown_scale_factor,
-            out_channels=self.embed_dim,
-            kernel_size=1,
-        )
-        self.layer_sigma_e2 = nn.Conv3d(
-            in_channels=self.embed_dim * updown_scale_factor,
-            out_channels=self.embed_dim,
-            kernel_size=1,
-        )
-        self.layer_purturbation_e2 = nn.Conv3d(
-            in_channels=embed_dim, out_channels=embed_dim, kernel_size=1
         )
 
         # --- decoder --------------------------------------------------------
@@ -605,14 +495,26 @@ class PanguPlasim(Module):
             )
 
     @torch.no_grad()
-    def set_land_ocean_masks(self, land_mask: torch.Tensor, mask_fill: dict = None):
-        """Populate the land/ocean ``Mask`` buffers for from-scratch training.
+    def set_land_ocean_masks(
+        self,
+        land_mask: Float[torch.Tensor, "lat lon"],
+        mask_fill: Optional[dict] = None,
+    ) -> None:
+        r"""Populate the land/ocean ``Mask`` buffers for from-scratch training.
 
-        Reproduces the original PanguWeather mask construction:
-        ``land_mask`` is a ``(n_lat, n_lon)`` land-sea field, and (in non-delta
-        mode) the per-variable fill is ``(1 - mask) * mask_fill[var]``. When
-        loading a translated checkpoint this call is unnecessary — the buffers
-        come from the checkpoint.
+        Same semantics as :meth:`PanguPlasim.set_land_ocean_masks`.
+
+        Parameters
+        ----------
+        land_mask : torch.Tensor
+            Land-sea field of shape :math:`(H, W)`. ``NaN`` entries are zeroed.
+        mask_fill : dict or None, optional, default=None
+            Per-variable additive fill values. When ``None``, the constructor's
+            ``mask_fill`` argument is used.
+
+        Returns
+        -------
+        None
         """
         mask_fill = mask_fill if mask_fill is not None else self._mask_fill
         land_mask = land_mask.to(torch.float32)
@@ -633,26 +535,72 @@ class PanguPlasim(Module):
                 )
                 self.ocean_mask.mask_fill.copy_(fill.unsqueeze(0))
 
-    def reparameterize(self, mu, sigma):
-        std = torch.exp(0.5 * sigma)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
     def forward(
         self,
-        surface_in,
-        constant_boundary,
-        varying_boundary,
-        upper_air_in,
-        target_surface=None,
-        target_upper_air=None,
-        train=False,
-        return_latent=False,
+        surface_in: Float[torch.Tensor, "batch n_surface lat lon"],
+        constant_boundary: torch.Tensor,
+        varying_boundary: Float[torch.Tensor, "batch n_varying lat lon"],
+        upper_air_in: Float[torch.Tensor, "batch n_upper n_levels lat lon"],
+        target_surface: Optional[Float[torch.Tensor, "batch n_surface lat lon"]] = None,
+        target_upper_air: Optional[
+            Float[torch.Tensor, "batch n_upper n_levels lat lon"]
+        ] = None,
+        train: bool = False,
+        return_latent: bool = False,
     ):
+        r"""See class docstring (:class:`PanguPlasimLegacy`) for the full description.
+
+        ``constant_boundary`` accepts shape :math:`(C_b^c, H, W)` or
+        :math:`(B, C_b^c, H, W)`; a missing batch dim is added automatically.
+        ``target_surface`` / ``target_upper_air`` are ignored — kept for
+        signature compatibility with :class:`PanguPlasim`.
+        """
+        ### Input validation (skipped under torch.compile per MOD-005).
+        if not torch.compiler.is_compiling():
+            n_lat, n_lon = self.atmo_resolution[1], self.atmo_resolution[2]
+            n_levels = self.atmo_resolution[0]
+            if surface_in.ndim != 4:
+                raise ValueError(
+                    f"Expected 4D surface_in (B, C_s, H, W), got shape {tuple(surface_in.shape)}"
+                )
+            if surface_in.shape[1] != self.num_surface_vars:
+                raise ValueError(
+                    f"Expected surface_in with {self.num_surface_vars} channels, "
+                    f"got shape {tuple(surface_in.shape)}"
+                )
+            B = surface_in.shape[0]
+            if surface_in.shape[-2:] != (n_lat, n_lon):
+                raise ValueError(
+                    f"Expected surface_in spatial dims ({n_lat}, {n_lon}), "
+                    f"got shape {tuple(surface_in.shape)}"
+                )
+            if constant_boundary.ndim not in (3, 4):
+                raise ValueError(
+                    "Expected constant_boundary of shape (C_b^c, H, W) or "
+                    f"(B, C_b^c, H, W), got shape {tuple(constant_boundary.shape)}"
+                )
+            if constant_boundary.shape[-2:] != (n_lat, n_lon):
+                raise ValueError(
+                    f"Expected constant_boundary spatial dims ({n_lat}, {n_lon}), "
+                    f"got shape {tuple(constant_boundary.shape)}"
+                )
+            if varying_boundary.shape != (B, self.num_varying_boundary_vars, n_lat, n_lon):
+                raise ValueError(
+                    f"Expected varying_boundary of shape "
+                    f"({B}, {self.num_varying_boundary_vars}, {n_lat}, {n_lon}), "
+                    f"got shape {tuple(varying_boundary.shape)}"
+                )
+            if upper_air_in.shape != (B, self.num_atmo_vars, n_levels, n_lat, n_lon):
+                raise ValueError(
+                    f"Expected upper_air_in of shape "
+                    f"({B}, {self.num_atmo_vars}, {n_levels}, {n_lat}, {n_lon}), "
+                    f"got shape {tuple(upper_air_in.shape)}"
+                )
+
         if len(constant_boundary.size()) == 3:
             constant_boundary = constant_boundary.unsqueeze(0)
 
-        # ----- data preparation for encoder 1 -----
+        # ----- data preparation -----
         if self.upper_air_boundary:
             upper_air_varying_boundary = varying_boundary[
                 :, self.idx_upper_air_var_bound, :, :
@@ -687,78 +635,13 @@ class PanguPlasim(Module):
         B, C, Pl, Lat, Lon = x.shape
         x = x.reshape(B, C, -1).transpose(1, 2)
 
-        if train:
-            # ----- data preparation for encoder 2 -----
-            if self.upper_air_boundary:
-                surface_target = torch.cat(
-                    [target_surface, constant_boundary, surface_varying_boundary], dim=1
-                )
-                surface_target = self.patchembed2d(surface)
-                target_upper_air = self.patchembed3d(target_upper_air)
-                x_target = torch.cat(
-                    [
-                        upper_air_varying_boundary.unsqueeze(2),
-                        target_upper_air,
-                        surface_target.unsqueeze(2),
-                    ],
-                    dim=2,
-                )
-            else:
-                surface_target = torch.concat(
-                    [target_surface, constant_boundary, varying_boundary], dim=1
-                )
-                surface_target = self.patchembed2d(surface_target)
-                target_upper_air = self.patchembed3d(target_upper_air)
-                x_target = torch.concat(
-                    [target_upper_air, surface_target.unsqueeze(2)], dim=2
-                )
-            x_target = x_target.reshape(B, C, -1).transpose(1, 2)
-
+        # ----- encoder + decoder (no VAE) -----
         x = self.layer1(x)
-        if train:
-            x_e2 = self.layer1_e2(x_target)
-            x_e2 = self.downsample_e2(x_e2)
-
         skip = x
         x = self.downsample(x)
         latent = x.detach().clone() if return_latent else None
         x = self.layer2(x)
         x = self.layer3(x)
-        x = x.reshape(
-            B,
-            self.downscale_resolution[0],
-            self.downscale_resolution[1],
-            self.downscale_resolution[2],
-            -1,
-        ).permute(0, 4, 1, 2, 3)
-
-        x_vae = x
-        # ----- VAE encoder 1 -----
-        mu = self.layer_mu(x_vae)
-        sigma = self.layer_sigma(x_vae)
-        norm = self.reparameterize(mu, sigma)
-        x_purb = self.layer_purturbation(norm)
-
-        if train:
-            # ----- VAE encoder 2 -----
-            x_e2 = checkpoint(self.layer2_e2, x_e2, use_reentrant=self.use_reentrant)
-            x_e2 = checkpoint(self.layer3_e3, x_e2, use_reentrant=self.use_reentrant)
-            x_e2_vae = x_e2.reshape(
-                B,
-                self.downscale_resolution[0],
-                self.downscale_resolution[1],
-                self.downscale_resolution[2],
-                -1,
-            ).permute(0, 4, 1, 2, 3)
-            mu_e2 = self.layer_mu_e2(x_e2_vae)
-            sigma_e2 = self.layer_sigma_e2(x_e2_vae)
-            norm_e2 = self.reparameterize(mu_e2, sigma_e2)  # noqa: F841
-
-        # ----- decoder -----
-        x = x_purb + x
-        x = x.permute(0, 2, 3, 4, 1).reshape(
-            B, -1, self.embed_dim * self.updown_scale_factor
-        )
         x = self.upsample(x)
         x = self.layer4(x)
 
@@ -820,36 +703,19 @@ class PanguPlasim(Module):
             else:
                 output_upper_air = self.patchrecovery3d(output_upper_air)
 
+        # Match the original pangu_legacy.py source: same tuple positions as the
+        # VAE port's eval-mode return, with zero-tensor placeholders in all
+        # four latent slots.
+        zero = torch.tensor(0.0)
         if self.num_diagnostic_vars > 0:
             output_diagnostic = output_2D[
                 :, self.num_surface_vars : self.num_surface_vars + self.num_diagnostic_vars
             ].reshape(
                 output_surface.shape[0], -1, output_surface.shape[-2], output_surface.shape[-1]
             )
-            if train:
-                result = (output_surface, output_upper_air, output_diagnostic, mu, sigma, mu_e2, sigma_e2)
-            else:
-                result = (
-                    output_surface,
-                    output_upper_air,
-                    output_diagnostic,
-                    mu,
-                    sigma,
-                    torch.tensor(0.0),
-                    torch.tensor(0.0),
-                )
+            result = (output_surface, output_upper_air, output_diagnostic, zero, zero, zero, zero)
         else:
-            if train:
-                result = (output_surface, output_upper_air, mu, sigma, mu_e2, sigma_e2)
-            else:
-                result = (
-                    output_surface,
-                    output_upper_air,
-                    mu,
-                    sigma,
-                    torch.tensor(0.0),
-                    torch.tensor(0.0),
-                )
+            result = (output_surface, output_upper_air, zero, zero, zero, zero)
 
         if return_latent:
             return result + (latent,)
