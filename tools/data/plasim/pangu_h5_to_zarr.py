@@ -106,8 +106,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--time-chunk",
         type=int,
-        default=50,
-        help="Number of timesteps per Zarr chunk along the time axis.",
+        default=1,
+        help="Number of timesteps per Zarr chunk along the time axis. The default "
+        "of 1 (one chunk per timestep) is the fastest for random-access training "
+        "workloads — larger chunks force the loader to decompress N timesteps to "
+        "extract 1 per __getitem__ call (~6x throughput regression at time_chunk=50 "
+        "in our benchmark; see benchmarks/.../plasim/RESULTS.md).",
     )
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
