@@ -10,7 +10,7 @@ models, training/inference code, and mid-training & after-the-fact validation fr
 ## Decisions locked in (from review)
 
 1. **Repo strategy — Fork & in-tree.** `ai-rossby` work happens in the user's PhysicsNeMo fork
-   (`awikner/physicsnemo`, local at `/Users/Alexander/Documents/UChicago/physicsnemo`, branch `ai-rossby`).
+   (`awikner/physicsnemo`, local at `/work/nvme/bdiu/awikner/physicsnemo`, branch `ai-rossby`).
    Ported models live under `physicsnemo/models/...`, recipes under `examples/weather/...`, tests under
    `test/models/...`, registered via PhysicsNeMo entry-point/registry conventions. Upstream tracked for merges.
 2. **Fidelity — weight-compatible, two flavors per architecture.** Every ported model ships as:

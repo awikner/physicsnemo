@@ -13,9 +13,9 @@ The objective of this repository is to create a unified codebase for training, v
 ## Current Repositories
 
 This repository should draw from the following existing repositories:
-- PanguWeather/v2.0 (located at /Users/Alexander/Documents/UChicago/PanguWeather) - this is the current working repository for the AI emulators built and run by our research group. It is messy and not well modularized, but it will be necessary to design helper scripts to translate between the current data configurations, model state definitions, and model checkpoints and their final versions in this repository.
-- amip (located at /Users/Alexander/Documents/UChicago/amip) - this is our collaborators repository for training and validating their stochastic interpolant-based latent diffusion models for climate emulations, written in torch-lightning. Helper scripts are again needed to translate between the expected data set, models and checkpoints from this repo and the ai-rossby. Additionally, all modular classes designed in this repo must be able to represent the stochastic interpolant-based emulators.
-- physics-nemo (located at /Users/Alexander/Documents/UChicago/physicsnemo) - this is Nvidia's state-of-the-art training library for physics-informed AI models, and contains capabilities for training many of the state of the art weather models as well as diffusion-type models.
+- PanguWeather/v2.0 (located at /work/nvme/bdiu/awikner/PanguWeather) - this is the current working repository for the AI emulators built and run by our research group. It is messy and not well modularized, but it will be necessary to design helper scripts to translate between the current data configurations, model state definitions, and model checkpoints and their final versions in this repository.
+- amip (located at /work/nvme/bdiu/awikner/amip) - this is our collaborators repository for training and validating their stochastic interpolant-based latent diffusion models for climate emulations, written in torch-lightning. Helper scripts are again needed to translate between the expected data set, models and checkpoints from this repo and the ai-rossby. Additionally, all modular classes designed in this repo must be able to represent the stochastic interpolant-based emulators.
+- physics-nemo (located at /work/nvme/bdiu/awikner/physicsnemo) - this is Nvidia's state-of-the-art training library for physics-informed AI models, and contains capabilities for training many of the state of the art weather models as well as diffusion-type models.
 
 
 ### First objective
