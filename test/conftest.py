@@ -116,6 +116,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: mark test as slow-running (for optional exclusion)"
     )
+    config.addinivalue_line(
+        "markers",
+        "smoke: mark test as a GPU smoke test (run on HPC interactive queue; see hpc/delta.md)",
+    )
 
     # Conditionally register the distributed_print plugin for multigpu tests
     static_flag = config.getoption("--multigpu-static")

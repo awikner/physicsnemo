@@ -162,44 +162,66 @@ Shared Earth-Specific blocks / patch embed-recovery / up-down sample / mask / In
 Refactor both constructors from the `params`/YParams blob to explicit **JSON-serializable kwargs** while keeping
 internal math and **submodule names bit-identical** (so checkpoints map cleanly). Preserve the
 `(surface, const_boundary, varying_boundary, upper_air, ...)` forward contract for both.
-**Tests** (per model): `validate_forward_accuracy` (commit reference), `_constructor`, `validate_checkpoint`
-roundtrip, `_optims`; conservative `ModelMetaData` flags (amp/bf16), expanded as validated.
+**Tests** (per model):
+- *Unit* (CPU, login-node-runnable): `validate_forward_accuracy` (commit reference), `_constructor`,
+  `validate_checkpoint` roundtrip, `_optims`; conservative `ModelMetaData` flags (amp/bf16), expanded as validated.
+- *Smoke* (Delta `gpuA40x4-interactive`): per the smoke-test contract in `hpc/delta.md` — instantiate on CUDA,
+  forward + backward + AdamW step on synthetic tiny tensors, `save_checkpoint`/`from_checkpoint` roundtrip.
 
 ### Phase 2 — `PlasimClimateDatapipe`
 Custom datapipe reading the native per-timestep HDF5 + NetCDF z-score stats, reproducing channel routing
 (surface/upper-air/boundary/diagnostic + TOA-solar special case), `predict_delta`, and lead-time/multi-year
 sampling with `DistributedSampler`. Normalization as composable transforms reading the existing `.nc` stats.
-Tests: synthetic small HDF5 + stats fixtures; shape/device/channel/grid checks via `test/datapipes/common`.
+**Tests**:
+- *Unit*: synthetic small HDF5 + stats fixtures; shape/device/channel/grid checks via `test/datapipes/common`.
+- *Smoke* (Delta): read a **real** PLASIM HDF5+NetCDF fixture from `$AI_ROSSBY_TEST_DATA` and iterate N batches.
+  Datapipe smoke tests must hit real disk per `hpc/delta.md` — they're the one category where synthetic-only
+  isn't enough.
 
 ### Phase 3 — Training recipe (shared, deterministic mode)
 Hydra config groups translated from the YParams YAML schema. Custom loop on `DistributedManager` +
 `save/load_checkpoint` + `LaunchLogger` + `StaticCaptureTraining`, reproducing: AdamW(`fused`)/ZeRO-1,
 OneCycle/cosine/warmup, bf16 AMP, EMA, loss combination + VAE-KL + `predict_delta`/`Integrator`. Modular
-(pluggable model/loss/optimizer/scheduler) so the diffusion port reuses the loop. Validate: single-step smoke
-on synthetic locally; short real run on HPC.
+(pluggable model/loss/optimizer/scheduler) so the diffusion port reuses the loop.
+**Tests**:
+- *Unit*: pluggability + config-resolution tests on the loop's components.
+- *Smoke* (Delta): 1–2 train steps on synthetic data, single GPU **and** 2-GPU DDP via `torchrun
+  --nproc-per-node=2`; checkpoint at step 1 reloads and matches.
+A longer real-data shake-out runs on `gpuA40x4` (non-interactive), not as a smoke test.
 
 ### Phase 4 — Validation (mid-training + after-the-fact)
 Mid-training: autoregressive rollout → lat-weighted RMSE (mse+reductions) + ACC (`physicsnemo.metrics.climate.acc`
 with dayofyear climatology), long-rollout bias, ensemble validation, power spectra. After-the-fact:
 `inference.py` (shared stepper, IC-perturbation + MC-dropout ensembles) → NetCDF; `validate.py` →
 RMSE/ACC/spectra/bias/CRPS + plots. Port the DDP all-reduce `MetricsAggregator` behavior.
+**Tests**:
+- *Unit*: each new metric (dayofyear-clim ACC aggregator, bias, CRPS, QBO) against analytic/reference values
+  on synthetic tensors.
+- *Smoke* (Delta): same metrics run on real CUDA tensors; for the aggregator, a 2-GPU DDP smoke verifies the
+  all-reduce produces the single-GPU value.
 
 ### Phase 5 — Checkpoint translation + numerical fidelity
 `tools/checkpoint_translation/pangu_plasim.py`: normalize `module.` prefix, prefer `ema_state`, remap keys →
 faithful module state_dict (handles both `PanguPlasim` and `PanguPlasimLegacy`), reconstruct `Integrator`
-buffers from norm `.nc`, emit `.mdlus`. **Fidelity gate (HPC)**: run the *original* PanguWeather inference to
-capture reference outputs, load the translated checkpoint into the faithful model, assert rollout outputs match
-within tolerance.
+buffers from norm `.nc`, emit `.mdlus`.
+**Tests**:
+- *Unit*: small synthetic source-format ckpt → translator → load into faithful model → forward shape OK.
+- *Smoke* (Delta interactive): same as unit but on CUDA; tolerance only on shape/dtype.
+- **Fidelity gate** (Delta non-interactive `gpuA40x4`): run the *original* PanguWeather inference to capture
+  reference outputs, load the translated checkpoint into the faithful model, assert rollout outputs match
+  within tolerance. This is the one Phase 5 task that doesn't fit the interactive queue's 1-hour cap.
 
 ### Phase 6 — Pangu_Plasim native variants
 Rebuild both architectures on native PhysicsNeMo blocks (`PanguPlasimNative`, `PanguPlasimLegacyNative`),
 reusing the shipped Pangu's Earth-Specific attention/patch ops where compatible; StaticCapture-friendly, richer
 `ModelMetaData`. Same I/O contract, own configs; trained via the Phase-3 recipe. (New training runs; not
 checkpoint-compatible with the faithful variants — that's the faithful variants' role.)
+**Tests**: same unit + smoke contract as Phase 1, both variants.
 
-### Phase 7 — SFNO (rest of v2.0)
+### Phase 7 — SFNO (rest of v2.0) — *in scope*
 Map the vendored SFNO to PhysicsNeMo's SFNO (makani plugin) or port the vendored copy as `sfno_plasim`
 (faithful + native). (Legacy Pangu moved into Phase 1; `pangu_lite` deferred unless needed.)
+**Tests**: same unit + smoke contract as Phase 1, applied to the SFNO variants.
 
 ### Phase 8+ — amip stochastic-interpolant model (second major effort)
 - `interpolant.py` NoiseScheduler + Solver reproducing `DynamicInterpolant`/`DriftScheduler`/`DataDependentInterpolant`
@@ -208,12 +230,36 @@ Map the vendored SFNO to PhysicsNeMo's SFNO (makani plugin) or port the vendored
   latent as deterministic pre/post-processing; three-way conditioning (state/`c_grid`/`c_scalar` w/ calendar+CO₂).
 - Muon optimizer + EMA into the shared recipe; rollout/ensemble inference (RNG-checkpointed resume; S2S hindcasts);
   evals (climatology/bias, QBO, global-mean timeseries, ensemble envelopes); Lightning-`.ckpt` translation script.
+**Tests**:
+- *Unit*: solver step + 5-step rollout on synthetic state, finite output, shapes preserved.
+- *Smoke* (Delta): same on CUDA; one DiT forward + backward + AdamW step; checkpoint roundtrip.
+  Datapipe smoke for amip's reader (real fixture, per `hpc/delta.md`). Lightning-ckpt translator smoke.
 
 ### Cross-cutting (throughout)
 - **Claude skills** (`skills/`) for model dev, test scaffolding, and optimization (per outline objective).
-- **HPC job templates** (`hpc/`) for PBS (Derecho/Casper) + SLURM (Midway); document `DistributedManager` env.
+  Two skills are wired up for the smoke-test workflow: `delta-smoke-test` (submit a pytest target to
+  `gpuA40x4-interactive`) and `delta-shell` (interactive A40 srun).
+- **HPC docs and job templates** (`hpc/`): `install.md` (portable uv + system-PyTorch recipe), `delta.md`
+  (NCSA Delta specifics — partition, account, env, smoke-test patterns); PBS templates for Derecho/Casper and
+  SLURM templates for Midway/Delta non-interactive added as those clusters come online.
 - **Robust unit + smoke tests** as the base-class contract for new models/datapipes/metrics (outline objective).
+  Smoke-test contract is normative — see `hpc/delta.md`.
 - **Config system**: Hydra groups mirroring the model/data/training/validation separation the outline asks for.
+
+### Smoke tests on Delta interactive queue (normative)
+
+Every newly added feature — model, datapipe, metric, training-recipe component, checkpoint translator,
+interpolant solver — ships **both** a CPU-runnable unit test **and** a GPU smoke test on Delta's
+`gpuA40x4-interactive` partition. Full contract: `hpc/delta.md`. Highlights:
+
+- Smoke tests are marked `@pytest.mark.smoke` and `@pytest.mark.cuda`, live alongside the unit tests in
+  `test/`. `pytest -m "smoke and cuda"` selects them on a GPU node.
+- Run on **1 node, ≤ 4 A40 GPUs, ≤ 5 min wall** (interactive queue cap is 1 hr).
+- Synthetic tiny tensors **except** for data-loading code, which must read a real fixture from
+  `$AI_ROSSBY_TEST_DATA` (gitignored scratch path, symlinked at `test/_data` for IDE convenience).
+- DDP smoke tests use exactly 2 GPUs.
+- Anything that can't fit (Phase 5 fidelity gate, Phase 3 real-data shake-out) goes to `gpuA40x4`
+  non-interactive with its own job script under `hpc/scripts/`.
 
 ## 4. Reuse map (build off what exists)
 
@@ -239,8 +285,18 @@ Map the vendored SFNO to PhysicsNeMo's SFNO (makani plugin) or port the vendored
 - **VAE/KL & Muon fidelity.** Port both faithfully in faithful/training paths; make them optional/pluggable in
   the native variants.
 
-## 6. Open items to confirm
-1. **HPC specifics** (gates Phases 3 & 5): which cluster first, data/checkpoint paths there, module/conda env,
-   account/queue for the smoke run and the fidelity check.
-2. **Scope** (gates Phase 7): is SFNO in scope now, or deferred until Pangu_Plasim + the stochastic-interpolant
-   model both land? (Legacy Pangu already folded into Phase 1.)
+## 6. Resolved & remaining items
+
+Resolved (was §6 in earlier drafts):
+1. **HPC specifics** — Delta first. Smoke-test partition `gpuA40x4-interactive`, account `bdiu-delta-gpu`,
+   env via `pytorch-conda/2.8` + uv `--system-site-packages`. Repo at `/work/nvme/bdiu/awikner/physicsnemo`,
+   test data under `$AI_ROSSBY_TEST_DATA` = `/work/nvme/bdiu/awikner/physicsnemo_test_data`
+   (symlinked at `test/_data`, gitignored). Full recipe: `hpc/delta.md`,
+   portable template: `hpc/install.md`.
+2. **SFNO scope** — *in scope* (Phase 7), faithful + native variants, same unit + smoke contract as Pangu_Plasim.
+
+Remaining:
+- **Phase 5 fidelity-gate job script** — non-interactive `gpuA40x4` submission script + tolerance choices.
+  Drafted when the translator lands.
+- **Per-cluster docs as we extend beyond Delta** — Derecho/Casper (PBS), Midway (SLURM) need their own
+  `hpc/<cluster>.md` mirroring `hpc/delta.md`.

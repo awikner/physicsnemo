@@ -113,6 +113,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# ai-rossby test-data symlink (real path lives outside the repo; per-host)
+test/_data
+
 # Environments
 .env
 .venv
