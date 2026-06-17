@@ -49,6 +49,11 @@ dependencies = [
     "omegaconf>=2.3.0",
     "importlib-metadata>=8.7.1",
     "psutil>=6.0.0",
+    # ai-rossby fork: promote these from datapipes-extras to core because Phase 2's
+    # PlasimClimateDatapipe is part of the user-facing surface.
+    "xarray>=2025.6.1",
+    "zarr>=3.0.0",
+    "netCDF4",
 ]
 
 [project.urls]
