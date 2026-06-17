@@ -70,6 +70,109 @@ def _make_inputs(device, batch_size=1):
     return surface_in, constant_boundary, varying_boundary, upper_air_in
 
 
+# ---------------------------------------------------------------------------
+# Per-model constructor sweep — runs on whichever device(s) the fixture
+# provides (CPU on login nodes, CPU + cuda:0 on GPU nodes).
+# ---------------------------------------------------------------------------
+_CONSTRUCTOR_VARIANTS = [
+    # baseline (no diagnostics, no land/ocean)
+    dict(_SMOKE_KWARGS),
+    # with upper_air_boundary routing solar into the 3D stream
+    dict(_SMOKE_KWARGS, upper_air_boundary=True),
+    # with diagnostic variables
+    dict(_SMOKE_KWARGS, diagnostic_variables=["clt"]),
+]
+
+
+@pytest.mark.parametrize(
+    "model_cls", [PanguPlasim, PanguPlasimLegacy], ids=["vae", "legacy"]
+)
+@pytest.mark.parametrize(
+    "kwargs",
+    _CONSTRUCTOR_VARIANTS,
+    ids=["baseline", "upper_air_boundary", "diagnostic"],
+)
+def test_pangu_plasim_constructor(device, model_cls, kwargs):
+    """Smoke-style constructor coverage on the parameter axes Phase-1 cares
+    about (boundary routing, diagnostic-variable path). Verifies the model
+    instantiates and produces output of the expected shape on the fixture
+    device.
+    """
+    torch.manual_seed(0)
+    model = model_cls(**kwargs).to(device).eval()
+
+    inputs = _make_inputs(device, batch_size=1)
+    with torch.no_grad():
+        out = model(*inputs)
+
+    has_diag = bool(kwargs.get("diagnostic_variables"))
+    expected_len = 7 if has_diag else 6
+    assert len(out) == expected_len, (
+        f"expected {expected_len}-tuple for diagnostic={has_diag}, got {len(out)}"
+    )
+
+    n_lat, n_lon = kwargs["horizontal_resolution"]
+    n_levels = len(kwargs["levels"])
+    assert out[0].shape == (1, len(kwargs["surface_variables"]), n_lat, n_lon)
+    assert out[1].shape == (
+        1,
+        len(kwargs["upper_air_variables"]),
+        n_levels,
+        n_lat,
+        n_lon,
+    )
+    if has_diag:
+        assert out[2].shape == (
+            1,
+            len(kwargs["diagnostic_variables"]),
+            n_lat,
+            n_lon,
+        )
+    for t in out:
+        assert torch.isfinite(t).all(), "non-finite output"
+
+    del model
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+
+
+@pytest.mark.parametrize(
+    "model_cls", [PanguPlasim, PanguPlasimLegacy], ids=["vae", "legacy"]
+)
+def test_pangu_plasim_checkpoint(device, model_cls, tmp_path):
+    """`.mdlus` checkpoint roundtrip: save → ``Module.from_checkpoint`` → forward
+    matches the pre-save output on the fixture device. Seeds both forwards
+    identically so PanguPlasim's stochastic ``reparameterize`` step yields
+    matching latent draws (PanguPlasimLegacy is deterministic in eval mode but
+    uses the same protocol for symmetry).
+    """
+    torch.manual_seed(0)
+    model = model_cls(**_SMOKE_KWARGS).to(device).eval()
+
+    inputs = _make_inputs(device, batch_size=1)
+
+    torch.manual_seed(42)
+    with torch.no_grad():
+        out_pre_save = model(*inputs)
+
+    ckpt_path = tmp_path / f"{model_cls.__name__}_roundtrip.mdlus"
+    model.save(str(ckpt_path))
+
+    loaded = physicsnemo.Module.from_checkpoint(str(ckpt_path)).to(device).eval()
+    torch.manual_seed(42)
+    with torch.no_grad():
+        out_loaded = loaded(*inputs)
+
+    assert common.compare_output(out_pre_save, out_loaded, rtol=1e-5, atol=1e-5)
+
+    del model, loaded
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+
+
+# ---------------------------------------------------------------------------
+# GPU smoke test — required on Delta gpuA40x4-interactive (see hpc/delta.md).
+# ---------------------------------------------------------------------------
 @pytest.mark.smoke
 @pytest.mark.cuda
 @pytest.mark.parametrize(
