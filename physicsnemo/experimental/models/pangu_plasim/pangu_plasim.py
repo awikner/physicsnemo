@@ -452,8 +452,6 @@ class PanguPlasim(Module):
             window_size=self.window_size,
             drop_path=drop_path[: depths_cumsum[0]],
             vertical_windowing=vertical_windowing,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.downsample = DownSample(
             in_dim=embed_dim,
@@ -470,8 +468,6 @@ class PanguPlasim(Module):
             drop_path=drop_path[depths_cumsum[0] : depths_cumsum[1]],
             vertical_windowing=vertical_windowing,
             drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.layer3 = EarthSpecificLayer(
             dim=embed_dim * updown_scale_factor,
@@ -482,8 +478,6 @@ class PanguPlasim(Module):
             drop_path=drop_path[depths_cumsum[1] : depths_cumsum[2]],
             vertical_windowing=vertical_windowing,
             drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
 
         # --- VAE part (encoder 1) ------------------------------------------
@@ -515,8 +509,6 @@ class PanguPlasim(Module):
             window_size=self.window_size,
             drop_path=drop_path[: depths_cumsum[0]],
             vertical_windowing=vertical_windowing,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.layer2_e2 = EarthSpecificLayer(
             dim=embed_dim * updown_scale_factor,
@@ -527,8 +519,6 @@ class PanguPlasim(Module):
             drop_path=drop_path[depths_cumsum[0] : depths_cumsum[1]],
             vertical_windowing=vertical_windowing,
             drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.layer3_e3 = EarthSpecificLayer(
             dim=embed_dim * updown_scale_factor,
@@ -539,8 +529,6 @@ class PanguPlasim(Module):
             drop_path=drop_path[depths_cumsum[1] : depths_cumsum[2]],
             vertical_windowing=vertical_windowing,
             drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.downsample_e2 = DownSample(
             in_dim=embed_dim,
@@ -581,8 +569,6 @@ class PanguPlasim(Module):
             window_size=self.window_size,
             drop_path=drop_path[depths_cumsum[2] :],
             vertical_windowing=vertical_windowing,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
 
         # --- patch recovery -------------------------------------------------

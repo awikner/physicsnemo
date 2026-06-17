@@ -23,10 +23,6 @@ import numpy as np
 import torch
 from torch import nn
 
-# Phase A swap: window_partition (used below by the still-local
-# get_shift_window_mask) is now imported from physicsnemo.nn.module.utils.
-from physicsnemo.nn.module.utils import window_partition
-
 
 # --- from utils/patch_embed.py ---
 
@@ -948,43 +944,11 @@ class Interpolate(nn.Module):
 # Phase A swap: get_earth_position_index, get_pad2d, get_pad3d,
 # window_partition, window_reverse moved to physicsnemo.nn.module.utils.
 # (window_partition_2 / window_reverse_2 were dead code and deleted.)
-
-
-def get_shift_window_mask(input_resolution, window_size, shift_size):
-    """
-    Along the longitude dimension, the leftmost and rightmost indices are actually close to each other.
-    If half windows apper at both leftmost and rightmost positions, they are dircetly merged into one window.
-    Args:
-        input_resolution (tuple[int]): [pressure levels, latitude, longitude]
-        window_size (tuple[int]): Window size [pressure levels, latitude, longitude].
-        shift_size (tuple[int]): Shift size for SW-MSA [pressure levels, latitude, longitude].
-
-    Returns:
-        attn_mask: (n_lon, n_pl*n_lat, win_pl*win_lat*win_lon, win_pl*win_lat*win_lon)
-    """
-    Pl, Lat, Lon = input_resolution
-    win_pl, win_lat, win_lon = window_size
-    shift_pl, shift_lat, shift_lon = shift_size
-
-    img_mask = torch.zeros((1, Pl, Lat, Lon , 1))
-
-
-    pl_slices = (slice(0, -win_pl), slice(-win_pl, -shift_pl), slice(-shift_pl, None))
-    lat_slices = (slice(0, -win_lat), slice(-win_lat, -shift_lat), slice(-shift_lat, None))
-
-    cnt = 0
-    for pl in pl_slices:
-        for lat in lat_slices:
-            img_mask[:, pl, lat, :, :] = cnt
-            cnt += 1
-
-    mask_windows = window_partition(img_mask, window_size)  # n_lon, n_pl*n_lat, win_pl, win_lat, win_lon, 1
-    mask_windows = mask_windows.view(mask_windows.shape[0], mask_windows.shape[1], win_pl * win_lat * win_lon)
-    attn_mask = mask_windows.unsqueeze(2) - mask_windows.unsqueeze(3)
-    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-    return attn_mask
-
-
+#
+# Phase C swap: get_shift_window_mask moved to
+# ._vendored_physicsnemo_nn.shift_window_mask (with the Issue #1599 cyclic-
+# longitude fix). This file no longer carries any version of the mask.
+#
 # Phase A swap: crop2d, crop3d moved to physicsnemo.nn.module.utils.
 
 

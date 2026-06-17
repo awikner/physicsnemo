@@ -349,8 +349,6 @@ class PanguPlasimLegacy(Module):
             window_size=self.window_size,
             drop_path=drop_path[: depths_cumsum[0]],
             vertical_windowing=vertical_windowing,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.downsample = DownSample(
             in_dim=embed_dim,
@@ -367,8 +365,6 @@ class PanguPlasimLegacy(Module):
             drop_path=drop_path[depths_cumsum[0] : depths_cumsum[1]],
             vertical_windowing=vertical_windowing,
             drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
         self.layer3 = EarthSpecificLayer(
             dim=embed_dim * updown_scale_factor,
@@ -379,8 +375,6 @@ class PanguPlasimLegacy(Module):
             drop_path=drop_path[depths_cumsum[1] : depths_cumsum[2]],
             vertical_windowing=vertical_windowing,
             drop=drop_rate,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
 
         # --- decoder --------------------------------------------------------
@@ -402,8 +396,6 @@ class PanguPlasimLegacy(Module):
             window_size=self.window_size,
             drop_path=drop_path[depths_cumsum[2] :],
             vertical_windowing=vertical_windowing,
-            checkpointing=self.checkpointing,
-            use_reentrant=self.use_reentrant,
         )
 
         # --- patch recovery -------------------------------------------------
