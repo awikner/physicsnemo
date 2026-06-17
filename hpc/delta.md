@@ -23,40 +23,44 @@ The non-interactive `gpuA40x4` partition (2-day walltime) exists for longer fide
 
 ## System stack we reuse
 
-| Layer | Module |
+| Layer | Module / source |
 |---|---|
-| Python + PyTorch + CUDA | `pytorch-conda/2.8` → `python/.conda-env/pytorch/2.8-cu128` |
-| CUDA toolkit (auto-loaded) | `cudatoolkit/25.3_12.8` |
+| CUDA toolkit | `cudatoolkit/25.3_12.8` (auto-loaded with the default environment) |
 | Distributed fabric | `libfabric/1.22.0` (auto-loaded) |
 | Distributed NCCL transport | `aws-ofi-nccl/1.14.2` (load only for multi-GPU runs) |
+| Python interpreter | **uv-managed** (CPython 3.12 via `uv python install 3.12`) |
+| PyTorch | **fresh, from `pytorch-cu128` index** — torch 2.10.x against system CUDA 12.8 |
 
-`pytorch-conda/2.8` ships **torch 2.8.0+cu128**, which is below `physicsnemo`'s `torch>=2.10.0`
-pin in `pyproject.toml`. Per `hpc/install.md` step 4 we use **Option A** — relax the pin on
-the `ai-rossby` branch to `torch>=2.8,<2.11`. Rationale: keep tight integration with Delta's
-NCCL and avoid re-downloading multi-GB torch wheels.
+We deliberately do **not** load `pytorch-conda/2.8` — it ships torch 2.8.0+cu128, below
+physicsnemo's `torch>=2.10.0` pin in `pyproject.toml`. Per `hpc/install.md` step 4 we use
+**Option B**: keep the pin intact, let uv pull torch 2.10 from the `pytorch-cu128` index, and
+ride the system CUDA toolkit (12.8) underneath. Cost: one-time multi-GB wheel download.
+Benefit: tracks upstream pinned versions; no fork-local pyproject divergence.
 
 ## One-time setup
 
 ```bash
-# 1. uv
+# 1. uv (one-time, per-user)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 export PATH="$HOME/.local/bin:$PATH"
 
-# 2. Load the system stack
-module load pytorch-conda/2.8
+# 2. Confirm the system CUDA module is loaded (default env already loads cudatoolkit/25.3_12.8)
+module list | grep cudatoolkit
+# (do NOT load pytorch-conda/2.8)
 
-# 3. Create the venv (system-site-packages = inherits torch+CUDA+NCCL)
+# 3. Sync the project: uv installs Python 3.12, creates .venv, and resolves all deps.
+#    The `cu12` extra activates the pytorch-cu128 index for torch + torchvision.
+#    The `dev` group brings in pytest, ruff, etc.
+#    --python 3.12 is required: physicsnemo's pyproject allows 3.11–3.14, but cuml-cu12
+#    only ships wheels for 3.11–3.13 and uv defaults to the highest allowed (3.14),
+#    which fails to resolve. 3.12 is the safe ML choice.
 cd /work/nvme/bdiu/awikner/physicsnemo
-uv venv --system-site-packages --python "$(which python)" .venv
+unset VIRTUAL_ENV   # ignore any stale VIRTUAL_ENV from the parent shell (IDE etc.)
+uv sync --extra cu12 --group dev --python 3.12
 source .venv/bin/activate
 
-# 4. Relax the torch pin (one-time edit on ai-rossby), then install
-#    (see `hpc/install.md` for the rationale)
-uv pip install -e .
-uv pip install --group dev
-
-# 5. Set up the gitignored test-data area
+# 4. Set up the gitignored test-data area
 #    (root path is committed to repo as a `test/_data` symlink for IDE convenience —
 #     symlink itself is gitignored)
 mkdir -p /work/nvme/bdiu/awikner/physicsnemo_test_data
@@ -66,10 +70,22 @@ export AI_ROSSBY_TEST_DATA=/work/nvme/bdiu/awikner/physicsnemo_test_data  # add 
 For every subsequent shell session you only need:
 
 ```bash
-module load pytorch-conda/2.8
 cd /work/nvme/bdiu/awikner/physicsnemo
 source .venv/bin/activate
 ```
+
+Verify the install (CPU-only check on the login node; CUDA visibility requires a GPU node):
+
+```bash
+python -c "import torch, physicsnemo; print('torch', torch.__version__, 'cuda', torch.version.cuda, '/', 'physicsnemo', physicsnemo.__version__)"
+# expected something like: torch 2.11.0+cu128 cuda 12.8 / physicsnemo 2.2.0a0
+```
+
+A subset of `test/models/mlp` can be run on a login node as a quick infra check, but a few
+`_optims` tests using `torch.compile` will fail there because the login node's NVHPC SDK
+linker conflicts with Inductor's C++ build path. **This is a CPU-on-login-node quirk only**;
+those tests pass on GPU compute nodes. Use the `delta-smoke-test` skill (or pattern A in this
+doc) to run anything that hits `torch.compile` or CUDA.
 
 ## Smoke-test contract
 

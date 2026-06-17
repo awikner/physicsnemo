@@ -111,12 +111,18 @@ exact match to the cluster's NCCL/CUDA build):
 **Option B — let uv pull a fresh torch from the upstream index** (preferred when the
 cluster's torch is too far behind, or when you need an upstream-pure environment):
 
-1. **Drop `--system-site-packages`** from Step 3 — re-create the venv without it. (You don't
-   want two torch installations colliding.)
-2. `uv pip install -e .` — uv will fetch torch + CUDA wheels from the index configured in
-   `pyproject.toml` (currently `pytorch-cu130` / `pytorch-cu128`).
+1. **Skip the cluster's PyTorch module** from Step 2 — load only the CUDA toolkit module.
+   (You don't want two torch installations colliding.)
+2. Don't create the venv with `--system-site-packages` and don't pin to the cluster's Python.
+   Let uv manage its own interpreter: `uv sync --extra cu12 --python 3.12` (or `--extra cu13`
+   for CUDA 13 clusters). uv will install Python and fetch torch + CUDA wheels from the
+   index configured in `pyproject.toml`.
 3. You still need the cluster's CUDA driver and matching toolkit on `LD_LIBRARY_PATH`. Load
-   the right `cuda*` module; do NOT load the `pytorch-conda` one.
+   the right `cuda*` module; do NOT load the `pytorch-conda`/`pytorch` one.
+4. **Pin the Python version explicitly.** physicsnemo's `requires-python = ">=3.11,<=3.14"`
+   but several CUDA-extension deps (e.g., `cuml-cu12`) only ship wheels for 3.11–3.13. uv
+   defaults to the highest allowed Python and will fail to resolve. **Use `--python 3.12`**
+   unless you have a specific reason to deviate.
 
 Option A keeps tight integration with the cluster's NCCL/MPI. Option B is portable across
 clusters but slower and may miss optimizations.
