@@ -38,8 +38,7 @@ Use this for *debugging*, not *batch verification* — that's what `delta-smoke-
      --nodes=1 --ntasks-per-node=1 --cpus-per-task=8 \
      --gpus-per-node=1 --mem=64g \
      --job-name=pn-shell \
-     --pty bash -lc 'module load pytorch-conda/2.8; \
-                    cd /work/nvme/bdiu/awikner/physicsnemo; \
+     --pty bash -lc 'cd /work/nvme/bdiu/awikner/physicsnemo; \
                     source .venv/bin/activate; \
                     exec bash'
    ```

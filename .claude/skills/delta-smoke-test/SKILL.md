@@ -30,15 +30,16 @@ fidelity tests / full training-recipe shake-outs need `gpuA40x4` (non-interactiv
    `test/models/pangu_plasim/test_pangu_plasim.py::test_forward`). If they don't, ask before submitting.
 2. **Choose flags.** Start from the defaults above. If the user said "DDP" or "multi-GPU," set
    `--gpus-per-node=2` and `--time=01:00:00`. Never go above 4 GPUs or 1 hour — explain and stop instead.
-3. **Build the command.** Use the wrapper `bash -lc` form so module commands resolve. The body is:
+3. **Build the command.** Use the wrapper `bash -lc` form so the venv activation works. The body is:
    ```
-   module load pytorch-conda/2.8 && \
    cd /work/nvme/bdiu/awikner/physicsnemo && \
    source .venv/bin/activate && \
    pytest -m "smoke and cuda" -x -q <TARGET>
    ```
-   For DDP, prepend `torchrun --standalone --nproc-per-node=2 -m ` before `pytest` and append `&& \`
-   handling per the user's request. The `aws-ofi-nccl/1.14.2` module gets loaded too for DDP only.
+   No PyTorch module load is needed — the venv's torch (2.10+/cu128, installed via Option B in
+   `hpc/install.md`) brings its own CUDA libs and the system `cudatoolkit/25.3_12.8` driver is on
+   PATH by default. For DDP, prepend `torchrun --standalone --nproc-per-node=2 -m ` before `pytest`
+   and `module load aws-ofi-nccl/1.14.2 &&` at the start (NCCL fabric optimization).
 4. **Submit via `srun`.** Stream the output; the job ends when pytest does. Do NOT use `--pty` — that's
    for `delta-shell`. Do NOT use `sbatch` — the user invoked this skill to *see* the result, not queue and
    forget.
@@ -57,8 +58,7 @@ srun \
   --nodes=1 --ntasks-per-node=1 --cpus-per-task=8 \
   --gpus-per-node=1 --mem=64g \
   --job-name=pn-smoke \
-  bash -lc 'module load pytorch-conda/2.8 && \
-            cd /work/nvme/bdiu/awikner/physicsnemo && \
+  bash -lc 'cd /work/nvme/bdiu/awikner/physicsnemo && \
             source .venv/bin/activate && \
             pytest -m "smoke and cuda" -x -q test/models/pangu_plasim/'
 ```
@@ -73,7 +73,7 @@ srun \
   --nodes=1 --ntasks-per-node=1 --cpus-per-task=8 \
   --gpus-per-node=2 --mem=64g \
   --job-name=pn-smoke-ddp \
-  bash -lc 'module load pytorch-conda/2.8 aws-ofi-nccl/1.14.2 && \
+  bash -lc 'module load aws-ofi-nccl/1.14.2 && \
             cd /work/nvme/bdiu/awikner/physicsnemo && \
             source .venv/bin/activate && \
             torchrun --standalone --nproc-per-node=2 \
