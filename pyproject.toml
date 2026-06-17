@@ -417,6 +417,10 @@ FullyConnected = "physicsnemo.models.mlp:FullyConnected"
 # Pangu
 Pangu = "physicsnemo.models.pangu:Pangu"
 
+# Pangu_Plasim (ai-rossby fork: faithful ports of PanguWeather v2.0)
+PanguPlasim = "physicsnemo.models.pangu_plasim:PanguPlasim"
+PanguPlasimLegacy = "physicsnemo.models.pangu_plasim:PanguPlasimLegacy"
+
 # Pix2Pix
 Pix2Pix = "physicsnemo.models.pix2pix:Pix2Pix"
 Pix2PixUnet = "physicsnemo.models.pix2pix:Pix2PixUnet"
