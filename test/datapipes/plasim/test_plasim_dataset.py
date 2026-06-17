@@ -43,6 +43,7 @@ with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
     from physicsnemo.experimental.datapipes.plasim import (
         LeadTimePairSampler,
+        PlasimClimateDatapipe,
         PlasimClimateDataset,
         PlasimNormalizer,
     )
@@ -265,6 +266,91 @@ def test_normalizer_composes_via_dataset_transform_arg():
 
 
 # ---------------------------------------------------------------------------
+# Datapipe wrapper tests — CPU.
+# ---------------------------------------------------------------------------
+@_skip_no_fixture
+@_skip_no_stats
+def test_datapipe_yields_batched_dicts():
+    """The wrapper bundles Dataset + Sampler + DataLoader and yields batched dicts."""
+    norm = PlasimNormalizer.from_dataset(
+        PlasimClimateDataset(_fixture_path()),
+        mean_path=_MEAN_PATH,
+        std_path=_STD_PATH,
+    )
+    pipe = PlasimClimateDatapipe(
+        _fixture_path(),
+        forecast_lead_times=[1, 4],
+        normalizer=norm,
+        batch_size=2,
+        num_samples_per_epoch=4,
+        num_workers=0,  # avoid worker spin-up on login node
+        pin_memory=False,
+        device="cpu",
+        seed=0,
+    )
+    assert len(pipe) == 2
+    batches = list(pipe)
+    assert len(batches) == 2
+    H, W = 64, 128  # from the fixture
+    for b in batches:
+        assert b["surface_in"].shape == (2, 2, H, W)
+        assert b["upper_air_in"].shape == (2, 5, 10, H, W)
+        assert b["constant_boundary"].shape == (2, 3, H, W)
+        assert b["lead_time"].shape == (2,)
+        # NaN fill happened
+        assert torch.isfinite(b["constant_boundary"]).all()
+        assert torch.isfinite(b["varying_boundary"]).all()
+        # Normalization happened (raw surface_in mean ~143; normalized < ~1)
+        assert b["surface_in"].abs().mean() < 3.0
+
+
+@_skip_no_fixture
+def test_datapipe_set_epoch_changes_order():
+    """``set_epoch`` advances the sampler's RNG so consecutive epochs see
+    different (start, lead) sequences when ``shuffle=True``."""
+    pipe = PlasimClimateDatapipe(
+        _fixture_path(),
+        forecast_lead_times=[1, 4],
+        normalizer=None,
+        nan_fill=None,
+        batch_size=1,
+        num_samples_per_epoch=4,
+        num_workers=0,
+        pin_memory=False,
+        device="cpu",
+        shuffle=True,
+        seed=0,
+    )
+    pipe.set_epoch(0)
+    starts_a = [int(b["time_idx"].item()) for b in pipe]
+    pipe.set_epoch(1)
+    starts_b = [int(b["time_idx"].item()) for b in pipe]
+    assert starts_a != starts_b
+
+
+@_skip_no_fixture
+def test_datapipe_disable_normalizer_and_nan_fill():
+    """With normalizer=None and nan_fill=None, raw NaN flows through."""
+    pipe = PlasimClimateDatapipe(
+        _fixture_path(),
+        forecast_lead_times=[1],
+        normalizer=None,
+        nan_fill=None,
+        batch_size=1,
+        num_samples_per_epoch=1,
+        num_workers=0,
+        pin_memory=False,
+        device="cpu",
+        seed=0,
+    )
+    batch = next(iter(pipe))
+    # Raw magnitudes
+    assert batch["surface_in"].abs().mean() > 10.0
+    # NaN passed through on lsm
+    assert torch.isnan(batch["constant_boundary"]).any()
+
+
+# ---------------------------------------------------------------------------
 # GPU smoke — required on Delta gpuA40x4-interactive per hpc/delta.md.
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
@@ -396,4 +482,71 @@ def test_plasim_dataset_with_normalizer_drives_pangu_plasim():
     assert n_steps == 2
 
     del model, normalizer
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.smoke
+@pytest.mark.cuda
+@_skip_no_fixture
+@_skip_no_stats
+def test_plasim_datapipe_with_workers_drives_pangu_plasim():
+    """Datapipe wrapper end-to-end on GPU: workers + prefetch + persistent
+    workers feeding PanguPlasim forward+backward+step.
+
+    This is the configuration Phase 3's training recipe will use.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("smoke test requires CUDA")
+
+    ds_for_layout = PlasimClimateDataset(_fixture_path())
+    normalizer = PlasimNormalizer.from_dataset(
+        ds_for_layout, mean_path=_MEAN_PATH, std_path=_STD_PATH
+    )
+    pipe = PlasimClimateDatapipe(
+        _fixture_path(),
+        forecast_lead_times=[1, 4],
+        normalizer=normalizer,
+        batch_size=2,
+        num_samples_per_epoch=4,
+        num_workers=2,
+        prefetch_factor=2,
+        persistent_workers=True,
+        pin_memory=True,
+        seed=0,
+    )
+
+    model = PanguPlasim(
+        surface_variables=ds_for_layout.layout.surface_variables,
+        upper_air_variables=ds_for_layout.upper_air_variable_names,
+        constant_boundary_variables=ds_for_layout.layout.constant_boundary_variables,
+        varying_boundary_variables=ds_for_layout.layout.varying_boundary_variables,
+        diagnostic_variables=ds_for_layout.layout.diagnostic_variables,
+        levels=ds_for_layout.sigma_levels,
+        horizontal_resolution=list(ds_for_layout.horizontal_resolution),
+        patch_size=[2, 4, 4],
+        depths=[1, 1, 1, 1],
+        num_heads=[2, 4, 4, 2],
+        embed_dim=64,
+        window_size=[2, 4, 8],
+    ).to("cuda:0")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    model.train()
+    n_batches = 0
+    for batch in pipe:
+        optimizer.zero_grad()
+        out = model(
+            batch["surface_in"],
+            batch["constant_boundary"],
+            batch["varying_boundary"],
+            batch["upper_air_in"],
+        )
+        loss = sum(t.sum() for t in out if t.requires_grad)
+        assert torch.isfinite(loss).all(), "NaN loss through the datapipe wrapper"
+        loss.backward()
+        optimizer.step()
+        n_batches += 1
+    assert n_batches == 2
+
+    del model, pipe
     torch.cuda.empty_cache()
