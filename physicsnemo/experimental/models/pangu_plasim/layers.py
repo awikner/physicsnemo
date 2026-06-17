@@ -34,9 +34,8 @@ import torch.nn.functional as F
 from timm.layers import DropPath, trunc_normal_
 from torch import nn
 
-# Phase A swap: pure utilities now come from physicsnemo.nn.module.utils
-# (equivalence verified in test/models/pangu_plasim/test_utils_equivalence.py).
-# get_shift_window_mask stays local for now — physicsnemo's version has the
+# Phase A swap: pure utilities come from physicsnemo.nn.module.utils.
+# get_shift_window_mask stays local — physicsnemo's version has the
 # longitude-partitioning bug from issue #1599; Phase C vendors a fixed copy.
 from physicsnemo.nn.module.utils import (
     crop3d,
@@ -45,6 +44,12 @@ from physicsnemo.nn.module.utils import (
     window_partition,
     window_reverse,
 )
+
+# Phase B swap: at downsample/upsample factor=2 the local implementation is
+# bit-identical to physicsnemo.nn.{Down,Up}Sample3D (same modules, same forward).
+# We dispatch through factory classes below so the factor=2 path uses upstream.
+from physicsnemo.nn import DownSample3D as _UpstreamDownSample3D
+from physicsnemo.nn import UpSample3D as _UpstreamUpSample3D
 
 from ._pangu_utils import get_shift_window_mask
 
@@ -95,42 +100,20 @@ class Mask(nn.Module):
         return x * self.mask
 
 
-class DownSample(nn.Module):
-    r"""Pangu-Weather lat/lon down-sampling block.
+class _LocalDownSample3D(nn.Module):
+    r"""Generalized parametric down-sample (any ``downsample_factor``).
 
-    Folds a ``downsample_factor`` × ``downsample_factor`` spatial neighborhood
-    into the channel dimension, then applies LayerNorm + linear projection.
-    Padding is applied so output spatial dimensions match the requested
-    ``output_resolution``. The vertical (pressure) axis is preserved.
+    Used by :class:`DownSample` as the fallback for ``downsample_factor != 2``;
+    at ``downsample_factor == 2`` the factory swaps in
+    :class:`physicsnemo.nn.DownSample3D` instead (identical numerics, identical
+    state-dict keys).
 
-    Adapted from the `Pangu-Weather pseudocode
-    <https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py>`_.
-
-    Parameters
-    ----------
-    in_dim : int
-        Number of input channels :math:`C`.
-    input_resolution : tuple of int
-        ``(Pl, Lat, Lon)`` pre-downsample resolution.
-    output_resolution : tuple of int
-        ``(Pl, Lat, Lon)`` post-downsample resolution. ``Pl`` must equal the
-        input's.
-    downsample_factor : int, optional, default=2
-        Lat/lon down-sampling factor.
-
-    Forward
-    -------
-    x : torch.Tensor
-        Flattened tokens of shape :math:`(B, Pl \cdot Lat \cdot Lon, C)`.
-
-    Outputs
-    -------
-    torch.Tensor
-        Tokens of shape :math:`(B, Pl \cdot Lat_{out} \cdot Lon_{out},
-        C \cdot \text{downsample\_factor})`.
+    Parameters and behavior match the original PanguWeather v2.0 pseudocode,
+    parametrized on ``downsample_factor`` (the original only supported 2 in
+    practice).
     """
 
-    def __init__(self, in_dim, input_resolution, output_resolution, downsample_factor=2):
+    def __init__(self, in_dim, input_resolution, output_resolution, downsample_factor):
         super().__init__()
         self.downsample_factor = downsample_factor
 
@@ -192,12 +175,19 @@ class DownSample(nn.Module):
         return x
 
 
-class UpSample(nn.Module):
-    r"""Pangu-Weather lat/lon up-sampling block (inverse of :class:`DownSample`).
+class DownSample:
+    r"""Pangu-Weather lat/lon down-sampling factory.
 
-    Linear projection expands the channel dim by ``upsample_factor**2``, the
-    tile is unfolded back into spatial dims, cropped to the requested
-    ``output_resolution``, then normalized and linearly mixed.
+    For the common ``downsample_factor == 2`` path returns a
+    :class:`physicsnemo.nn.DownSample3D` instance — the upstream reference
+    implementation, bit-identical with the local generalized impl at
+    ``factor=2`` (same submodule names ``linear``, ``norm``, ``pad``, same
+    algorithm, same numerics). For any other factor returns the local
+    :class:`_LocalDownSample3D` fallback.
+
+    state_dict keys are identical across both paths (translated PanguWeather
+    checkpoints continue to load), so this is the swap point for Phase B of
+    ``pangu_plasim_reuse_plan.md``.
 
     Adapted from the `Pangu-Weather pseudocode
     <https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py>`_.
@@ -205,29 +195,46 @@ class UpSample(nn.Module):
     Parameters
     ----------
     in_dim : int
-        Number of input channels.
-    out_dim : int
-        Number of output channels.
+        Number of input channels :math:`C`.
     input_resolution : tuple of int
-        ``(Pl, Lat, Lon)`` pre-upsample resolution.
+        ``(Pl, Lat, Lon)`` pre-downsample resolution.
     output_resolution : tuple of int
-        ``(Pl, Lat, Lon)`` post-upsample resolution. ``Pl`` must equal the
+        ``(Pl, Lat, Lon)`` post-downsample resolution. ``Pl`` must equal the
         input's.
-    upsample_factor : int, optional, default=2
-        Lat/lon up-sampling factor.
+    downsample_factor : int, optional, default=2
+        Lat/lon down-sampling factor.
 
     Forward
     -------
     x : torch.Tensor
-        Flattened tokens of shape :math:`(B, Pl \cdot Lat \cdot Lon, C_{in})`.
+        Flattened tokens of shape :math:`(B, Pl \cdot Lat \cdot Lon, C)`.
 
     Outputs
     -------
     torch.Tensor
-        Tokens of shape :math:`(B, Pl \cdot Lat_{out} \cdot Lon_{out}, C_{out})`.
+        Tokens of shape :math:`(B, Pl \cdot Lat_{out} \cdot Lon_{out},
+        C \cdot \text{downsample\_factor})`.
     """
 
-    def __init__(self, in_dim, out_dim, input_resolution, output_resolution, upsample_factor=2):
+    def __new__(
+        cls, in_dim, input_resolution, output_resolution, downsample_factor=2
+    ):
+        if downsample_factor == 2:
+            return _UpstreamDownSample3D(in_dim, input_resolution, output_resolution)
+        return _LocalDownSample3D(
+            in_dim, input_resolution, output_resolution, downsample_factor
+        )
+
+
+class _LocalUpSample3D(nn.Module):
+    r"""Generalized parametric up-sample (any ``upsample_factor``).
+
+    Fallback for :class:`UpSample` when ``upsample_factor != 2``; at
+    ``upsample_factor == 2`` the factory returns :class:`physicsnemo.nn.UpSample3D`
+    instead (identical numerics, identical state-dict keys).
+    """
+
+    def __init__(self, in_dim, out_dim, input_resolution, output_resolution, upsample_factor):
         super().__init__()
         self.upsample_factor = upsample_factor
 
@@ -284,6 +291,56 @@ class UpSample(nn.Module):
         x = self.norm(x)
         x = self.linear2(x)
         return x
+
+
+class UpSample:
+    r"""Pangu-Weather lat/lon up-sampling factory (inverse of :class:`DownSample`).
+
+    For the common ``upsample_factor == 2`` path returns a
+    :class:`physicsnemo.nn.UpSample3D` instance — the upstream reference
+    implementation, bit-identical with the local generalized impl at ``factor=2``
+    (same submodule names ``linear1``, ``linear2``, ``norm``, same algorithm,
+    same numerics). For any other factor returns the local
+    :class:`_LocalUpSample3D` fallback.
+
+    state_dict keys are identical across both paths (Phase B of
+    ``pangu_plasim_reuse_plan.md``).
+
+    Parameters
+    ----------
+    in_dim : int
+        Number of input channels.
+    out_dim : int
+        Number of output channels.
+    input_resolution : tuple of int
+        ``(Pl, Lat, Lon)`` pre-upsample resolution.
+    output_resolution : tuple of int
+        ``(Pl, Lat, Lon)`` post-upsample resolution. ``Pl`` must equal the
+        input's.
+    upsample_factor : int, optional, default=2
+        Lat/lon up-sampling factor.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Flattened tokens of shape :math:`(B, Pl \cdot Lat \cdot Lon, C_{in})`.
+
+    Outputs
+    -------
+    torch.Tensor
+        Tokens of shape :math:`(B, Pl \cdot Lat_{out} \cdot Lon_{out}, C_{out})`.
+    """
+
+    def __new__(
+        cls, in_dim, out_dim, input_resolution, output_resolution, upsample_factor=2
+    ):
+        if upsample_factor == 2:
+            return _UpstreamUpSample3D(
+                in_dim, out_dim, input_resolution, output_resolution
+            )
+        return _LocalUpSample3D(
+            in_dim, out_dim, input_resolution, output_resolution, upsample_factor
+        )
 
 
 class EarthSpecificLayer(nn.Module):
