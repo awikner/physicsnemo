@@ -25,6 +25,7 @@ live in :mod:`.samplers` and (later) :mod:`.transforms`.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -32,10 +33,24 @@ from typing import Optional, Sequence
 import numpy as np
 import torch
 import xarray as xr
-from jaxtyping import Float
+import zarr
 from torch.utils.data import Dataset
+from zarr.api.asynchronous import open_group as _zarr_open_group_async
+from zarr.core.sync import sync as _zarr_sync
 
 PLASIM_ZARR_SCHEMA_VERSION = "1.0"
+
+
+# Raise zarr's async concurrency cap to a generous default. The library default
+# (10) bottlenecks batched reads under high worker counts; the Earthmover blog on
+# zarr-python 3 shows headline wins from raising this. Free at module import.
+# See ``benchmarks/.../plasim/RESULTS.md`` for context on why this matters.
+try:
+    # NOTE: dotted-key form merges; the full-dict form would replace the
+    # entire ``async`` sub-config and strip ``async.timeout``.
+    zarr.config.set({"async.concurrency": 100})
+except Exception:  # pragma: no cover — defensive; older zarr layouts
+    pass
 
 
 @dataclass
@@ -185,6 +200,38 @@ class PlasimClimateDataset(Dataset):
         self.n_lat = int(self._ds.sizes["lat"])
         self.n_lon = int(self._ds.sizes["lon"])
 
+        # Hot-path reads bypass xarray. Per-sample we issue one ``asyncio.gather``
+        # across all per-variable AsyncArray.getitem calls — a single ``zarr_sync``
+        # round-trip replaces N separate event-loop spins. Pattern follows
+        # ``physicsnemo.experimental.datapipes.healda.loaders.zarr_loader.ZarrLoader._get``.
+        # Profiling showed ~78 % of single-process __getitem__ time was in
+        # zarr.core.sync per-call asyncio bookkeeping; batched gather collapses
+        # that to one call.
+        #
+        # Known issue (zarr-python 3): the synchronous read API has substantial
+        # per-call overhead. See
+        # https://github.com/zarr-developers/zarr-python/issues/3524 and
+        # https://github.com/zarr-developers/zarr-python/issues/2084. When that
+        # is fixed upstream, this hand-rolled batching is no longer needed and
+        # can be replaced with naive per-variable reads against the sync API
+        # (or even xarray) — re-benchmark before deleting.
+        self._async_group = _zarr_sync(
+            _zarr_open_group_async(self.zarr_path, mode="r")
+        )
+        self._async_arrays: dict[str, object] = {}
+        for v in (
+            *self.layout.surface_variables,
+            *self.layout.varying_boundary_variables,
+            *self.layout.diagnostic_variables,
+            *self.layout.sigma_upper_air_variables,
+            *self.layout.pressure_upper_air_variables,
+        ):
+            self._async_arrays[v] = _zarr_sync(self._async_group.get(v))
+
+        # Constant boundaries don't vary over time — read once at init so the
+        # per-sample async batch doesn't include them.
+        self._constants_tensor = self._eager_load_constants()
+
     # ------------------------------------------------------------------ #
     # Public read-only attributes
     # ------------------------------------------------------------------ #
@@ -225,66 +272,99 @@ class PlasimClimateDataset(Dataset):
         return self.n_time
 
     # ------------------------------------------------------------------ #
-    # Sample assembly
+    # Sample assembly — async-batched zarr reads (see __init__ note for why).
     # ------------------------------------------------------------------ #
-    def _stack_along_var(
-        self,
-        names: Sequence[str],
-        time_idx: int,
-        *,
-        with_levels: bool,
-    ) -> Optional[Float[torch.Tensor, "..."]]:
-        """Read and stack a list of variables for a single time index."""
+    def _eager_load_constants(self) -> Optional[torch.Tensor]:
+        """Read constant boundary fields once at init (they don't vary in time)."""
+        names = self.layout.constant_boundary_variables
         if not names:
             return None
-        arrays: list[np.ndarray] = []
-        for v in names:
-            arr = self._ds[v].isel(time=time_idx).values.astype("float32", copy=False)
-            arrays.append(arr)
-        stacked = np.stack(arrays, axis=0)  # (n_vars, [L,] H, W)
-        return torch.from_numpy(stacked).to(self.dtype)
 
-    def _stack_upper_air(self, time_idx: int) -> torch.Tensor:
-        """Sigma vars first (n_sigma, L, H, W); pressure vars second; concat along var."""
-        parts: list[torch.Tensor] = []
-        sigma = self._stack_along_var(
-            self.layout.sigma_upper_air_variables, time_idx, with_levels=True
-        )
-        if sigma is not None:
-            parts.append(sigma)
-        pressure = self._stack_along_var(
-            self.layout.pressure_upper_air_variables, time_idx, with_levels=True
-        )
-        if pressure is not None:
-            parts.append(pressure)
-        return torch.cat(parts, dim=0)
+        async def _read_one(n: str):
+            arr = await self._async_group.get(n)
+            return await arr.getitem(slice(None))
 
-    def _read_constant_boundary(self) -> Optional[torch.Tensor]:
-        if not self.layout.constant_boundary_variables:
-            return None
-        arrays = [
-            self._ds[v].values.astype("float32", copy=False)
-            for v in self.layout.constant_boundary_variables
-        ]
+        async def _batch():
+            return await asyncio.gather(*(_read_one(n) for n in names))
+
+        arrays = [np.asarray(a, dtype="float32") for a in _zarr_sync(_batch())]
         return torch.from_numpy(np.stack(arrays, axis=0)).to(self.dtype)
 
-    def _sample_at(self, time_idx: int) -> dict[str, torch.Tensor]:
-        out: dict[str, torch.Tensor] = {}
-        out["surface_in"] = self._stack_along_var(
-            self.layout.surface_variables, time_idx, with_levels=False
+    def _read_all_async(self, time_idx: int) -> dict[str, np.ndarray]:
+        """Issue ALL per-sample variable reads in a single asyncio.gather call.
+
+        Returns a dict mapping variable name to the freshly-read numpy array.
+        """
+        return self._read_many_async([time_idx])[time_idx]
+
+    def _read_many_async(
+        self, time_indices: Sequence[int]
+    ) -> dict[int, dict[str, np.ndarray]]:
+        """Coalesce reads for MULTIPLE time indices into one ``asyncio.gather``.
+
+        Used by ``__getitem__`` to batch the start + target sample reads.
+        Returns ``{time_idx: {var_name: ndarray}}``.
+        """
+        names = (
+            *self.layout.surface_variables,
+            *self.layout.varying_boundary_variables,
+            *self.layout.diagnostic_variables,
+            *self.layout.sigma_upper_air_variables,
+            *self.layout.pressure_upper_air_variables,
         )
-        const = self._read_constant_boundary()
-        if const is not None:
-            out["constant_boundary"] = const
-        out["varying_boundary"] = self._stack_along_var(
-            self.layout.varying_boundary_variables, time_idx, with_levels=False
-        )
-        out["upper_air_in"] = self._stack_upper_air(time_idx)
-        if self.layout.diagnostic_variables:
-            out["diagnostic"] = self._stack_along_var(
-                self.layout.diagnostic_variables, time_idx, with_levels=False
-            )
+
+        async def _batch():
+            tasks = []
+            for t in time_indices:
+                for n in names:
+                    tasks.append(self._async_arrays[n].getitem(t))
+            return await asyncio.gather(*tasks)
+
+        arrays = _zarr_sync(_batch())
+        out: dict[int, dict[str, np.ndarray]] = {t: {} for t in time_indices}
+        k = 0
+        for t in time_indices:
+            for n in names:
+                out[t][n] = np.asarray(arrays[k], dtype="float32")
+                k += 1
         return out
+
+    def _stack_named(
+        self, raw: dict[str, np.ndarray], names: Sequence[str]
+    ) -> Optional[torch.Tensor]:
+        if not names:
+            return None
+        stacked = np.stack([raw[n] for n in names], axis=0)
+        return torch.from_numpy(stacked).to(self.dtype)
+
+    def _build_sample(self, raw: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
+        """Assemble a sample dict from a per-variable ``{name: ndarray}`` mapping."""
+        out: dict[str, torch.Tensor] = {}
+        out["surface_in"] = self._stack_named(raw, self.layout.surface_variables)
+        if self._constants_tensor is not None:
+            out["constant_boundary"] = self._constants_tensor
+        out["varying_boundary"] = self._stack_named(
+            raw, self.layout.varying_boundary_variables
+        )
+
+        # Upper-air: sigma vars first, then pressure vars, concatenated along var.
+        parts: list[torch.Tensor] = []
+        sigma = self._stack_named(raw, self.layout.sigma_upper_air_variables)
+        if sigma is not None:
+            parts.append(sigma)
+        pressure = self._stack_named(raw, self.layout.pressure_upper_air_variables)
+        if pressure is not None:
+            parts.append(pressure)
+        out["upper_air_in"] = (
+            parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+        )
+
+        if self.layout.diagnostic_variables:
+            out["diagnostic"] = self._stack_named(raw, self.layout.diagnostic_variables)
+        return out
+
+    def _sample_at(self, time_idx: int) -> dict[str, torch.Tensor]:
+        return self._build_sample(self._read_all_async(time_idx))
 
     def __getitem__(self, index) -> dict[str, torch.Tensor]:
         r"""Index is a single int or a ``(start_time_idx, lead_time_steps)`` pair.
@@ -311,8 +391,11 @@ class PlasimClimateDataset(Dataset):
                 f"range [0, {self.n_time})"
             )
 
-        sample = self._sample_at(start_idx)
-        target = self._sample_at(target_idx)
+        # Coalesce start + target reads into ONE asyncio.gather (halves the
+        # per-sample asyncio sync-bookkeeping cost vs two _sample_at calls).
+        raw = self._read_many_async([start_idx, target_idx])
+        sample = self._build_sample(raw[start_idx])
+        target = self._build_sample(raw[target_idx])
         sample["target_surface"] = target["surface_in"]
         sample["target_upper_air"] = target["upper_air_in"]
         sample["lead_time"] = torch.tensor(lead, dtype=torch.long)

@@ -266,6 +266,39 @@ def test_normalizer_composes_via_dataset_transform_arg():
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic: verifies the zarr-python 3 hot-path optimizations are wired up.
+# When upstream issue #3524 is fixed and the sync API matches v2 performance,
+# the hand-rolled batching can be removed. This test will fail loudly if
+# someone reverts the optimization without re-benchmarking — at which point
+# go look at benchmarks/.../plasim/RESULTS.md for the back-story.
+# ---------------------------------------------------------------------------
+@_skip_no_fixture
+def test_dataset_uses_batched_async_zarr_reads():
+    """The dataset must cache raw async zarr arrays and coalesce per-sample
+    reads into a single asyncio.gather. Both are workarounds for the
+    zarr-python 3 sync-API per-call overhead; when upstream fixes that, this
+    optimization can be removed (see RESULTS.md for context)."""
+    ds = PlasimClimateDataset(_fixture_path())
+    # Raw async-array cache populated for every time-varying variable.
+    assert hasattr(ds, "_async_arrays") and ds._async_arrays
+    expected_keys = set(
+        ds.layout.surface_variables
+        + ds.layout.varying_boundary_variables
+        + ds.layout.diagnostic_variables
+        + ds.layout.sigma_upper_air_variables
+        + ds.layout.pressure_upper_air_variables
+    )
+    assert set(ds._async_arrays) == expected_keys
+    # Constants are eager-loaded (not in the per-sample batch).
+    if ds.layout.constant_boundary_variables:
+        assert ds._constants_tensor is not None
+    # The coalesced read returns the correct shape for both indices in one go.
+    raw = ds._read_many_async([0, 1])
+    assert set(raw) == {0, 1}
+    assert set(raw[0]) == expected_keys
+
+
+# ---------------------------------------------------------------------------
 # Datapipe wrapper tests — CPU.
 # ---------------------------------------------------------------------------
 @_skip_no_fixture

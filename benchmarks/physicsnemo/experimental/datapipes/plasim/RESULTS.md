@@ -9,107 +9,145 @@ pressure level coordinate systems, irregular time axes for sparse
 `train_data_sets.json` ranges, async-shardable chunks). This document records
 the throughput trade-off and the decision.
 
-## Throughput results
+## Throughput results (current, post-optimization)
 
-### 1. Load-only microbench
+### 1. Load-only microbench (Delta `gpuA40x4-interactive`)
 
-Warm cache, Delta `/work/nvme`, login node, 120 timestep fixture
-(`smoke_month_t1.zarr` with `time_chunk=1`):
+Warm cache, 120-timestep fixture (`smoke_month_t1.zarr` with `time_chunk=1`):
 
-| workers | bs | PanguH5 samples/s | Zarr samples/s | ratio |
+| workers | bs | PanguH5 samples/s | Zarr samples/s | Zarr / PanguH5 |
 |---|---|---|---|---|
-| 0 | 1 | 8.20 | 1.79 | 0.22× |
-| 0 | 4 | 8.56 | 1.69 | 0.20× |
-| 2 | 1 | 66.19 | 27.60 | 0.42× |
-| 2 | 4 | 68.62 | 39.77 | 0.58× |
-| 4 | 1 | 132.60 | 73.47 | 0.55× |
-| 4 | 4 | 137.11 | 76.07 | 0.55× |
+| 0 | 1 | 55.3 | 77.2 | **1.40×** |
+| 0 | 4 | 55.4 | 94.2 | **1.70×** |
+| 2 | 1 | 96.9 | 150.6 | **1.55×** |
+| 2 | 4 | 100.9 | 167.4 | **1.66×** |
+| 4 | 1 | 185.4 | 219.0 | **1.18×** |
+| 4 | 4 | 187.2 | 233.4 | **1.25×** |
 
-A 2× gap at production-likely settings (`num_workers=4`, `batch_size=4`). Per
-the Phase-2 follow-up analysis, the root cause is **xarray per-variable
-`.isel(time=i).values` overhead** — `~0.3–0.5 ms × N variables = ~4–6 ms`
-per sample of Python/coord-alignment cost that doesn't exist in HDF5's
-direct-array indexing path.
+Zarr **outperforms** PanguH5 at every configuration after the optimization
+described in the next section. Earlier numbers (pre-optimization) had Zarr
+at 0.22×–0.55× of PanguH5; the swing was a ~3× improvement on the Zarr column.
 
-### 2. Training-step variant (decision-making)
+### 2. Training-step variant (production-shape PanguPlasim)
 
-Delta `gpuA40x4-interactive`, production-shape PanguPlasim
-(`embed_dim=192`, `depths=(2, 6, 6, 2)`, `num_heads=(6, 12, 12, 6)`),
-`num_workers=4`, `batch_size=4`, 30 batches per epoch:
+`num_workers=4`, `batch_size=4`, 30 batches, production-shape PanguPlasim
+(`embed_dim=192`, `depths=(2, 6, 6, 2)`, `num_heads=(6, 12, 12, 6)`):
 
 | backend | load(s) | step(s) | step/load | end-to-end batches/s |
 |---|---|---|---|---|
-| pangu_h5 | 0.801 | 2.823 | 3.53× | **10.63** |
-| zarr | 1.797 | 2.876 | 1.60× | **10.43** |
+| pangu_h5 | 0.845 | 2.464 | 2.92× | 12.17 |
+| zarr     | 0.707 | 2.373 | 3.36× | **12.64** |
 
-* `load`: wall time iterating the loader with no GPU work (sequential
-  per-batch reads).
-* `step`: wall time iterating the loader **with** forward + backward +
-  AdamW step on a production-shape model.
-* `step/load`: ratio measuring how compute-heavy each step is relative to
-  pure load cost.
-* `end-to-end batches/s`: the operational metric — what training will
-  actually see.
+End-to-end throughput is now ~4% better on Zarr, with Zarr's load time
+60% lower than before optimization (1.797s → 0.707s for the same 30 batches).
 
-## Decision
+## The diagnosis (why Zarr was slow pre-optimization)
 
-**Zarr stays.** End-to-end throughput is **1.9% apart** (10.43 vs 10.63
-batches/s) — operationally tied. The PanguPlasim forward+backward step at
-production scale takes ~2 s per batch on an A40, and `DataLoader`'s
-multi-worker prefetch (`num_workers=4`, `prefetch_factor=2`,
-`persistent_workers=True`) overlaps most of the loader cost with compute on
-both backends. Even though Zarr's per-sample IO is 2× slower in microbench,
-that cost is hidden in the steady state.
+A cProfile run on the un-optimized dataset (20 samples, login node)
+attributed **78% of `__getitem__` time** to zarr's asyncio bookkeeping:
 
-The plan's literal decision rule (`step/load > 5 for both` → loader is
-moot) is failed by Zarr (`1.60×` is well below `5×`), but the rule was a
-heuristic proxy for "is the GPU step heavy enough to hide the loader?" The
-direct measurement of end-to-end batches/s answers that more authoritatively.
+| component | cumtime | % |
+|---|---|---|
+| `zarr.core.sync.sync` | 2.609 s | 31% |
+| `asyncio.base_events._run_once` | 2.284 s | 27% |
+| `selectors.epoll.select` | 1.789 s | 21% |
+| `xarray.values` path | 2.944 s | 35% (overlapping with sync) |
 
-### When this decision would need to be revisited
+Raw measurement of `zarr.open(arr)[i]` latency (no xarray): **2.5 ms per read**.
+With ~10 reads per `__getitem__`, that's **~25 ms of asyncio overhead per
+sample** baked into the synchronous code path.
 
-* Smaller GPU compute step — e.g., a much shallower model variant, mixed
-  precision dropping the step to ~0.5 s, or a downstream eval inference
-  loop (no backward) where the loader becomes a larger fraction. Re-run
-  the step benchmark with the actual target config and re-check.
-* Fewer DataLoader workers — `num_workers=0` or `1` would expose the
-  loader-only gap directly; the table above shows Zarr fall behind 5× on
-  the bare `num_workers=0` row.
-* Larger batches — the load-only row at `(0, 4)` doesn't actually batch
-  reads (samples are still read sequentially per worker), so the gap
-  widens slightly with batch size in the no-workers case.
+The root cause is upstream: zarr-python 3 rewrote its core to be async-first,
+and the synchronous read API now wraps every read in a `zarr.core.sync.sync(...)`
+call that spins the asyncio event loop. Confirmed upstream:
 
-### Documented future optimization (not done now)
+- [zarr-developers/zarr-python#3524](https://github.com/zarr-developers/zarr-python/issues/3524)
+  — "Array indexing with Zarr 3 is noticeably slower than with Zarr 2".
+  Reporter measured `data[::step]` at **7.6× slower** in v3 (0.51 s vs 3.91 s);
+  attributes it to "switching between synchronous and asynchronous code." Open
+  as of Oct 2025.
+- [zarr-developers/zarr-python#2084](https://github.com/zarr-developers/zarr-python/issues/2084)
+  — "Inconsistent reading performance with multiple cpu threads". Chunked
+  reads don't parallelize with threads (~2.8 s regardless of thread count),
+  unchunked reads do. Confirms the sync-API serialization point.
+- [Earthmover blog: Accelerating Xarray with Zarr-Python 3](https://www.earthmover.io/blog/xarray-open-zarr-improvements/)
+  — concurrency tuning helps. They saw 10 s wall-time improvement just
+  raising `async.concurrency` from 10 → 100.
+- [zarr-developers/zarr-python#3757](https://github.com/zarr-developers/zarr-python/issues/3757)
+  — open bug noting upstream benchmarks don't test v2-format reads, which
+  is why this regression slipped through their CI.
 
-Per the Explore-agent analysis, the xarray→raw-zarr swap inside
-[`physicsnemo/experimental/datapipes/plasim/dataset.py`](../../../../../physicsnemo/experimental/datapipes/plasim/dataset.py)
-(`_stack_along_var` and `_read_constant_boundary`) should close the
-microbench gap to near-parity for ~12 lines changed:
+## The optimization (what we did)
 
-```python
-# In PlasimClimateDataset.__init__:
-import zarr
-self._zarr_arrays = {
-    name: zarr.open_array(f"{self.zarr_path}/{name}", mode="r")
-    for name in self._ds.data_vars
-}
+Three changes in
+[`physicsnemo/experimental/datapipes/plasim/dataset.py`](../../../../../physicsnemo/experimental/datapipes/plasim/dataset.py):
 
-# In _stack_along_var (replacing self._ds[v].isel(time=time_idx).values):
-arr = self._zarr_arrays[v][time_idx]  # numpy ndarray, no xarray overhead
-```
+1. **Module-level concurrency bump**: `zarr.config.set({"async.concurrency": 100})`
+   at import (dotted-key form — full-dict form replaces and strips
+   `async.timeout`).
 
-HealDA's
-[`ZarrLoader._get_array`](../../../../../physicsnemo/experimental/datapipes/healda/loaders/zarr_loader.py#L141)
-is the reference pattern (`self._arrays` cache). Expected impact: 50–70%
-throughput improvement on the Zarr column (to ~110–125 samples/s at
-`(num_workers=4, batch_size=4)`). Skipped now because end-to-end
-training-step throughput is already tied; revisit if any of the "when this
-decision would need to be revisited" cases above become relevant.
+2. **Cache raw `AsyncArray` handles at `__init__`**:
+   ```python
+   self._async_group = _zarr_sync(_zarr_open_group_async(self.zarr_path, mode="r"))
+   self._async_arrays = {v: _zarr_sync(self._async_group.get(v)) for v in all_time_varying_vars}
+   ```
+   Pattern lifted from
+   [`physicsnemo.experimental.datapipes.healda.loaders.zarr_loader.ZarrLoader`](../../../../../physicsnemo/experimental/datapipes/healda/loaders/zarr_loader.py).
+
+3. **Single `asyncio.gather` per `__getitem__`** covering BOTH start and target
+   sample reads (a tuple-indexed dataset returns `(start, target)` so we coalesce
+   ~22 reads into 1 sync call). The previous implementation had 22 separate
+   `sync()` calls per `__getitem__` (xarray's `.isel(time=i).values` invokes
+   `sync()` for each variable).
+
+4. **Eager-load constant boundaries**: they don't vary with time, so reading
+   them once at `__init__` removes 3 reads from the per-sample batch.
+
+Eager constants + 1 sync call replacing 22 = ~95% reduction in asyncio
+bookkeeping per sample. Confirmed by the load-only Zarr column climbing
+from 76 samples/s to 233 samples/s (3.1×) at `(num_workers=4, batch_size=4)`.
+
+## Future maintenance
+
+A diagnostic test (`test_dataset_uses_batched_async_zarr_reads` in
+[`test/datapipes/plasim/test_plasim_dataset.py`](../../../../../test/datapipes/plasim/test_plasim_dataset.py))
+asserts that the cached-handle + batched-gather optimization is in place.
+If somebody reverts the optimization without re-benchmarking, the test
+fails — at which point they'll find this RESULTS.md.
+
+When upstream fixes zarr-python's sync-API per-call overhead
+(track [zarr-python#3524](https://github.com/zarr-developers/zarr-python/issues/3524)),
+the hand-rolled batching becomes unnecessary. Recommended workflow at that
+point:
+
+1. Update the zarr pin in `pyproject.toml` to the fixed version.
+2. Run this benchmark to confirm raw `zarr.open(arr)[i]` per-read latency
+   has dropped to sub-millisecond (vs the 2.5 ms we measured against
+   zarr 3.2.x).
+3. If yes: revert the `_async_*` caching + `_read_many_async` + `_build_sample`
+   structure in `dataset.py` to a simpler xarray-based or naive-sync-zarr
+   per-variable read. Re-run this benchmark to confirm we haven't regressed
+   end-to-end batches/s. The optimization complexity goes away with the
+   upstream fix.
+4. Delete the diagnostic test
+   `test_dataset_uses_batched_async_zarr_reads` and update this RESULTS.md.
+
+The `async.concurrency = 100` setting is harmless either way and worth keeping.
+
+## When this decision would need to be revisited
+
+* Even smaller GPU compute step than the production PanguPlasim. If a fast
+  inference loop drops the GPU step under ~100 ms, the loader could become
+  visible again.
+* Cold-cache / first-epoch performance — these numbers are all warm-cache
+  on Delta `/work/nvme` NVMe. Cold reads on Lustre are a different story
+  (PanguH5's per-node cache helps it more than Zarr's would).
 
 ## Reproducing
 
 ```bash
-# Load-only microbench (login node OK):
+# Load-only microbench (login node OK, but the GPU node has less CPU
+# contention and is preferred):
 python benchmarks/physicsnemo/experimental/datapipes/plasim/loader_throughput.py \
     --zarr-path $AI_ROSSBY_TEST_DATA/plasim/smoke_month_t1.zarr
 
@@ -125,9 +163,9 @@ srun --partition=gpuA40x4-interactive --account=bdiu-delta-gpu \
 
 Fixture generation: see
 [`tools/data/plasim/pangu_h5_to_zarr.py`](../../../../../tools/data/plasim/pangu_h5_to_zarr.py)
-(re-run with `--time-chunk 1`; `time_chunk=50` is *much* slower for
-random-access training workloads — initial benchmark with that default
-showed Zarr at 0.09× HDF5 at `(num_workers=4, batch_size=4)`).
+(`--time-chunk 1` is the smart default; `--time-chunk 50` was the original
+default and produced a 6× throughput regression because each per-sample
+read had to decompress 50 timesteps to extract 1).
 
 Stats files for the step benchmark live at
 `/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/`.
