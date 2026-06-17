@@ -24,5 +24,6 @@ native (rebuilt-on-PhysicsNeMo) flavor:
 """
 
 from .pangu_plasim import PanguPlasim
+from .pangu_plasim_legacy import PanguPlasimLegacy
 
-__all__ = ["PanguPlasim"]
+__all__ = ["PanguPlasim", "PanguPlasimLegacy"]

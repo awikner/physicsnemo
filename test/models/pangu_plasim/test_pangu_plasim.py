@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the faithful ``PanguPlasim`` port.
+"""Tests for the faithful ``PanguPlasim`` and ``PanguPlasimLegacy`` ports.
 
-The Phase-1 unit tests will go here too (constructor parameter coverage, forward
-shape against a committed reference tensor, checkpoint roundtrip, etc.). This
-file currently carries the smoke test that proves the model wires together on a
+The Phase-1 unit tests (constructor parameter coverage, forward shape against
+committed reference tensors, checkpoint roundtrip) will go here too. This file
+currently carries the smoke tests that prove both models wire together on a
 real A40 — submitted via the ``delta-smoke-test`` skill on Delta's
 ``gpuA40x4-interactive`` partition (see ``hpc/delta.md``).
 """
@@ -27,20 +27,20 @@ import pytest
 import torch
 
 import physicsnemo
-from physicsnemo.models.pangu_plasim import PanguPlasim
+from physicsnemo.models.pangu_plasim import PanguPlasim, PanguPlasimLegacy
 from test import common
 
 
 # ---------------------------------------------------------------------------
-# Tiny config used by the smoke test. Designed to fit comfortably on one A40
-# and finish in < 1 minute including compile time.
+# Tiny config used by the smoke tests. Designed to fit comfortably on one A40
+# and finish in well under a minute including init.
 # ---------------------------------------------------------------------------
 _SMOKE_KWARGS = dict(
     surface_variables=["t2m", "u10", "v10"],
     upper_air_variables=["t", "u", "v", "q", "z"],
     constant_boundary_variables=["lsm"],
     # Must contain a recognized solar-radiation name; "rsdt" is one of two
-    # accepted by the model (see pangu_plasim.py).
+    # accepted by both models (see pangu_plasim.py / pangu_plasim_legacy.py).
     varying_boundary_variables=["rsdt"],
     levels=[200, 300, 500, 700, 850, 925, 1000, 1015],
     horizontal_resolution=[32, 64],
@@ -72,16 +72,25 @@ def _make_inputs(device, batch_size=1):
 
 @pytest.mark.smoke
 @pytest.mark.cuda
-def test_pangu_plasim_smoke(tmp_path):
-    """End-to-end CUDA smoke test for ``PanguPlasim``.
+@pytest.mark.parametrize(
+    "model_cls", [PanguPlasim, PanguPlasimLegacy], ids=["vae", "legacy"]
+)
+def test_pangu_plasim_smoke(tmp_path, model_cls):
+    """End-to-end CUDA smoke test for both ``PanguPlasim`` flavors.
 
     Exercises the full wiring on a real A40:
 
       1. Instantiate on CUDA.
-      2. Forward pass (eval mode; the VAE encoder-2 branch is off).
+      2. Forward pass (eval mode; PanguPlasim's VAE encoder-2 branch is off).
       3. Backward on a trivial sum-loss; AdamW step.
       4. ``.mdlus`` checkpoint roundtrip via ``Module.from_checkpoint``;
          post-load forward matches the pre-save output in eval mode.
+
+    PanguPlasim's ``reparameterize`` calls ``torch.randn_like`` unconditionally
+    (it is stochastic by design even in eval mode); the checkpoint comparison
+    seeds ``torch.manual_seed`` identically before each forward so the latent
+    draw matches. PanguPlasimLegacy is deterministic in eval mode but uses the
+    same protocol for code symmetry.
 
     Intentionally **not** marked with the standard ``device`` fixture — smoke
     tests are explicitly CUDA-only per ``hpc/delta.md``.
@@ -93,17 +102,18 @@ def test_pangu_plasim_smoke(tmp_path):
     torch.manual_seed(0)
 
     # 1. Instantiate
-    model = PanguPlasim(**_SMOKE_KWARGS).to(device)
+    model = model_cls(**_SMOKE_KWARGS).to(device)
 
     inputs = _make_inputs(device, batch_size=1)
 
-    # 2. Forward (eval, no VAE encoder-2)
+    # 2. Forward (eval; for PanguPlasim, no VAE encoder-2 path)
     model.eval()
     with torch.no_grad():
         out_eval = model(*inputs)
 
-    # PanguPlasim returns a 6-tuple when diagnostic_variables is empty (this
-    # smoke config): (surface, upper_air, mu, sigma, mu2_zero, sigma2_zero).
+    # Both flavors return a 6-tuple in eval mode with diagnostic_variables empty:
+    #   PanguPlasim      -> (surface, upper_air, mu, sigma, 0, 0)
+    #   PanguPlasimLegacy-> (surface, upper_air, 0, 0, 0, 0)
     assert len(out_eval) == 6
     out_surface, out_upper_air = out_eval[0], out_eval[1]
 
@@ -135,16 +145,13 @@ def test_pangu_plasim_smoke(tmp_path):
     optimizer.step()
     assert torch.isfinite(loss).all()
 
-    # 4. Checkpoint roundtrip. The VAE ``reparameterize`` step calls
-    # ``torch.randn_like`` unconditionally — the model is stochastic in eval
-    # mode by design. Seed identically before each forward so the latent draw
-    # matches and the comparison reflects only checkpoint fidelity.
+    # 4. Checkpoint roundtrip
     model.eval()
     torch.manual_seed(42)
     with torch.no_grad():
         out_pre_save = model(*inputs)
 
-    ckpt_path = tmp_path / "pangu_plasim_smoke.mdlus"
+    ckpt_path = tmp_path / f"{model_cls.__name__}_smoke.mdlus"
     model.save(str(ckpt_path))
 
     loaded = physicsnemo.Module.from_checkpoint(str(ckpt_path)).to(device).eval()
