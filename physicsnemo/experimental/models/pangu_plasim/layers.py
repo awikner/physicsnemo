@@ -34,14 +34,19 @@ import torch.nn.functional as F
 from timm.layers import DropPath, trunc_normal_
 from torch import nn
 
-from ._pangu_utils import (
+# Phase A swap: pure utilities now come from physicsnemo.nn.module.utils
+# (equivalence verified in test/models/pangu_plasim/test_utils_equivalence.py).
+# get_shift_window_mask stays local for now — physicsnemo's version has the
+# longitude-partitioning bug from issue #1599; Phase C vendors a fixed copy.
+from physicsnemo.nn.module.utils import (
     crop3d,
     get_earth_position_index,
     get_pad3d,
-    get_shift_window_mask,
     window_partition,
     window_reverse,
 )
+
+from ._pangu_utils import get_shift_window_mask
 
 
 class Mask(nn.Module):

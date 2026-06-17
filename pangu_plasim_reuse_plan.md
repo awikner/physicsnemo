@@ -39,16 +39,37 @@ State-dict key compatibility note: physicsnemo's `Transformer3DBlock` and `Fuser
 
 ## 2. Phased plan
 
-### Phase A — Safe utility swaps
+### Phase A — Safe utility swaps (narrowed scope)
 
-**Scope:** swap pure tensor utilities to `physicsnemo.nn.module.utils`:
+**Scope:** swap **pure tensor utilities** to `physicsnemo.nn.module.utils`:
 
-- `PatchEmbed2D`, `PatchEmbed3D`, `PatchRecovery2D`, `PatchRecovery3D`
 - `crop2d`, `crop3d`, `get_pad2d`, `get_pad3d`, `get_earth_position_index`
 - `window_partition`, `window_reverse`
 
-**Test gate:** add `test/models/pangu_plasim/test_utils_equivalence.py` with one
-`torch.equal`-level assertion per swapped util. Failures here block Phase A.
+**Deferred to follow-up (A.5):** `PatchEmbed2D`, `PatchEmbed3D`,
+`PatchRecovery2D`, `PatchRecovery3D`. Reasons:
+
+- Our local `PatchEmbed2D` / `PatchEmbed3D` set extra attributes
+  (`output_size`, `padded_front`) that the model classes read in
+  `__init__`. Swapping requires moving those computations to the model side
+  or wrapping the physicsnemo class.
+- The local `PatchEmbed3D` carries a faithful bug from the PanguWeather
+  v2.0 source: when `l_remainder != 0`, ``padding_front = l_pad -
+  padding_front`` uses ``padding_front=0`` initial value and ends up swapping
+  the front/back split vs. physicsnemo's correct ``padding_front = l_pad //
+  2``. The output sum is identical (so output shape is identical), but the
+  asymmetry direction flips. `padded_front` propagates to
+  `SubPixelConvICNR_3D` recovery heads. This is bit-identical for our
+  current smoke config (8 levels, `l_remainder == 0`) but would change
+  behavior for canonical ERA5 configs (13 levels, `subpixel_deconv=True`).
+  Defer until we can decide whether to: (a) preserve the source's behavior
+  by keeping local `PatchEmbed3D`, (b) follow physicsnemo's correct path
+  and patch the SubPixelConv recovery code accordingly, or (c) PR
+  `padded_front` exposure to upstream.
+
+**Test gate:** add `test/models/pangu_plasim/test_utils_equivalence.py` with
+one `torch.equal`-level assertion per swapped util. Failures here block
+Phase A.
 
 **Cleanup:** in `_pangu_utils.py`, remove the functions/classes that no longer
 have any local consumer. What stays in `_pangu_utils.py` after Phase A:
