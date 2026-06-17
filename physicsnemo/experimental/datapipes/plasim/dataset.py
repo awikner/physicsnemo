@@ -156,9 +156,11 @@ class PlasimClimateDataset(Dataset):
         zarr_path: str | Path,
         consolidated: bool = True,
         pin_memory_dtype: torch.dtype = torch.float32,
+        transform=None,
     ) -> None:
         self.zarr_path = str(zarr_path)
         self.dtype = pin_memory_dtype
+        self.transform = transform
         # `xr.open_zarr` is lazy; the actual slice reads happen in __getitem__.
         # consolidated=True is the fast path when the store has consolidated
         # metadata; xarray transparently falls back if it doesn't.
@@ -315,4 +317,6 @@ class PlasimClimateDataset(Dataset):
         sample["target_upper_air"] = target["upper_air_in"]
         sample["lead_time"] = torch.tensor(lead, dtype=torch.long)
         sample["time_idx"] = torch.tensor(start_idx, dtype=torch.long)
+        if self.transform is not None:
+            sample = self.transform(sample)
         return sample

@@ -44,7 +44,20 @@ with warnings.catch_warnings():
     from physicsnemo.experimental.datapipes.plasim import (
         LeadTimePairSampler,
         PlasimClimateDataset,
+        PlasimNormalizer,
     )
+    from physicsnemo.experimental.models.pangu_plasim import PanguPlasim
+
+_STATS_DIR = Path(
+    "/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data"
+)
+_MEAN_PATH = _STATS_DIR / "data_12-132_mean_sigma.nc"
+_STD_PATH = _STATS_DIR / "data_12-132_std_sigma.nc"
+_HAS_STATS = _MEAN_PATH.exists() and _STD_PATH.exists()
+_skip_no_stats = pytest.mark.skipif(
+    not _HAS_STATS,
+    reason=f"PLASIM stats files missing at {_STATS_DIR}; expected mean+std NetCDFs.",
+)
 
 
 def _fixture_path() -> Path | None:
@@ -198,6 +211,60 @@ def test_sampler_rejects_lead_longer_than_dataset():
 
 
 # ---------------------------------------------------------------------------
+# Normalizer tests — CPU.
+# ---------------------------------------------------------------------------
+@_skip_no_fixture
+@_skip_no_stats
+def test_normalizer_aligns_to_dataset_layout():
+    ds = PlasimClimateDataset(_fixture_path())
+    norm = PlasimNormalizer.from_dataset(ds, mean_path=_MEAN_PATH, std_path=_STD_PATH)
+    # 2 surface vars
+    assert norm.surface_mean.shape == (2, 1, 1)
+    # 5 upper-air vars (4 sigma + 1 pressure) × 10 levels
+    assert norm.upper_air_mean.shape == (5, 10, 1, 1)
+    assert norm.upper_air_std.shape == (5, 10, 1, 1)
+    # 3 varying boundaries
+    assert norm.varying_mean.shape == (3, 1, 1)
+
+
+@_skip_no_fixture
+@_skip_no_stats
+def test_normalizer_produces_near_zero_mean_unit_std():
+    ds = PlasimClimateDataset(_fixture_path(), transform=None)
+    norm = PlasimNormalizer.from_dataset(ds, mean_path=_MEAN_PATH, std_path=_STD_PATH)
+    sample = ds[0]
+    normalized = norm(sample)
+
+    # Raw is far from N(0, 1); pl ~ 11, tas ~ 278.
+    assert sample["surface_in"].mean().abs() > 1.0
+    # Post-normalization stats — sample-level, lenient (the per-channel
+    # variance is what's normalized exactly; here we want a coarse check that
+    # the magnitudes are sane).
+    for k in ("surface_in", "upper_air_in", "target_surface", "target_upper_air"):
+        assert normalized[k].mean().abs() < 0.5, f"{k} mean far from 0"
+        assert 0.3 < normalized[k].std() < 3.0, f"{k} std unreasonable"
+    # Constant boundaries and diagnostics are NOT normalized by default —
+    # they should be passed through as the same tensor object. (Can't use
+    # torch.equal because `lsm` carries NaN at high latitudes by design and
+    # NaN != NaN per IEEE 754.)
+    assert normalized["constant_boundary"] is sample["constant_boundary"]
+    assert normalized["diagnostic"] is sample["diagnostic"]
+
+
+@_skip_no_fixture
+@_skip_no_stats
+def test_normalizer_composes_via_dataset_transform_arg():
+    ds_raw = PlasimClimateDataset(_fixture_path())
+    norm = PlasimNormalizer.from_dataset(
+        ds_raw, mean_path=_MEAN_PATH, std_path=_STD_PATH
+    )
+    ds = PlasimClimateDataset(_fixture_path(), transform=norm)
+    sample = ds[0]
+    # Same effect as applying norm manually after the un-transformed dataset.
+    assert sample["surface_in"].mean().abs() < 0.5
+
+
+# ---------------------------------------------------------------------------
 # GPU smoke — required on Delta gpuA40x4-interactive per hpc/delta.md.
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
@@ -247,4 +314,86 @@ def test_plasim_dataset_smoke_iterates_on_cuda():
         n_iter += 1
     assert n_iter == 4
 
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.smoke
+@pytest.mark.cuda
+@_skip_no_fixture
+@_skip_no_stats
+def test_plasim_dataset_with_normalizer_drives_pangu_plasim():
+    """End-to-end: real Zarr → normalizer → PanguPlasim forward + backward + step on CUDA.
+
+    Closes the loop on Phase 2: PLASIM stats are loaded, applied to the sample
+    on-device, the model's transformer sees normalized inputs and produces a
+    finite loss, AdamW takes one step. Anything non-finite here means either
+    the stats files are misaligned with the Zarr layout, or the model wiring
+    has regressed on real-data magnitudes.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("smoke test requires CUDA")
+
+    device = torch.device("cuda:0")
+    ds = PlasimClimateDataset(_fixture_path())
+    normalizer = PlasimNormalizer.from_dataset(
+        ds, mean_path=_MEAN_PATH, std_path=_STD_PATH
+    ).to(device)
+
+    model = PanguPlasim(
+        surface_variables=ds.layout.surface_variables,
+        upper_air_variables=ds.upper_air_variable_names,
+        constant_boundary_variables=ds.layout.constant_boundary_variables,
+        varying_boundary_variables=ds.layout.varying_boundary_variables,
+        diagnostic_variables=ds.layout.diagnostic_variables,
+        levels=ds.sigma_levels,  # length-only is what the model reads
+        horizontal_resolution=list(ds.horizontal_resolution),
+        patch_size=[2, 4, 4],
+        depths=[1, 1, 1, 1],
+        num_heads=[2, 4, 4, 2],
+        embed_dim=64,
+        window_size=[2, 4, 8],
+    ).to(device)
+
+    sampler = LeadTimePairSampler(
+        dataset_length=len(ds),
+        forecast_lead_times=[1, 4],
+        num_samples=2,
+        seed=0,
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    model.train()
+    n_steps = 0
+    for start, lead in sampler:
+        raw = ds[(start, lead)]
+        on_device = {k: v.to(device) for k, v in raw.items()}
+        sample = normalizer(on_device)
+        # PLASIM lsm carries NaN at high latitudes by convention; without a
+        # NaN-fill the patch-embed -> attention path produces NaN losses. A
+        # proper NanFillTransform is a follow-up; for the smoke we just zero
+        # them out on the boundary fields that can carry them.
+        sample["constant_boundary"] = torch.nan_to_num(
+            sample["constant_boundary"], nan=0.0
+        )
+        sample["varying_boundary"] = torch.nan_to_num(
+            sample["varying_boundary"], nan=0.0
+        )
+
+        optimizer.zero_grad()
+        out = model(
+            sample["surface_in"].unsqueeze(0),
+            sample["constant_boundary"].unsqueeze(0),
+            sample["varying_boundary"].unsqueeze(0),
+            sample["upper_air_in"].unsqueeze(0),
+        )
+        loss = sum(t.sum() for t in out if t.requires_grad)
+        assert torch.isfinite(loss).all(), (
+            f"NaN/inf loss at start={start}, lead={lead}; normalizer or model "
+            "regression?"
+        )
+        loss.backward()
+        optimizer.step()
+        n_steps += 1
+    assert n_steps == 2
+
+    del model, normalizer
     torch.cuda.empty_cache()
