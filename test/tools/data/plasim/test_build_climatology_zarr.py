@@ -163,7 +163,11 @@ def test_tolerance_union_keeps_distinct_values():
 # End-to-end synthetic round-trip
 # ---------------------------------------------------------------------------
 def test_synthetic_round_trip_climatology_only(tmp_path):
-    """No bias dir — climatology-only store, all bias vars absent."""
+    """No bias dir — climatology-only store, all bias vars absent.
+
+    The schema (v1.1) always emits a leading `stat` axis (mean + std). With no
+    std-climatology source, the std slot is NaN-filled.
+    """
     clim, sigma, pressure, n_lat, n_lon = _synth_climatology()
     out = build_climatology_bias_dataset(
         clim, {}, sigma_dim="lev", pressure_dim="plev", n_workers=1
@@ -171,7 +175,14 @@ def test_synthetic_round_trip_climatology_only(tmp_path):
     # Only the climatology vars survive.
     assert "ta" in out.data_vars
     assert "ta_bias_annual_sigma" not in out.data_vars
-    assert out["ta"].dims == ("dayofyear", "sigma_level", "lat", "lon")
+    assert out["ta"].dims == ("stat", "dayofyear", "sigma_level", "lat", "lon")
+    assert list(out.coords["stat"].values) == ["mean", "std"]
+    # PLASIM-shaped: no std source → std slot is NaN.
+    assert np.isnan(out["ta"].sel(stat="std").values).all()
+    # The mean slot reproduces the source.
+    np.testing.assert_allclose(
+        out["ta"].sel(stat="mean").values, clim["ta"].values, atol=1e-6
+    )
     assert out.coords["dayofyear"].values.tolist() == [1, 2, 3, 4, 5]
 
 
@@ -193,7 +204,7 @@ def test_synthetic_round_trip_with_bias(tmp_path):
         clim, groups, sigma_dim="lev", pressure_dim="plev", n_workers=2
     )
     # `ta` got both sigma + pressure bias arrays.
-    assert out["ta"].dims == ("dayofyear", "sigma_level", "lat", "lon")
+    assert out["ta"].dims == ("stat", "dayofyear", "sigma_level", "lat", "lon")
     assert out["ta_bias_annual_sigma"].dims == ("sigma_level", "lat", "lon")
     assert out["ta_bias_annual_pressure"].dims == ("pressure_level", "lat", "lon")
     assert out["ta_bias_diurnal_sigma"].dims == ("hour_of_day", "sigma_level", "lat", "lon")
@@ -205,7 +216,65 @@ def test_synthetic_round_trip_with_bias(tmp_path):
     )
     assert out["tas_bias_annual"].dims == ("lat", "lon")
     assert out["tas_bias_diurnal"].dims == ("hour_of_day", "lat", "lon")
-    assert out["zg"].dims == ("dayofyear", "pressure_level", "lat", "lon")
+    assert out["zg"].dims == ("stat", "dayofyear", "pressure_level", "lat", "lon")
+
+
+def test_with_std_climatology_populates_std_slot(tmp_path):
+    """ERA5-style: pass both mean + std climatology; output's std slot matches source."""
+    clim, sigma, pressure, n_lat, n_lon = _synth_climatology()
+    # Build a synthetic std climatology with deterministic values per-var.
+    std_clim = xr.Dataset(
+        {
+            "ta": (
+                ("time", "lev", "lat", "lon"),
+                np.full(clim["ta"].shape, 2.0, dtype="float32"),
+            ),
+            "zg": (
+                ("time", "plev", "lat", "lon"),
+                np.full(clim["zg"].shape, 100.0, dtype="float32"),
+            ),
+            "tas": (
+                ("time", "lat", "lon"),
+                np.full(clim["tas"].shape, 5.0, dtype="float32"),
+            ),
+        },
+        coords=clim.coords,
+    )
+    out = build_climatology_bias_dataset(
+        clim,
+        {},
+        std_climatology_ds=std_clim,
+        sigma_dim="lev",
+        pressure_dim="plev",
+        n_workers=1,
+    )
+    # The std slot is populated, not NaN.
+    np.testing.assert_array_equal(
+        out["ta"].sel(stat="std").values, std_clim["ta"].values
+    )
+    np.testing.assert_array_equal(
+        out["zg"].sel(stat="std").values, std_clim["zg"].values
+    )
+    np.testing.assert_array_equal(
+        out["tas"].sel(stat="std").values, std_clim["tas"].values
+    )
+    # The mean slot is unchanged from the climatology-only case.
+    np.testing.assert_allclose(
+        out["ta"].sel(stat="mean").values, clim["ta"].values, atol=1e-6
+    )
+
+
+def test_stat_axis_always_present(tmp_path):
+    """Schema invariant: every climatology data var has a leading `stat` axis,
+    even if the source has only mean."""
+    clim, _, _, _, _ = _synth_climatology()
+    out = build_climatology_bias_dataset(
+        clim, {}, sigma_dim="lev", pressure_dim="plev", n_workers=1
+    )
+    for v in ("ta", "zg", "tas"):
+        assert out[v].dims[0] == "stat"
+        assert out[v].sizes["stat"] == 2
+        assert list(out[v].coords["stat"].values) == ["mean", "std"]
 
 
 def test_zarr_write_round_trip(tmp_path):

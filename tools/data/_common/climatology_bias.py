@@ -50,8 +50,9 @@ from .bias import (
 logger = logging.getLogger(__name__)
 
 
-CLIMATOLOGY_BIAS_SCHEMA_VERSION = "1.0"
+CLIMATOLOGY_BIAS_SCHEMA_VERSION = "1.1"
 DIURNAL_HOURS = (0, 6, 12, 18)
+CLIMATOLOGY_STAT_NAMES = ("mean", "std")
 
 
 def _resolve_pool_size(default: int = 32) -> int:
@@ -423,21 +424,32 @@ def build_climatology_bias_dataset(
     climatology_ds: xr.Dataset,
     bias_groups: dict[str, VariableBiasGroup],
     *,
+    std_climatology_ds: Optional[xr.Dataset] = None,
     sigma_dim: str = "lev",
     pressure_dim: str = "plev",
     n_workers: int = 0,
 ) -> xr.Dataset:
     """Assemble the unified climatology + bias xarray.Dataset.
 
+    Each variable's daily climatology array carries a leading ``stat`` axis of
+    length 2 (``"mean"``, ``"std"``). When ``std_climatology_ds`` is omitted
+    (e.g. PLASIM source has no separate std file), the std slot is NaN-filled.
+    ERA5 supplies both mean + std NetCDFs; downstream consumers always see the
+    same ``(stat, dayofyear, [level,] lat, lon)`` shape.
+
     Parameters
     ----------
     climatology_ds : xarray.Dataset
-        Source climatology (e.g. ``sim52/sigma_data/climatology.nc``), with
-        ``time`` (366 daily samples), ``lev`` (sigma), ``plev`` (pressure),
-        ``lat``, ``lon`` coords.
+        Source MEAN climatology (e.g. ``sim52/sigma_data/climatology.nc`` for
+        PLASIM, ``1979-2018_mean_climatology.nc`` for ERA5), with ``time``
+        (366 daily samples), ``lev`` (sigma), ``plev`` (pressure), ``lat``,
+        ``lon`` coords.
     bias_groups : dict[str, VariableBiasGroup]
         Output of :func:`tools.data._common.bias.scan_bias_dir`. Pass an empty
         dict to build a climatology-only store (the ERA5 case).
+    std_climatology_ds : xarray.Dataset, optional
+        Source STD climatology, same shape as ``climatology_ds``. When ``None``
+        the ``std`` slot of the leading ``stat`` axis is NaN-filled.
     sigma_dim, pressure_dim : str
         Names of the level coords in the source climatology. Default matches
         PLASIM / E3SM (``lev``, ``plev``).
@@ -505,8 +517,10 @@ def build_climatology_bias_dataset(
 
     out_data: dict[str, xr.DataArray] = {}
     for var in all_vars:
-        # 1) climatology: read from source or NaN-fill via the bias group's levels.
-        clim_da = _climatology_layout_for_var(
+        # 1) climatology: pluck mean + std (NaN if absent), stack on a leading
+        # `stat` axis of length 2. ``std_climatology_ds`` is optional — when
+        # absent the std slot stays all-NaN (PLASIM convention).
+        mean_da = _climatology_layout_for_var(
             climatology_ds,
             var,
             sigma_levels=sigma_levels,
@@ -514,7 +528,17 @@ def build_climatology_bias_dataset(
             sigma_dim=sigma_dim,
             pressure_dim=pressure_dim,
         )
-        if clim_da is None:
+        std_da = None
+        if std_climatology_ds is not None:
+            std_da = _climatology_layout_for_var(
+                std_climatology_ds,
+                var,
+                sigma_levels=sigma_levels,
+                pressure_levels=pressure_levels,
+                sigma_dim=sigma_dim,
+                pressure_dim=pressure_dim,
+            )
+        if mean_da is None:
             # Var exists only in the bias dir. Choose level dim from bias levels.
             group = bias_groups.get(var)
             if group and group.levels:
@@ -529,7 +553,7 @@ def build_climatology_bias_dataset(
                     levels, level_dim = None, None
             else:
                 levels, level_dim = None, None
-            clim_da = _empty_climatology_da(
+            mean_da = _empty_climatology_da(
                 var,
                 levels=levels,
                 level_dim=level_dim,
@@ -539,7 +563,15 @@ def build_climatology_bias_dataset(
                 lat=lat,
                 lon=lon,
             )
-        out_data[var] = clim_da.astype("float32")
+        if std_da is None:
+            # Build a NaN-filled std with the same dims as the mean.
+            std_buf = np.full(mean_da.shape, np.nan, dtype="float32")
+            std_da = xr.DataArray(
+                std_buf, dims=mean_da.dims, coords=mean_da.coords
+            )
+        out_data[var] = xr.concat(
+            [mean_da.astype("float32"), std_da.astype("float32")], dim="stat"
+        ).assign_coords(stat=("stat", list(CLIMATOLOGY_STAT_NAMES)))
 
         # 2) bias_annual + bias_diurnal: from the bias group (NaN if absent).
         # The helper emits per-axis variables (`{var}_bias_annual_sigma`,

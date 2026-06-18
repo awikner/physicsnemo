@@ -67,7 +67,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--climatology",
         type=Path,
         required=True,
-        help="Source daily climatology NetCDF (e.g. sim52/sigma_data/climatology.nc).",
+        help="Source daily MEAN climatology NetCDF (e.g. sim52/sigma_data/climatology.nc).",
+    )
+    p.add_argument(
+        "--std-climatology",
+        type=Path,
+        default=None,
+        help="Optional source daily STD climatology NetCDF, same shape as --climatology. "
+        "When omitted, the output Zarr's `std` slot of the `stat` axis is NaN-filled.",
     )
     p.add_argument(
         "--bias-dir",
@@ -110,13 +117,22 @@ def main(argv: list[str] | None = None) -> int:
 
     climatology = xr.open_dataset(args.climatology, use_cftime=True)
     logger.info(
-        "loaded climatology %s (%d vars, dayofyear=%d, lat=%d, lon=%d)",
+        "loaded mean climatology %s (%d vars, dayofyear=%d, lat=%d, lon=%d)",
         args.climatology,
         len(climatology.data_vars),
         climatology.sizes.get("time", 0),
         climatology.sizes.get("lat", 0),
         climatology.sizes.get("lon", 0),
     )
+
+    std_climatology = None
+    if args.std_climatology is not None:
+        std_climatology = xr.open_dataset(args.std_climatology, use_cftime=True)
+        logger.info(
+            "loaded std climatology %s (%d vars)",
+            args.std_climatology,
+            len(std_climatology.data_vars),
+        )
 
     if args.bias_dir is not None:
         bias_groups = scan_bias_dir(args.bias_dir)
@@ -133,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     out_ds = build_climatology_bias_dataset(
         climatology,
         bias_groups,
+        std_climatology_ds=std_climatology,
         sigma_dim="lev",
         pressure_dim="plev",
         n_workers=args.n_workers,
