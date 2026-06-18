@@ -52,7 +52,10 @@ with warnings.catch_warnings():
         PlasimClimateDataset,
         PlasimNormalizer,
     )
-    from physicsnemo.experimental.models.pangu_plasim import PanguPlasimLegacy
+    from physicsnemo.experimental.models.pangu_plasim import (
+        PanguPlasim,
+        PanguPlasimLegacy,
+    )
 
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.utils import load_checkpoint, save_checkpoint
@@ -67,9 +70,25 @@ def _resolve_path(p: str | None) -> str | None:
     return to_absolute_path(p) if p else None
 
 
-def build_model(cfg_model: DictConfig) -> PanguPlasimLegacy:
-    """Instantiate PanguPlasimLegacy from the model sub-config."""
-    return PanguPlasimLegacy(
+def build_model(cfg_model: DictConfig):
+    """Instantiate the model selected by ``cfg.model.model_type``.
+
+    ``model_type``:
+
+    * ``"PanguPlasimLegacy"`` (default) — deterministic no-VAE variant.
+    * ``"PanguPlasim"`` — full VAE-enabled variant; pairs with
+      ``cfg.loss.vae_kl_weight > 0`` to enable the KL term in ``train_step``.
+
+    Both variants share the same constructor kwargs.
+    """
+    model_type = str(cfg_model.get("model_type", "PanguPlasimLegacy"))
+    cls = {"PanguPlasim": PanguPlasim, "PanguPlasimLegacy": PanguPlasimLegacy}.get(model_type)
+    if cls is None:
+        raise ValueError(
+            f"Unknown cfg.model.model_type={model_type!r}; expected "
+            "'PanguPlasim' or 'PanguPlasimLegacy'"
+        )
+    return cls(
         surface_variables=list(cfg_model.surface_variables),
         upper_air_variables=list(cfg_model.upper_air_variables),
         constant_boundary_variables=list(cfg_model.constant_boundary_variables),
@@ -304,6 +323,7 @@ def main(cfg: DictConfig) -> None:
                     scheduler=scheduler,
                     batch=batch,
                     has_diagnostic=has_diagnostic,
+                    vae_kl_weight=float(cfg.loss.get("vae_kl_weight", 0.0)),
                 )
                 if float(cfg.grad_clip_norm) > 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -317,6 +337,7 @@ def main(cfg: DictConfig) -> None:
                         "surface": losses["surface"],
                         "upper_air": losses["upper_air"],
                         "diagnostic": losses["diagnostic"],
+                        "vae_kl": losses["vae_kl"],
                     }
                 )
             log.log_epoch({"lr": optimizer.param_groups[0]["lr"]})

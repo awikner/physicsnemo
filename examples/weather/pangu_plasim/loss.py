@@ -12,10 +12,10 @@ Faithful to PanguWeather v2.0's loss formulation:
 * Per-variable weights (uniform if not provided).
 * Diagnostic loss is a separately-weighted term added at the end.
 
-The PanguPlasimLegacy (no-VAE) variant uses just this loss; the VAE-enabled
-PanguPlasim adds a KL term, implemented as a separate ``vae_kl_loss`` function
-that recipes may sum into ``total = task_loss + kl_weight * vae_kl_loss``
-(deferred until the VAE training commit).
+The PanguPlasimLegacy (no-VAE) variant uses just :class:`PanguPlasimLoss`;
+the VAE-enabled PanguPlasim additionally pulls
+:func:`vae_kl_loss` over its dual-encoder ``(mu, logvar)`` outputs.
+Recipes sum the two as ``total = task_loss + kl_weight * vae_kl_loss``.
 """
 
 from __future__ import annotations
@@ -120,6 +120,59 @@ def per_var_lat_weighted_residual(
     lw_shape[-2] = lat_weights.shape[0]
     lw = lat_weights.view(lw_shape)
     return (resid * pv * lw).mean()
+
+
+def vae_kl_loss(
+    mu_q: torch.Tensor,
+    logvar_q: torch.Tensor,
+    mu_p: Optional[torch.Tensor] = None,
+    logvar_p: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    r"""KL divergence between two diagonal-covariance Gaussians.
+
+    Faithful to PanguWeather v2.0's ``Kl_divergence_gaussians`` in
+    ``utils/losses.py``. PanguPlasim's two encoder heads emit
+    ``(mu_q, logvar_q)`` and ``(mu_p, logvar_p)`` — passing both pairs computes
+    :math:`KL(q \,\|\, p)` between the encoder posteriors. With ``mu_p`` /
+    ``logvar_p`` left ``None``, the prior is the standard normal
+    :math:`p \sim \mathcal{N}(0, I)`.
+
+    Parameters
+    ----------
+    mu_q, logvar_q : torch.Tensor
+        Mean and log-variance of the posterior :math:`q`, same shape.
+    mu_p, logvar_p : torch.Tensor or None, optional
+        Mean and log-variance of the prior :math:`p`. ``None`` → standard
+        normal.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar tensor — the mean over all elements of
+
+        .. math::
+
+            \tfrac{1}{2}\bigl[\log\sigma_p^2 - \log\sigma_q^2
+            + (\sigma_q^2 + (\mu_q - \mu_p)^2) / \sigma_p^2 - 1\bigr]
+
+    Notes
+    -----
+    PanguPlasim's model stores ``logvar`` under the attribute name ``sigma``
+    — the model code outputs :math:`\log(\sigma^2)`, not :math:`\sigma`.
+    The trainer passes those values straight through here.
+    """
+    if mu_p is None:
+        mu_p = torch.zeros_like(mu_q)
+    if logvar_p is None:
+        logvar_p = torch.zeros_like(logvar_q)
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p)
+    kl = 0.5 * (
+        logvar_p - logvar_q
+        + (var_q + (mu_q - mu_p).pow(2)) / var_p
+        - 1.0
+    )
+    return kl.mean()
 
 
 class PanguPlasimLoss(torch.nn.Module):

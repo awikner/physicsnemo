@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# MAE / L1 task loss + VAE-KL term — PanguPlasim (VAE) default.
+# Pairs with `model=pangu_plasim` + `scheduler=cosine_warmup`.
+
+loss_type: l1
+surface_weight: 1.0
+upper_air_weight: 1.0
+diagnostic_weight: 1.0
+surface_var_weights: {}
+upper_air_var_weights: {}
+diagnostic_var_weights: {}
+
+# Weight on the dual-encoder KL term. Default 1e-4 is conservative — small
+# enough that the task loss dominates early in training, large enough that the
+# encoder posteriors can't drift to far-from-prior solutions.
+vae_kl_weight: 1.0e-4

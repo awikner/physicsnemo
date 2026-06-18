@@ -98,26 +98,52 @@ def train_step(
     scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
     batch: dict[str, torch.Tensor],
     has_diagnostic: bool,
+    vae_kl_weight: float = 0.0,
 ) -> dict[str, torch.Tensor]:
     """One optimizer step: forward + backward + step + scheduler tick.
 
-    Returns the loss dict from :class:`PanguPlasimLoss` for the logger.
-    Compatible with PanguPlasimLegacy (5- or 7-tuple output with zero latent
-    placeholders) — the trailing four zero-tensors are ignored.
+    Returns the loss dict from :class:`PanguPlasimLoss` plus a ``"vae_kl"``
+    entry. Compatible with both PanguPlasimLegacy (5- or 7-tuple output with
+    zero latent placeholders — `vae_kl` stays ~0) and PanguPlasim with VAE
+    (6- or 7-tuple with real ``mu``/``logvar``).
+
+    When ``vae_kl_weight > 0`` and the model emits real ``(mu, logvar,
+    mu_e2, logvar_e2)`` tuples, the KL divergence between the two encoder
+    posteriors is computed and added: ``total = task_loss + vae_kl_weight * kl``.
+    For PanguPlasimLegacy the model returns zero placeholders for the latent
+    fields, so the KL evaluates to 0 and the task loss is unchanged
+    regardless of ``vae_kl_weight``.
     """
+    from loss import vae_kl_loss  # local import keeps train_loop / loss decoupled at import time
+
     optimizer.zero_grad(set_to_none=True)
     out = model(
         batch["surface_in"],
         batch["constant_boundary"],
         batch["varying_boundary"],
         batch["upper_air_in"],
+        target_surface=batch.get("target_surface"),
+        target_upper_air=batch.get("target_upper_air"),
+        train=True,
+    ) if _model_accepts_train_kwarg(model) else model(
+        batch["surface_in"],
+        batch["constant_boundary"],
+        batch["varying_boundary"],
+        batch["upper_air_in"],
     )
-    # Output tuple: (surface, upper_air[, diag], mu, sigma, mu_e2, sigma_e2).
+
+    # Output tuple layout:
+    # * PanguPlasimLegacy (no diag): (surface, upper_air, 0, 0, 0, 0)
+    # * PanguPlasimLegacy (diag):    (surface, upper_air, diag, 0, 0, 0, 0)
+    # * PanguPlasim (no diag, train=True): (surface, upper_air, mu, logvar, mu_e2, logvar_e2)
+    # * PanguPlasim (diag, train=True):    (surface, upper_air, diag, mu, logvar, mu_e2, logvar_e2)
     if has_diagnostic:
         out_surface, out_upper_air, out_diag = out[0], out[1], out[2]
+        latent_offset = 3
     else:
         out_surface, out_upper_air = out[0], out[1]
         out_diag = None
+        latent_offset = 2
 
     losses = loss_fn(
         out_surface,
@@ -127,8 +153,41 @@ def train_step(
         out_diagnostic=out_diag,
         target_diagnostic=batch.get("diagnostic") if has_diagnostic else None,
     )
+
+    # The VAE-KL branch fires only when (a) KL weight > 0, (b) the model
+    # returned at least four latent slots, AND (c) those slots are torch
+    # Tensors (the legacy port emits Python int `0` placeholders, not
+    # tensors — easy sentinel for "no VAE here").
+    latent_slots = out[latent_offset : latent_offset + 4] if len(out) >= latent_offset + 4 else ()
+    has_real_latents = (
+        len(latent_slots) == 4
+        and all(isinstance(x, torch.Tensor) and x.numel() > 0 for x in latent_slots)
+    )
+    if vae_kl_weight > 0.0 and has_real_latents:
+        mu, logvar, mu_e2, logvar_e2 = latent_slots
+        kl = vae_kl_loss(mu, logvar, mu_e2, logvar_e2)
+        losses["vae_kl"] = kl.detach()
+        losses["loss"] = losses["loss"] + vae_kl_weight * kl
+    else:
+        # VAE disabled or model emits placeholders. Keep the key for logger uniformity.
+        losses["vae_kl"] = torch.zeros((), device=out_surface.device, dtype=out_surface.dtype)
+
     losses["loss"].backward()
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
     return losses
+
+
+def _model_accepts_train_kwarg(model: torch.nn.Module) -> bool:
+    """Detect whether the model's forward signature accepts ``train=`` + targets.
+
+    The faithful PanguPlasim port takes a ``train`` flag plus optional
+    ``target_*`` kwargs (it routes them through the VAE's second encoder when
+    ``train=True``). PanguPlasimLegacy doesn't — its forward only takes the
+    four input tensors.
+    """
+    inner = model.module if hasattr(model, "module") else model
+    return getattr(inner, "has_vae", False) or "train" in getattr(
+        inner.forward, "__code__", type("_x", (), {"co_varnames": ()})()
+    ).co_varnames
