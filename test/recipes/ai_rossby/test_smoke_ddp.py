@@ -7,7 +7,7 @@
 Run with::
 
     torchrun --standalone --nproc-per-node=2 -m pytest --multigpu-static \\
-        test/recipes/pangu_plasim_legacy/test_smoke_ddp.py -x
+        test/recipes/ai_rossby/test_smoke_ddp.py -x
 
 When invoked WITHOUT torchrun the test is skipped (single-rank run would
 defeat the point). The test asserts that:
@@ -31,7 +31,7 @@ import torch.distributed as dist
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 
-_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "pangu_plasim"
+_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_RECIPE_DIR))
 
 from loss import PanguPlasimLoss  # noqa: E402

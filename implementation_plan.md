@@ -300,28 +300,28 @@ OneCycle/cosine/warmup, bf16 AMP, EMA, loss combination + VAE-KL + `predict_delt
 (pluggable model/loss/optimizer/scheduler) so the diffusion port reuses the loop.
 
 **v1 (PanguPlasimLegacy, deterministic, no VAE-KL)** at
-[`examples/weather/pangu_plasim/`](examples/weather/pangu_plasim/):
+[`examples/weather/ai_rossby/`](examples/weather/ai_rossby/):
 
-- [`loss.py`](examples/weather/pangu_plasim/loss.py): `PanguPlasimLoss` — per-variable + cos(lat) weighted
+- [`loss.py`](examples/weather/ai_rossby/loss.py): `PanguPlasimLoss` — per-variable + cos(lat) weighted
   L1 / L2 residual on surface + upper-air + (optional) diagnostic; diagnostic head off for `LEGACY` config.
   Both MSE and MAE supported via `loss_type`.
-- [`ema.py`](examples/weather/pangu_plasim/ema.py): `ModelEMA` with PanguWeather decay=0.999, warmup
+- [`ema.py`](examples/weather/ai_rossby/ema.py): `ModelEMA` with PanguWeather decay=0.999, warmup
   ramp `(1+epoch)/(warmup_epochs+1)`.
-- [`train_loop.py`](examples/weather/pangu_plasim/train_loop.py): `make_optimizer`/`make_scheduler`/`train_step`
+- [`train_loop.py`](examples/weather/ai_rossby/train_loop.py): `make_optimizer`/`make_scheduler`/`train_step`
   factories. OneCycleLR (`oc_pct_start=0.1`, `oc_div_factor=1e5`, `oc_final_div_factor=0.00025` per
   `PANGU_PLASIM_H5_DERECHO_0514.yaml`) for `PanguPlasimLegacy`; LinearWarmup + CosineAnnealing reserved for
   the VAE variant.
-- [`train.py`](examples/weather/pangu_plasim/train.py): Hydra entrypoint composing
+- [`train.py`](examples/weather/ai_rossby/train.py): Hydra entrypoint composing
   `model` / `scheduler` / `loss` groups, wiring `DistributedManager` + DDP + `LaunchLogger` + `ModelEMA` +
   `save/load_checkpoint`. Drives a `PlasimClimateDatapipe` with `PlasimNormalizer` + `NanFillTransform`
   attached as the dataset's CPU-side transform.
-- [`conf/`](examples/weather/pangu_plasim/conf/): top-level `config.yaml` + `model/pangu_plasim_legacy.yaml`
+- [`conf/`](examples/weather/ai_rossby/conf/): top-level `config.yaml` + `model/pangu_plasim_legacy.yaml`
   + `scheduler/{onecycle,cosine_warmup}.yaml` + `loss/{mae,mse}.yaml`.
 - [`hpc/scripts/pangu_plasim_legacy_shake_out.sbatch`](hpc/scripts/pangu_plasim_legacy_shake_out.sbatch):
   SLURM script for the longer real-data shake-out on Delta `gpuA40x4` (non-interactive, 4× A40,
   `torchrun --standalone --nproc-per-node=4`).
 
-**Tests** at [`test/recipes/pangu_plasim_legacy/`](test/recipes/pangu_plasim_legacy/):
+**Tests** at [`test/recipes/ai_rossby/`](test/recipes/ai_rossby/):
 - *Unit* (21 cases, CPU): `test_loss.py` (cos-lat weights, identity, per-var amplification, gradient flow,
   unknown-type rejection), `test_ema.py` (warmup clamp, post-warmup decay, apply/restore round-trip,
   apply-twice raises, state-dict round-trip), `test_train_loop.py` (AdamW factory, OneCycleLR + cosine
@@ -335,20 +335,20 @@ OneCycle/cosine/warmup, bf16 AMP, EMA, loss combination + VAE-KL + `predict_delt
 **v2 — PanguPlasim (VAE) wired** (commits leading up to *Phase 3 v2*):
 
 - ✅ `vae_kl_loss(mu_q, logvar_q, mu_p, logvar_p)` in
-  [`examples/weather/pangu_plasim/loss.py`](examples/weather/pangu_plasim/loss.py)
+  [`examples/weather/ai_rossby/loss.py`](examples/weather/ai_rossby/loss.py)
   — faithful port of PanguWeather v2.0 `utils/losses.Kl_divergence_gaussians`.
-- ✅ [`train_loop.train_step`](examples/weather/pangu_plasim/train_loop.py) gains
+- ✅ [`train_loop.train_step`](examples/weather/ai_rossby/train_loop.py) gains
   `vae_kl_weight` kwarg. Branches on whether the model returned real tensor latents
   (`torch.Tensor`) vs the int `0` placeholders the legacy model emits.
-- ✅ [`train.py`](examples/weather/pangu_plasim/train.py) `build_model` selects
+- ✅ [`train.py`](examples/weather/ai_rossby/train.py) `build_model` selects
   PanguPlasim vs PanguPlasimLegacy via `cfg.model.model_type`; the VAE-KL weight
   comes from `cfg.loss.vae_kl_weight`.
-- ✅ Hydra: [`conf/model/pangu_plasim.yaml`](examples/weather/pangu_plasim/conf/model/pangu_plasim.yaml)
-  + [`conf/loss/{mae,mse}_with_kl.yaml`](examples/weather/pangu_plasim/conf/loss/);
+- ✅ Hydra: [`conf/model/pangu_plasim.yaml`](examples/weather/ai_rossby/conf/model/pangu_plasim.yaml)
+  + [`conf/loss/{mae,mse}_with_kl.yaml`](examples/weather/ai_rossby/conf/loss/);
   `conf/scheduler/cosine_warmup.yaml` already in place from v1.
 - ✅ Tests: 9 new unit cases (KL analytic properties, train_step VAE-on / VAE-off
   branches, sanity loss-reduction) + 1 new Delta GPU smoke
-  ([`test_smoke_vae_single_gpu.py`](test/recipes/pangu_plasim_legacy/test_smoke_vae_single_gpu.py))
+  ([`test_smoke_vae_single_gpu.py`](test/recipes/ai_rossby/test_smoke_vae_single_gpu.py))
   exercising the full VAE training path with `vae_kls_nonzero > 0` guard. All
   30 non-smoke recipe tests stay green.
 

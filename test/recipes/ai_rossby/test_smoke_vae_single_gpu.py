@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single-GPU smoke test for the PanguPlasimLegacy training recipe.
+"""Single-GPU smoke test for the PanguPlasim (VAE) training recipe.
+
+Mirrors :mod:`test_smoke_single_gpu` but instantiates the VAE-enabled
+:class:`PanguPlasim` model and exercises the ``vae_kl_weight > 0`` branch in
+:func:`train_step`. Skipped when the Delta fixture isn't staged.
 
 End-to-end: PLASIM Zarr fixture → datapipe with normalizer + NaN fill →
-PanguPlasimLegacy.forward → PanguPlasimLoss → AdamW + OneCycleLR → EMA update
-→ checkpoint roundtrip. Skipped when the Delta fixture isn't staged.
-
-Per the smoke-test contract in ``hpc/delta.md`` this runs on real disk-backed
-data on the GPU; it is the recipe's primary integration sentinel.
+PanguPlasim.forward (train=True with target tensors → real (mu, logvar) outputs)
+→ PanguPlasimLoss + vae_kl_loss → AdamW + LinearWarmupCosineAnnealingLR.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "pangu_plasim"
+_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_RECIPE_DIR))
 
 from ema import ModelEMA  # noqa: E402
@@ -40,9 +41,8 @@ with warnings.catch_warnings():
         PlasimClimateDataset,
         PlasimNormalizer,
     )
-    from physicsnemo.experimental.models.pangu_plasim import PanguPlasimLegacy
+    from physicsnemo.experimental.models.pangu_plasim import PanguPlasim
 
-import physicsnemo
 
 _STATS_DIR = Path(
     "/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data"
@@ -70,9 +70,8 @@ _skip_no_stats = pytest.mark.skipif(
 )
 
 
-# Tiny PanguPlasimLegacy that fits an A40 and finishes a couple of steps in
-# under a minute. Mirrors the test_pangu_plasim.py smoke config but uses the
-# fixture's actual channel groups (read from the Zarr layout at runtime).
+# Tiny VAE-PanguPlasim that fits an A40 and finishes a couple of steps in
+# under a minute on the smoke fixture.
 _BACKBONE_KWARGS = dict(
     patch_size=[2, 4, 4],
     depths=[1, 1, 1, 1],
@@ -87,7 +86,7 @@ _BACKBONE_KWARGS = dict(
 @pytest.mark.cuda
 @_skip_no_fixture
 @_skip_no_stats
-def test_pangu_plasim_legacy_smoke_train_steps(tmp_path):
+def test_pangu_plasim_vae_smoke_train_steps(tmp_path):
     if not torch.cuda.is_available():
         pytest.skip("smoke test requires CUDA")
 
@@ -117,8 +116,8 @@ def test_pangu_plasim_legacy_smoke_train_steps(tmp_path):
     )
     pipe.dataset.transform = nan_fill
 
-    # --- Build model --------------------------------------------------------
-    model = PanguPlasimLegacy(
+    # --- Build VAE model ---------------------------------------------------
+    model = PanguPlasim(
         surface_variables=ds_for_layout.layout.surface_variables,
         upper_air_variables=ds_for_layout.upper_air_variable_names,
         constant_boundary_variables=ds_for_layout.layout.constant_boundary_variables,
@@ -134,10 +133,10 @@ def test_pangu_plasim_legacy_smoke_train_steps(tmp_path):
             "optimizer_type": "AdamW",
             "lr": 1e-4,
             "weight_decay": 3e-6,
-            "scheduler": "OneCycleLR",
-            "oc_pct_start": 0.1,
-            "oc_div_factor": 1e5,
-            "oc_final_div_factor": 0.00025,
+            "scheduler": "LinearWarmupCosineAnnealingLR",
+            "num_warmup_steps": 1,
+            "warmup_start_lr": 1e-8,
+            "eta_min": 0.0,
         }
     )
     optimizer = make_optimizer(model, cfg)
@@ -151,9 +150,9 @@ def test_pangu_plasim_legacy_smoke_train_steps(tmp_path):
     ).to(device)
     ema = ModelEMA(model, decay=0.999, warmup_epochs=1)
 
-    # --- Take 2 train steps -------------------------------------------------
     model.train()
     n_steps = 0
+    vae_kls_nonzero = 0
     for batch in pipe:
         out = train_step(
             model=model,
@@ -162,25 +161,23 @@ def test_pangu_plasim_legacy_smoke_train_steps(tmp_path):
             scheduler=scheduler,
             batch=batch,
             has_diagnostic=model.has_diagnostic,
+            vae_kl_weight=1.0e-4,
         )
         assert torch.isfinite(out["loss"]).all(), "NaN/inf loss on real data"
+        assert "vae_kl" in out
+        assert torch.isfinite(out["vae_kl"]).all()
+        if float(out["vae_kl"]) > 0:
+            vae_kls_nonzero += 1
         ema.update(model, epoch=0)
         n_steps += 1
     assert n_steps == 2
-
-    # --- Checkpoint roundtrip ----------------------------------------------
-    # Use the Module .mdlus path (MOD-008c) rather than physicsnemo.utils.save_checkpoint,
-    # which expects DistributedManager to be initialized. The recipe's train.py
-    # initializes it explicitly; the smoke test exercises the model-only roundtrip.
-    ckpt_path = tmp_path / "pangu_plasim_legacy_smoke.mdlus"
-    model.save(str(ckpt_path))
-    loaded = (
-        physicsnemo.Module.from_checkpoint(str(ckpt_path)).to(device).eval()
+    # The VAE path emitted at least one non-zero KL — otherwise the test
+    # silently degenerates into the legacy code path.
+    assert vae_kls_nonzero > 0, (
+        "vae_kl_loss stayed at 0 throughout training; the VAE branch in "
+        "train_step didn't fire (check PanguPlasim's forward signature + "
+        "_model_accepts_train_kwarg detection)"
     )
-    src = dict(model.named_parameters())
-    dst = dict(loaded.named_parameters())
-    a_name = next(iter(src))
-    assert torch.equal(src[a_name].detach(), dst[a_name].detach())
 
-    del model, loaded, normalizer, pipe
+    del model, normalizer, pipe
     torch.cuda.empty_cache()

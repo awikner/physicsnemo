@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch
 
-_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "pangu_plasim"
+_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_RECIPE_DIR))
 
 from ema import ModelEMA  # noqa: E402

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the optimizer/scheduler factories + train_step in
-``examples/weather/pangu_plasim/train_loop.py``.
+``examples/weather/ai_rossby/train_loop.py``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "pangu_plasim"
+_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_RECIPE_DIR))
 
 from loss import PanguPlasimLoss  # noqa: E402

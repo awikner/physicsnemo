@@ -5,20 +5,20 @@
 #
 # Pangu_Plasim (legacy / deterministic) training shake-out on NCSA Delta.
 #
-# Runs the Hydra entrypoint at examples/weather/pangu_plasim/train.py on a full
+# Runs the Hydra entrypoint at examples/weather/ai_rossby/train.py on a full
 # A40 node (4 GPUs) via torchrun. This is the *fidelity* run that exercises the
 # whole recipe end-to-end on real PLASIM data — substantially longer than the
-# smoke tests in test/recipes/pangu_plasim_legacy/, hence the non-interactive
+# smoke tests in test/recipes/ai_rossby/, hence the non-interactive
 # `gpuA40x4` partition (2-day walltime).
 #
 # Submit (defaults shown):
 #
-#     sbatch hpc/scripts/pangu_plasim_legacy_shake_out.sbatch
+#     sbatch hpc/scripts/ai_rossby_shake_out.sbatch
 #
 # Overrides (Hydra-style — appended verbatim to the train.py command):
 #
 #     OVERRIDES='data.batch_size=8 max_epochs=2' \
-#         sbatch hpc/scripts/pangu_plasim_legacy_shake_out.sbatch
+#         sbatch hpc/scripts/ai_rossby_shake_out.sbatch
 #
 # Required env (set in your shell before sbatch, or hard-coded below):
 #
@@ -64,7 +64,7 @@ OVERRIDES="${OVERRIDES:-}"
 
 mkdir -p hpc/scripts/logs
 
-cd examples/weather/pangu_plasim
+cd examples/weather/ai_rossby
 
 # torchrun on the local node — `--standalone` skips the rendezvous server.
 torchrun --standalone --nproc-per-node=4 train.py \

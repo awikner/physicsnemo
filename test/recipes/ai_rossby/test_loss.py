@@ -4,7 +4,7 @@
 
 """Unit tests for :class:`PanguPlasimLoss`.
 
-The loss imports live under ``examples/weather/pangu_plasim/`` so we add that
+The loss imports live under ``examples/weather/ai_rossby/`` so we add that
 directory to ``sys.path`` (examples don't ship as an installable package).
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import torch
 
-_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "pangu_plasim"
+_RECIPE_DIR = Path(__file__).resolve().parents[3] / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_RECIPE_DIR))
 
 from loss import (  # noqa: E402
