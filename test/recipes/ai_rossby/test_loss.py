@@ -162,3 +162,73 @@ def test_loss_backward_produces_gradients():
         assert g is not None
         assert torch.isfinite(g).all()
         assert (g != 0).any()
+
+
+# ---------------------------------------------------------------------------
+# latitude_weighted=False (PanguWeather raw_l1 / raw_l2 semantics)
+# ---------------------------------------------------------------------------
+def test_lat_weighted_residual_raw_l2_drops_cos_weighting():
+    """`latitude_weighted=False` reduces to plain `(pred - target)**2 .mean()`."""
+    # Use H >= 4 so cos(lat) varies meaningfully across the axis — at H=2 the
+    # symmetric Gauss-ish grid produces uniform weights and the two paths
+    # would (correctly) collapse to the same number.
+    torch.manual_seed(0)
+    pred = torch.randn(1, 1, 8, 16)
+    target = torch.zeros_like(pred)
+    lat = cos_lat_weights(8, pred.device, pred.dtype)
+    plain = (pred - target).pow(2).mean()
+    raw = lat_weighted_residual(
+        pred, target, lat, loss_type="l2", latitude_weighted=False
+    )
+    assert torch.allclose(raw, plain)
+    weighted = lat_weighted_residual(
+        pred, target, lat, loss_type="l2", latitude_weighted=True
+    )
+    assert not torch.allclose(raw, weighted)
+
+
+def test_per_var_lat_weighted_residual_raw_keeps_per_var_weights():
+    """raw_l2 drops cos(lat) but per_var weights still apply."""
+    pred = torch.ones(1, 2, 2, 2)  # (B=1, C=2, H=2, W=2) — all ones
+    target = torch.zeros_like(pred)
+    lat = cos_lat_weights(2, pred.device, pred.dtype)
+    per_var = torch.tensor([1.0, 4.0])
+    raw = per_var_lat_weighted_residual(
+        pred, target, lat, per_var, loss_type="l2", latitude_weighted=False
+    )
+    # mean over (1,2,2,2) of resid * (1 or 4) → (1*4 + 4*4) / (2*4) = 20 / 8 = 2.5
+    assert raw.item() == pytest.approx(2.5)
+
+
+def test_pangu_plasim_loss_latitude_weighted_flag_propagates():
+    """PanguPlasimLoss(latitude_weighted=False) matches the raw_l2 residual semantics."""
+    torch.manual_seed(0)
+    B, Cs, Cu, L, H, W = 2, 2, 3, 4, 8, 16
+    pred_s = torch.randn(B, Cs, H, W)
+    pred_u = torch.randn(B, Cu, L, H, W)
+    tgt_s = torch.randn(B, Cs, H, W)
+    tgt_u = torch.randn(B, Cu, L, H, W)
+    weighted = PanguPlasimLoss(
+        surface_variables=["a", "b"],
+        upper_air_variable_names=["x", "y", "z"],
+        diagnostic_variables=[],
+        num_lat=H,
+        loss_type="l2",
+        latitude_weighted=True,
+    )
+    raw = PanguPlasimLoss(
+        surface_variables=["a", "b"],
+        upper_air_variable_names=["x", "y", "z"],
+        diagnostic_variables=[],
+        num_lat=H,
+        loss_type="l2",
+        latitude_weighted=False,
+    )
+    out_w = weighted(pred_s, pred_u, tgt_s, tgt_u)
+    out_r = raw(pred_s, pred_u, tgt_s, tgt_u)
+    # The raw variant differs from the cos-lat-weighted variant on the same inputs.
+    assert not torch.allclose(out_w["loss"], out_r["loss"])
+    # The raw variant matches per_var_lat_weighted_residual(latitude_weighted=False).
+    # Surface: per_var ones[Cs] → just the channel-weighted residual mean.
+    expected_surface = (pred_s - tgt_s).pow(2).mean()
+    assert torch.allclose(out_r["surface"], expected_surface)

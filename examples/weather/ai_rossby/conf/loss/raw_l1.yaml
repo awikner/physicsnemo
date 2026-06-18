@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Raw / unweighted MAE — PanguWeather v2.0's `raw_l1` loss option. The
+# cos(lat) weighting is dropped; per-variable weights still apply.
+
+loss_type: l1
+latitude_weighted: False
+surface_weight: 1.0
+upper_air_weight: 1.0
+diagnostic_weight: 1.0
+surface_var_weights: {}
+upper_air_var_weights: {}
+diagnostic_var_weights: {}

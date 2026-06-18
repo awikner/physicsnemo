@@ -214,6 +214,7 @@ def build_loss(cfg: DictConfig) -> PanguPlasimLoss:
         surface_var_weights=_maybe_dict(cfg_loss.surface_var_weights),
         upper_air_var_weights=_maybe_dict(cfg_loss.upper_air_var_weights),
         diagnostic_var_weights=_maybe_dict(cfg_loss.diagnostic_var_weights),
+        latitude_weighted=bool(cfg_loss.get("latitude_weighted", True)),
     )
 
 

@@ -65,17 +65,22 @@ def lat_weighted_residual(
     lat_weights: torch.Tensor,
     *,
     loss_type: str = "l1",
+    latitude_weighted: bool = True,
 ) -> torch.Tensor:
-    r"""Mean over (B, …, lat, lon) of cos(lat)-weighted |pred - target|^p.
+    r"""Mean over (B, …, lat, lon) of [cos(lat)-weighted] |pred - target|^p.
 
     Parameters
     ----------
     pred, target : torch.Tensor
         Same shape ``(B, C, [L,] H, W)``.
     lat_weights : torch.Tensor
-        Shape ``(H,)``; broadcast across the rest.
+        Shape ``(H,)``; broadcast across the rest. Ignored when
+        ``latitude_weighted=False``.
     loss_type : {"l1", "l2"}
         ``"l1"`` = MAE, ``"l2"`` = MSE.
+    latitude_weighted : bool, optional, default=True
+        When ``False``, the cos(lat) weights are dropped — equivalent to
+        PanguWeather v2.0's ``raw_l2`` / ``raw_l1`` loss option.
 
     Returns
     -------
@@ -88,6 +93,8 @@ def lat_weighted_residual(
         resid = (pred - target).pow(2)
     else:
         raise ValueError(f"loss_type must be 'l1' or 'l2', got {loss_type!r}")
+    if not latitude_weighted:
+        return resid.mean()
     # H is always the second-to-last dim of `resid` (B, C, [L,] H, W); broadcast
     # lat_weights to (1, ..., 1, H, 1) so it aligns with the right axis.
     shape = [1] * resid.ndim
@@ -102,11 +109,14 @@ def per_var_lat_weighted_residual(
     per_var: torch.Tensor,
     *,
     loss_type: str = "l1",
+    latitude_weighted: bool = True,
 ) -> torch.Tensor:
-    """Per-variable-weighted lat-weighted residual.
+    """Per-variable-weighted [lat-weighted] residual.
 
     ``pred``/``target`` have shape ``(B, C, [L,] H, W)``; ``per_var`` has
-    shape ``(C,)`` and broadcasts over the channel axis.
+    shape ``(C,)`` and broadcasts over the channel axis. When
+    ``latitude_weighted=False`` the cos(lat) weights are dropped — per-var
+    weighting still applies.
     """
     if loss_type == "l1":
         resid = (pred - target).abs()
@@ -114,8 +124,10 @@ def per_var_lat_weighted_residual(
         resid = (pred - target).pow(2)
     else:
         raise ValueError(f"loss_type must be 'l1' or 'l2', got {loss_type!r}")
-    # Weight broadcasting: per_var on dim 1 (C); lat_weights on the second-to-last dim (H).
     pv = per_var.view(1, -1, *([1] * (resid.ndim - 2)))
+    if not latitude_weighted:
+        return (resid * pv).mean()
+    # Weight broadcasting: per_var on dim 1 (C); lat_weights on the second-to-last dim (H).
     lw_shape = [1] * resid.ndim
     lw_shape[-2] = lat_weights.shape[0]
     lw = lat_weights.view(lw_shape)
@@ -231,6 +243,7 @@ class PanguPlasimLoss(torch.nn.Module):
         surface_var_weights: Optional[Mapping[str, float]] = None,
         upper_air_var_weights: Optional[Mapping[str, float]] = None,
         diagnostic_var_weights: Optional[Mapping[str, float]] = None,
+        latitude_weighted: bool = True,
     ) -> None:
         super().__init__()
         if loss_type not in ("l1", "l2"):
@@ -239,6 +252,10 @@ class PanguPlasimLoss(torch.nn.Module):
         self.surface_weight = float(surface_weight)
         self.upper_air_weight = float(upper_air_weight)
         self.diagnostic_weight = float(diagnostic_weight)
+        # When False, the cos(lat) weighting is dropped — equivalent to
+        # PanguWeather v2.0's `raw_l1` / `raw_l2` option. Per-variable
+        # weighting still applies regardless. SFNO training uses False.
+        self.latitude_weighted = bool(latitude_weighted)
         self._surface_names = list(surface_variables)
         self._upper_names = list(upper_air_variable_names)
         self._diag_names = list(diagnostic_variables)
@@ -283,6 +300,7 @@ class PanguPlasimLoss(torch.nn.Module):
             lat,
             self._weights_for("surface", device, dtype),
             loss_type=self.loss_type,
+            latitude_weighted=self.latitude_weighted,
         )
         loss_upper_air = per_var_lat_weighted_residual(
             out_upper_air,
@@ -290,6 +308,7 @@ class PanguPlasimLoss(torch.nn.Module):
             lat,
             self._weights_for("upper_air", device, dtype),
             loss_type=self.loss_type,
+            latitude_weighted=self.latitude_weighted,
         )
         loss_diag = torch.zeros((), device=device, dtype=dtype)
         if out_diagnostic is not None and target_diagnostic is not None and self._diag_names:
@@ -299,6 +318,7 @@ class PanguPlasimLoss(torch.nn.Module):
                 lat,
                 self._weights_for("diagnostic", device, dtype),
                 loss_type=self.loss_type,
+                latitude_weighted=self.latitude_weighted,
             )
 
         total = (

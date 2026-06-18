@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Raw / unweighted MSE — PanguWeather v2.0's `raw_l2` loss.
+# Used by SFNO_PLASIM_H5_DERECHO_5412.yaml. The cos(lat) weighting is
+# dropped; per-variable weights still apply if specified.
+
+loss_type: l2
+latitude_weighted: False
+surface_weight: 1.0
+upper_air_weight: 1.0
+diagnostic_weight: 1.0
+surface_var_weights: {}
+upper_air_var_weights: {}
+diagnostic_var_weights: {}

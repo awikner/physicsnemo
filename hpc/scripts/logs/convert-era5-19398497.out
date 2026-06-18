@@ -247,3 +247,59 @@
 2026-06-18 15:16:13,095 INFO __main__ loaded 1200 / 1464
 2026-06-18 15:16:24,702 INFO __main__ loaded 1400 / 1464
 2026-06-18 15:16:56,417 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/1996.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:19:37,324 INFO __main__ done: 15 vars, 1464 timesteps
+[Thu Jun 18 15:19:39 CDT 2026] converting ERA5 year 1997 ...
+2026-06-18 15:19:43,291 INFO __main__ year 1997: 1460 sample files in [0, 1460)
+2026-06-18 15:19:43,293 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:19:55,237 INFO __main__ loaded 200 / 1460
+2026-06-18 15:20:05,137 INFO __main__ loaded 400 / 1460
+2026-06-18 15:20:15,494 INFO __main__ loaded 600 / 1460
+2026-06-18 15:20:26,009 INFO __main__ loaded 800 / 1460
+2026-06-18 15:20:36,911 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:20:47,433 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:20:57,360 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:21:24,374 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/1997.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:23:46,526 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 15:23:48 CDT 2026] converting ERA5 year 1998 ...
+2026-06-18 15:23:51,956 INFO __main__ year 1998: 1460 sample files in [0, 1460)
+2026-06-18 15:23:51,959 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:24:04,713 INFO __main__ loaded 200 / 1460
+2026-06-18 15:24:13,593 INFO __main__ loaded 400 / 1460
+2026-06-18 15:24:23,399 INFO __main__ loaded 600 / 1460
+2026-06-18 15:24:33,873 INFO __main__ loaded 800 / 1460
+2026-06-18 15:24:44,839 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:24:55,375 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:25:09,921 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:25:40,167 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/1998.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:27:04,203 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 15:27:07 CDT 2026] converting ERA5 year 1999 ...
+2026-06-18 15:27:11,155 INFO __main__ year 1999: 1460 sample files in [0, 1460)
+2026-06-18 15:27:11,158 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:27:23,741 INFO __main__ loaded 200 / 1460
+2026-06-18 15:27:34,449 INFO __main__ loaded 400 / 1460
+2026-06-18 15:27:46,055 INFO __main__ loaded 600 / 1460
+2026-06-18 15:27:55,889 INFO __main__ loaded 800 / 1460
+2026-06-18 15:28:07,087 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:28:19,723 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:28:29,958 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:29:05,066 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/1999.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:30:32,472 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 15:30:36 CDT 2026] converting ERA5 year 2000 ...
+2026-06-18 15:30:49,363 INFO __main__ year 2000: 1464 sample files in [0, 1464)
+2026-06-18 15:30:49,388 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:31:01,875 INFO __main__ loaded 200 / 1464
+2026-06-18 15:31:11,940 INFO __main__ loaded 400 / 1464
+2026-06-18 15:31:22,504 INFO __main__ loaded 600 / 1464
+2026-06-18 15:31:33,662 INFO __main__ loaded 800 / 1464
+2026-06-18 15:31:43,585 INFO __main__ loaded 1000 / 1464
+2026-06-18 15:31:57,618 INFO __main__ loaded 1200 / 1464
+2026-06-18 15:32:06,440 INFO __main__ loaded 1400 / 1464
+2026-06-18 15:32:42,636 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2000.zarr

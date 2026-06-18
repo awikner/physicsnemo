@@ -254,3 +254,66 @@
 2026-06-18 15:18:42,841 INFO __main__ year 2033: 1460 sample files in [0, 1460)
 2026-06-18 15:18:42,844 INFO __main__ loading per-file H5 reads across 64 workers
 2026-06-18 15:18:51,006 INFO __main__ loaded 200 / 1460
+2026-06-18 15:18:57,663 INFO __main__ loaded 400 / 1460
+2026-06-18 15:19:07,336 INFO __main__ loaded 600 / 1460
+2026-06-18 15:19:23,014 INFO __main__ loaded 800 / 1460
+2026-06-18 15:19:30,089 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:19:36,649 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:19:42,982 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:20:16,716 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2033.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:21:42,426 INFO __main__ done: 16 vars, 1460 timesteps
+[Thu Jun 18 15:21:45 CDT 2026] converting E3SM year 2034 ...
+2026-06-18 15:21:46,779 INFO __main__ year 2034: 1460 sample files in [0, 1460)
+2026-06-18 15:21:46,782 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:21:55,814 INFO __main__ loaded 200 / 1460
+2026-06-18 15:22:03,167 INFO __main__ loaded 400 / 1460
+2026-06-18 15:22:14,437 INFO __main__ loaded 600 / 1460
+2026-06-18 15:22:24,470 INFO __main__ loaded 800 / 1460
+2026-06-18 15:22:31,292 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:22:37,381 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:22:44,028 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:23:28,949 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2034.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:24:55,864 INFO __main__ done: 16 vars, 1460 timesteps
+[Thu Jun 18 15:24:58 CDT 2026] converting E3SM year 2035 ...
+2026-06-18 15:25:00,215 INFO __main__ year 2035: 1460 sample files in [0, 1460)
+2026-06-18 15:25:00,217 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:25:09,958 INFO __main__ loaded 200 / 1460
+2026-06-18 15:25:17,111 INFO __main__ loaded 400 / 1460
+2026-06-18 15:25:23,684 INFO __main__ loaded 600 / 1460
+2026-06-18 15:25:29,577 INFO __main__ loaded 800 / 1460
+2026-06-18 15:25:35,574 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:25:41,483 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:25:47,771 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:26:19,546 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2035.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:27:47,283 INFO __main__ done: 16 vars, 1460 timesteps
+[Thu Jun 18 15:27:50 CDT 2026] converting E3SM year 2036 ...
+2026-06-18 15:27:54,156 INFO __main__ year 2036: 1460 sample files in [0, 1460)
+2026-06-18 15:27:54,161 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:28:03,072 INFO __main__ loaded 200 / 1460
+2026-06-18 15:28:11,358 INFO __main__ loaded 400 / 1460
+2026-06-18 15:28:20,111 INFO __main__ loaded 600 / 1460
+2026-06-18 15:28:28,116 INFO __main__ loaded 800 / 1460
+2026-06-18 15:28:36,053 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:28:43,494 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:28:51,189 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:29:17,167 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2036.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 15:30:39,494 INFO __main__ done: 16 vars, 1460 timesteps
+[Thu Jun 18 15:30:41 CDT 2026] converting E3SM year 2037 ...
+2026-06-18 15:30:46,362 INFO __main__ year 2037: 1460 sample files in [0, 1460)
+2026-06-18 15:30:46,364 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 15:30:54,034 INFO __main__ loaded 200 / 1460
+2026-06-18 15:31:00,318 INFO __main__ loaded 400 / 1460
+2026-06-18 15:31:06,652 INFO __main__ loaded 600 / 1460
+2026-06-18 15:31:13,624 INFO __main__ loaded 800 / 1460
+2026-06-18 15:31:19,736 INFO __main__ loaded 1000 / 1460
+2026-06-18 15:31:26,474 INFO __main__ loaded 1200 / 1460
+2026-06-18 15:31:33,022 INFO __main__ loaded 1400 / 1460
+2026-06-18 15:32:08,496 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2037.zarr
