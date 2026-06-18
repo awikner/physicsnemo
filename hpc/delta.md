@@ -10,16 +10,23 @@ smoke tests run here unless explicitly redirected to a different cluster.
 | Item | Value |
 |---|---|
 | Scheduler | SLURM |
-| Default smoke-test partition | `gpuA40x4-interactive` |
-| Default account | `bdiu-delta-gpu` |
-| Walltime cap (interactive) | **1 hour** |
-| Node geometry | 4× NVIDIA A40 (48 GB), 64 CPU, ~258 GB RAM |
-| Single-node constraint | ✅ all smoke tests run on 1 node, ≤ 4 GPUs |
+| Default smoke-test partition (GPU) | `gpuA40x4-interactive` (account `bdiu-delta-gpu`) |
+| Default data-conversion partition (CPU) | `cpu` / `cpu-interactive` (account `bdiu-delta-cpu`) |
+| Walltime cap (interactive GPU / CPU) | **1 hour** / **1 hour** |
+| Walltime cap (non-interactive GPU / CPU) | **2 days** / **2 days** |
+| GPU node geometry | 4× NVIDIA A40 (48 GB), 64 CPU, ~258 GB RAM |
+| CPU node geometry | 128 CPU cores, ~256 GB RAM (no GPU) |
+| Single-node constraint | ✅ all smoke tests + data-conversion jobs run on 1 node |
 | Repo path | `/work/nvme/bdiu/awikner/physicsnemo` |
 | Test-data path (gitignored, large fixtures) | `/work/nvme/bdiu/awikner/physicsnemo_test_data` (symlinked at `test/_data`) |
 
 The non-interactive `gpuA40x4` partition (2-day walltime) exists for longer fidelity tests
 (Phase 5, full training-recipe shake-out), but **smoke tests must use the interactive queue**.
+
+The CPU partitions (`cpu` for batch, `cpu-interactive` for ≤ 1-hour jobs) under account
+`bdiu-delta-cpu` are the home for data-conversion / preprocessing work (HDF5→Zarr
+converters, climatology + bias aggregations, normalization-stat computations). See the
+**Data-conversion CPU jobs** section below and the `delta-cpu-job` Claude skill.
 
 ## System stack we reuse
 
@@ -230,3 +237,40 @@ multi-GPU runs.
 
 Those non-smoke job scripts get their own files under `hpc/scripts/` and reference this doc
 for environment setup.
+
+## Data-conversion CPU jobs
+
+CPU-only work (HDF5→Zarr converters, climatology + bias aggregations, normalization-stat
+computations, multiprocessing batches) runs under account `bdiu-delta-cpu` on either:
+
+- `cpu` — **2-day** walltime, the default for full-dataset conversions.
+- `cpu-interactive` — **1-hour** walltime, for fixture-sized smoke conversions and
+  interactive debugging.
+
+The `delta-cpu-job` Claude skill wraps the common srun pattern; see that skill for
+defaults and example commands. Manual srun pattern:
+
+```bash
+srun \
+  --partition=cpu \
+  --account=bdiu-delta-cpu \
+  --time=04:00:00 \
+  --nodes=1 --ntasks-per-node=1 --cpus-per-task=64 \
+  --mem=128g \
+  --job-name=pn-conversion \
+  bash -lc 'cd /work/nvme/bdiu/awikner/physicsnemo && \
+            source .venv/bin/activate && \
+            python tools/data/<dataset>/<script>.py [args]'
+```
+
+Conventions:
+
+- Data-conversion CLIs live in `tools/data/<dataset>/`. Each is a runnable Python script
+  that reads `SLURM_CPUS_PER_TASK` (falling back to `os.cpu_count()`) to size its
+  `multiprocessing.Pool` / `concurrent.futures` worker count.
+- Conversions write to gitignored paths — typically under
+  `/work/nvme/bdiu/awikner/physicsnemo_test_data/<dataset>/` for fixture-sized outputs,
+  or the dataset's source-collocated path for the full archive.
+- Long-running conversions (> 1 hr) submit to `cpu` (non-interactive) via the same srun
+  pattern; queue and forget. Use `sbatch` only when wrapping a multi-step pipeline that
+  the user doesn't want to babysit.
