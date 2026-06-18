@@ -7,7 +7,7 @@
 # per-year Zarr format, plus all 5 normalization variants and the climatology
 # (mean + std, no bias dir for ERA5).
 #
-# Output: /work/nvme/bdiu/awikner/physicsnemo-zarr/era5/
+# Output: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/
 #   - {1979..2018}.zarr                    — per-year prognostic stores
 #   - normalization_pangu_s2s.zarr         — default Pangu_S2S normalization
 #   - normalization_pangu_s2s_withnino.zarr        — with Nino34 lags
@@ -34,7 +34,7 @@ set -euo pipefail
 cd /work/nvme/bdiu/awikner/physicsnemo
 source .venv/bin/activate
 
-OUT_ROOT=/work/nvme/bdiu/awikner/physicsnemo-zarr/era5
+OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5
 mkdir -p "$OUT_ROOT"
 
 SOURCE_DIR=/work/hdd/bdiu/bgong1/data/h5data

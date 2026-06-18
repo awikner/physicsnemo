@@ -291,7 +291,7 @@ so a single class handles all three datasets.
 - **Full-archive SLURM scripts** (`71048006`): three sbatch jobs at
   [`hpc/scripts/convert_{plasim,era5,e3sm}_full_archive.sbatch`](hpc/scripts/) covering PLASIM
   (12–132), ERA5 (1979–2018), E3SM (2015–2049). All target
-  `/work/nvme/bdiu/awikner/physicsnemo-zarr/{dataset}/`.
+  `/work/hdd/bdiu/awikner/physicsnemo-zarr/{dataset}/`.
 
 ### Phase 3 — Training recipe (shared, deterministic mode) ← *v1 in progress*
 Hydra config groups translated from the YParams YAML schema. Custom loop on `DistributedManager` +

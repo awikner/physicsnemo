@@ -6,7 +6,7 @@
 # Convert the full E3SM archive (2015–2049 = 35 years) to the unified ai-rossby
 # per-year Zarr format, plus the normalization Zarr and climatology+bias Zarr.
 #
-# Output: /work/nvme/bdiu/awikner/physicsnemo-zarr/e3sm/
+# Output: /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/
 #   - {2015..2049}.zarr            — per-year prognostic stores
 #   - normalization_2015-2050.zarr — per-variable mean+std
 #   - climatology_bias.zarr        — daily climatology + bias arrays (soil
@@ -31,7 +31,7 @@ set -euo pipefail
 cd /work/nvme/bdiu/awikner/physicsnemo
 source .venv/bin/activate
 
-OUT_ROOT=/work/nvme/bdiu/awikner/physicsnemo-zarr/e3sm
+OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm
 mkdir -p "$OUT_ROOT"
 
 SOURCE_DIR=/work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101

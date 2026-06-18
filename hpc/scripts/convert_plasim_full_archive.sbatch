@@ -11,7 +11,7 @@
 # Also runs the normalization and climatology+bias converters at the end so
 # the full output dir is self-contained.
 #
-# Output: /work/nvme/bdiu/awikner/physicsnemo-zarr/plasim/
+# Output: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/
 #   - {12..132}.zarr           — per-year prognostic stores
 #   - normalization_12-132.zarr — per-variable mean+std
 #   - climatology_bias.zarr     — daily climatology + bias arrays
@@ -34,7 +34,7 @@ set -euo pipefail
 cd /work/nvme/bdiu/awikner/physicsnemo
 source .venv/bin/activate
 
-OUT_ROOT=/work/nvme/bdiu/awikner/physicsnemo-zarr/plasim
+OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/plasim
 mkdir -p "$OUT_ROOT"
 
 SOURCE_DIR=/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52
