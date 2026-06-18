@@ -121,6 +121,10 @@ class PlasimClimateDatapipe(Datapipe):
         device: Optional[torch.device | str] = None,
         seed: int = 0,
         distributed: bool = False,
+        boundary_zarr_path: Optional[str | Path] = None,
+        yearly_repeating_boundary: bool = False,
+        leap_boundary_zarr_path: Optional[str | Path] = None,
+        non_leap_boundary_zarr_path: Optional[str | Path] = None,
     ) -> None:
         super().__init__(meta=DatapipeMetaData(name="plasim_climate"))
 
@@ -131,7 +135,13 @@ class PlasimClimateDatapipe(Datapipe):
 
         # Dataset stays IO-only (no transform); the normalizer + NaN-fill run
         # GPU-side after the H2D transfer to fuse into one batched op.
-        self.dataset = PlasimClimateDataset(zarr_path)
+        self.dataset = PlasimClimateDataset(
+            zarr_path,
+            boundary_zarr_path=boundary_zarr_path,
+            yearly_repeating_boundary=yearly_repeating_boundary,
+            leap_boundary_zarr_path=leap_boundary_zarr_path,
+            non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
+        )
 
         if distributed:
             from physicsnemo.distributed import DistributedManager

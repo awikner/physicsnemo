@@ -172,10 +172,37 @@ class PlasimClimateDataset(Dataset):
         consolidated: bool = True,
         pin_memory_dtype: torch.dtype = torch.float32,
         transform=None,
+        *,
+        boundary_zarr_path: Optional[str | Path] = None,
+        yearly_repeating_boundary: bool = False,
+        leap_boundary_zarr_path: Optional[str | Path] = None,
+        non_leap_boundary_zarr_path: Optional[str | Path] = None,
     ) -> None:
         self.zarr_path = str(zarr_path)
         self.dtype = pin_memory_dtype
         self.transform = transform
+        # Boundary-substitution configuration (Phase-2 follow-up; see
+        # implementation_plan.md). When set, varying boundary variables are
+        # read from a SEPARATE Zarr store (single-year, time-indexed) instead
+        # of the prognostic Zarr at the same time index.
+        self._boundary_zarr_path = (
+            str(boundary_zarr_path) if boundary_zarr_path is not None else None
+        )
+        self._yearly_repeating_boundary = bool(yearly_repeating_boundary)
+        self._leap_boundary_zarr_path = (
+            str(leap_boundary_zarr_path) if leap_boundary_zarr_path is not None else None
+        )
+        self._non_leap_boundary_zarr_path = (
+            str(non_leap_boundary_zarr_path)
+            if non_leap_boundary_zarr_path is not None
+            else None
+        )
+        if self._yearly_repeating_boundary:
+            if not (self._leap_boundary_zarr_path and self._non_leap_boundary_zarr_path):
+                raise ValueError(
+                    "yearly_repeating_boundary=True requires both "
+                    "leap_boundary_zarr_path and non_leap_boundary_zarr_path."
+                )
         # `xr.open_zarr` is lazy; the actual slice reads happen in __getitem__.
         # consolidated=True is the fast path when the store has consolidated
         # metadata; xarray transparently falls back if it doesn't.
@@ -231,6 +258,63 @@ class PlasimClimateDataset(Dataset):
         # Constant boundaries don't vary over time — read once at init so the
         # per-sample async batch doesn't include them.
         self._constants_tensor = self._eager_load_constants()
+
+        # Boundary-substitution: open the separate boundary Zarr group(s) and
+        # cache async-array handles for the varying-boundary variables only.
+        # Per-sample varying-boundary reads then route through these handles.
+        self._boundary_async_groups: dict[str, object] = {}
+        self._boundary_async_arrays: dict[str, dict[str, object]] = {}
+        if self._yearly_repeating_boundary:
+            self._open_boundary_store("leap", self._leap_boundary_zarr_path)
+            self._open_boundary_store("non_leap", self._non_leap_boundary_zarr_path)
+        elif self._boundary_zarr_path:
+            self._open_boundary_store("single", self._boundary_zarr_path)
+        # Cache the prognostic time coord for boundary-time-index lookup.
+        # Only needed when actually using a separate boundary store.
+        self._prog_times = (
+            self._ds["time"].values if self._boundary_async_groups else None
+        )
+        self._steps_per_day = (
+            24 // self.layout.data_timedelta_hours
+            if self.layout.data_timedelta_hours
+            else 4
+        )
+
+    def _open_boundary_store(self, key: str, path: str) -> None:
+        group = _zarr_sync(_zarr_open_group_async(path, mode="r"))
+        self._boundary_async_groups[key] = group
+        self._boundary_async_arrays[key] = {
+            v: _zarr_sync(group.get(v))
+            for v in self.layout.varying_boundary_variables
+        }
+
+    def _boundary_store_key(self, time_idx: int) -> str:
+        """Pick which boundary store to read from for a given prognostic time index."""
+        if self._yearly_repeating_boundary:
+            import cftime
+
+            t = self._prog_times[time_idx]
+            year = t.year
+            try:
+                is_leap = cftime.is_leap_year(year, self.layout.calendar)
+            except Exception:
+                # cftime API variance across versions; fall back to per-cls method.
+                is_leap = hasattr(t, "daysinmonth") and t.daysinmonth[1] == 29
+            return "leap" if is_leap else "non_leap"
+        return "single"
+
+    def _boundary_time_index(self, time_idx: int) -> int:
+        """Map the prognostic time index to the boundary-store time index."""
+        if not self._boundary_async_groups:
+            return time_idx
+        t = self._prog_times[time_idx]
+        # Day-of-year (1-indexed in cftime); convert to 0-indexed.
+        try:
+            doy = t.dayofyr - 1
+        except AttributeError:
+            doy = t.timetuple().tm_yday - 1
+        hour = t.hour
+        return doy * self._steps_per_day + hour // self.layout.data_timedelta_hours
 
     # ------------------------------------------------------------------ #
     # Public read-only attributes
@@ -303,30 +387,58 @@ class PlasimClimateDataset(Dataset):
         """Coalesce reads for MULTIPLE time indices into one ``asyncio.gather``.
 
         Used by ``__getitem__`` to batch the start + target sample reads.
-        Returns ``{time_idx: {var_name: ndarray}}``.
+        Returns ``{time_idx: {var_name: ndarray}}``. When a separate boundary
+        store is configured, the varying-boundary variables route through that
+        store (with day-of-year + leap-aware time-index translation) instead
+        of the prognostic store.
         """
-        names = (
+        # Variables read from the PROGNOSTIC store (skip varying-boundary when
+        # a boundary store is configured — those go through the boundary path).
+        prog_names: list[str] = [
             *self.layout.surface_variables,
-            *self.layout.varying_boundary_variables,
             *self.layout.diagnostic_variables,
             *self.layout.sigma_upper_air_variables,
             *self.layout.pressure_upper_air_variables,
-        )
+        ]
+        use_boundary_store = bool(self._boundary_async_groups)
+        if not use_boundary_store:
+            prog_names = (
+                self.layout.surface_variables
+                + self.layout.varying_boundary_variables
+                + self.layout.diagnostic_variables
+                + self.layout.sigma_upper_air_variables
+                + self.layout.pressure_upper_air_variables
+            )
 
         async def _batch():
             tasks = []
+            # Prognostic-store reads.
             for t in time_indices:
-                for n in names:
+                for n in prog_names:
                     tasks.append(self._async_arrays[n].getitem(t))
+            # Boundary-store reads (separate physical store + index translation).
+            if use_boundary_store:
+                for t in time_indices:
+                    key = self._boundary_store_key(t)
+                    bt = self._boundary_time_index(t)
+                    for n in self.layout.varying_boundary_variables:
+                        tasks.append(
+                            self._boundary_async_arrays[key][n].getitem(bt)
+                        )
             return await asyncio.gather(*tasks)
 
         arrays = _zarr_sync(_batch())
         out: dict[int, dict[str, np.ndarray]] = {t: {} for t in time_indices}
         k = 0
         for t in time_indices:
-            for n in names:
+            for n in prog_names:
                 out[t][n] = np.asarray(arrays[k], dtype="float32")
                 k += 1
+        if use_boundary_store:
+            for t in time_indices:
+                for n in self.layout.varying_boundary_variables:
+                    out[t][n] = np.asarray(arrays[k], dtype="float32")
+                    k += 1
         return out
 
     def _stack_named(

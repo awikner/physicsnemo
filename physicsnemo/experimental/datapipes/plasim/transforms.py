@@ -113,9 +113,17 @@ class PlasimNormalizer:
         diagnostic_variables: Sequence[str] = (),
         normalize_constant_boundary: bool = False,
         normalize_diagnostic: bool = False,
+        predict_delta: bool = False,
+        delta_std_path: Optional[str | Path] = None,
     ) -> None:
         self._normalize_constant_boundary = normalize_constant_boundary
         self._normalize_diagnostic = normalize_diagnostic
+        self._predict_delta = bool(predict_delta)
+        if self._predict_delta and delta_std_path is None:
+            raise ValueError(
+                "predict_delta=True requires delta_std_path (the tendency-std "
+                "NetCDF). Generate one via tools/data/plasim/compute_delta_stats.py."
+            )
 
         mean = xr.open_dataset(mean_path)
         std = xr.open_dataset(std_path)
@@ -146,12 +154,40 @@ class PlasimNormalizer:
         self.upper_air_mean = self._cat_upper_air(sigma_mean, pressure_mean)
         self.upper_air_std = self._cat_upper_air(sigma_std, pressure_std)
 
-        # Targets share the same stats as inputs (predict_delta=False; the
-        # PredictDeltaTransform separately applies delta_std for delta mode).
-        self.target_surface_mean = self.surface_mean
-        self.target_surface_std = self.surface_std
-        self.target_upper_air_mean = self.upper_air_mean
-        self.target_upper_air_std = self.upper_air_std
+        # Targets share the same stats as inputs in the predict_full-field case.
+        # In predict_delta mode, the target tensors carry tendencies normalized
+        # by delta_std (no mean subtraction — PanguWeather convention).
+        if self._predict_delta:
+            delta = xr.open_dataset(delta_std_path)
+            # delta_std for surface vars is scalar per var; broadcast as (C, 1, 1).
+            self.target_surface_delta_std = self._stack_scalars(
+                delta, delta, surface_variables
+            )[0]  # mean unused; same call returns (m, s) but for delta_std we just want vals
+            # Upper-air delta_std mirrors the sigma+pressure stacking.
+            sigma_d, _ = self._stack_levels(
+                delta, delta, sigma_upper_air_variables, "Z_2", sigma_levels
+            )
+            pressure_d, _ = self._stack_levels(
+                delta, delta, pressure_upper_air_variables, "Z", pressure_levels
+            )
+            self.target_upper_air_delta_std = self._cat_upper_air(sigma_d, pressure_d)
+            # Sanity: deltas should be > 0 everywhere; zero std means the var
+            # didn't change across timesteps in the source.
+            if (self.target_surface_delta_std == 0).any():
+                raise ValueError(
+                    f"delta_std contains zero entries for some surface variables; "
+                    f"check {delta_std_path}."
+                )
+            if (self.target_upper_air_delta_std == 0).any():
+                raise ValueError(
+                    f"delta_std contains zero entries for some upper-air variables; "
+                    f"check {delta_std_path}."
+                )
+        else:
+            self.target_surface_mean = self.surface_mean
+            self.target_surface_std = self.surface_std
+            self.target_upper_air_mean = self.upper_air_mean
+            self.target_upper_air_std = self.upper_air_std
 
     # ------------------------------------------------------------------ #
     # Stat-file loading helpers
@@ -235,6 +271,8 @@ class PlasimNormalizer:
             "target_surface_std",
             "target_upper_air_mean",
             "target_upper_air_std",
+            "target_surface_delta_std",
+            "target_upper_air_delta_std",
         ):
             v = getattr(self, name, None)
             if v is not None:
@@ -243,24 +281,38 @@ class PlasimNormalizer:
 
     def __call__(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         out = dict(sample)
+        # In predict_delta mode the target tensors must see the RAW start state
+        # for the tendency computation, so handle targets BEFORE we mutate
+        # surface_in / upper_air_in.
+        if self._predict_delta:
+            if "target_surface" in out and "surface_in" in out:
+                out["target_surface"] = (
+                    out["target_surface"] - out["surface_in"]
+                ) / self.target_surface_delta_std
+            if "target_upper_air" in out and "upper_air_in" in out:
+                out["target_upper_air"] = (
+                    out["target_upper_air"] - out["upper_air_in"]
+                ) / self.target_upper_air_delta_std
+        else:
+            if "target_surface" in out and self.target_surface_mean is not None:
+                out["target_surface"] = (
+                    out["target_surface"] - self.target_surface_mean
+                ) / self.target_surface_std
+            if "target_upper_air" in out and self.target_upper_air_mean is not None:
+                out["target_upper_air"] = (
+                    out["target_upper_air"] - self.target_upper_air_mean
+                ) / self.target_upper_air_std
+        # Now normalize the state inputs (mutates the values the targets used).
         if "surface_in" in out and self.surface_mean is not None:
             out["surface_in"] = (out["surface_in"] - self.surface_mean) / self.surface_std
-        if "target_surface" in out and self.target_surface_mean is not None:
-            out["target_surface"] = (
-                out["target_surface"] - self.target_surface_mean
-            ) / self.target_surface_std
-        if "varying_boundary" in out and self.varying_mean is not None:
-            out["varying_boundary"] = (
-                out["varying_boundary"] - self.varying_mean
-            ) / self.varying_std
         if "upper_air_in" in out and self.upper_air_mean is not None:
             out["upper_air_in"] = (
                 out["upper_air_in"] - self.upper_air_mean
             ) / self.upper_air_std
-        if "target_upper_air" in out and self.target_upper_air_mean is not None:
-            out["target_upper_air"] = (
-                out["target_upper_air"] - self.target_upper_air_mean
-            ) / self.target_upper_air_std
+        if "varying_boundary" in out and self.varying_mean is not None:
+            out["varying_boundary"] = (
+                out["varying_boundary"] - self.varying_mean
+            ) / self.varying_std
         if (
             self._normalize_constant_boundary
             and "constant_boundary" in out
@@ -287,7 +339,11 @@ class PlasimNormalizer:
         std_path: str | Path,
         **kwargs,
     ) -> "PlasimNormalizer":
-        """Build a normalizer aligned with a :class:`PlasimClimateDataset`'s layout."""
+        """Build a normalizer aligned with a :class:`PlasimClimateDataset`'s layout.
+
+        Pass ``predict_delta=True`` + ``delta_std_path`` for tendency-mode
+        target normalization.
+        """
         return cls(
             mean_path,
             std_path,
@@ -301,6 +357,150 @@ class PlasimNormalizer:
             diagnostic_variables=dataset.layout.diagnostic_variables,
             **kwargs,
         )
+
+
+class NanFillTransform:
+    r"""Replace NaN values in PLASIM boundary fields with configured fill values.
+
+    PLASIM's land-sea-mask (``lsm``), sea-surface temperature (``sst``), and
+    sea-ice-concentration (``sic``) carry NaN at high latitudes / over the
+    other side of the land-ocean mask by convention. PanguPlasim's attention
+    paths propagate NaN catastrophically — we substitute neutral numeric
+    values here, BEFORE normalization, so downstream tensors are finite.
+
+    The substitution runs on the CPU at the dataset's ``__getitem__`` boundary
+    (transform=… kwarg). Per the Phase-2 contract this is composable with
+    :class:`PlasimNormalizer`: chain via ``[NanFillTransform(...), normalizer]``.
+
+    Parameters
+    ----------
+    constant_boundary_variables : sequence of str
+        Channel-order list for ``constant_boundary`` (used to map var name → index).
+    varying_boundary_variables : sequence of str
+        Channel-order list for ``varying_boundary``.
+    fill_values : dict[str, float], optional, default=None
+        Per-variable fill values, e.g. ``{"sst": 273.15, "lsm": 0.0}``. Variables
+        not in the dict use ``default``.
+    default : float, optional, default=0.0
+        Fallback fill for any boundary variable not listed in ``fill_values``.
+    scan_constant : bool, optional, default=True
+        Whether to scan ``constant_boundary`` for NaN.
+    scan_varying : bool, optional, default=True
+        Whether to scan ``varying_boundary`` for NaN.
+    strict : bool, optional, default=False
+        If True, raise if any NaN remains after the fill (sentinel for stats
+        changes / unexpected source fields). Useful in tests + dev.
+
+    Forward
+    -------
+    sample : dict of torch.Tensor
+        Output of :meth:`PlasimClimateDataset.__getitem__`.
+
+    Outputs
+    -------
+    dict of torch.Tensor
+        Same shape; ``constant_boundary`` and/or ``varying_boundary`` have
+        their NaN replaced by the per-channel fill.
+    """
+
+    def __init__(
+        self,
+        *,
+        constant_boundary_variables: Sequence[str] = (),
+        varying_boundary_variables: Sequence[str] = (),
+        fill_values: Optional[dict[str, float]] = None,
+        default: float = 0.0,
+        scan_constant: bool = True,
+        scan_varying: bool = True,
+        strict: bool = False,
+    ) -> None:
+        self._scan_constant = scan_constant
+        self._scan_varying = scan_varying
+        self._strict = strict
+        self._default = float(default)
+        fill_values = fill_values or {}
+        self._const_fill = self._build_fill_tensor(
+            constant_boundary_variables, fill_values
+        )
+        self._varying_fill = self._build_fill_tensor(
+            varying_boundary_variables, fill_values
+        )
+
+    def _build_fill_tensor(
+        self,
+        names: Sequence[str],
+        fill_values: dict[str, float],
+    ) -> Optional[torch.Tensor]:
+        if not names:
+            return None
+        return torch.tensor(
+            [float(fill_values.get(n, self._default)) for n in names],
+            dtype=torch.float32,
+        ).view(-1, 1, 1)
+
+    def __call__(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        out = dict(sample)
+        if self._scan_constant and "constant_boundary" in out and self._const_fill is not None:
+            out["constant_boundary"] = _nan_to_per_channel(
+                out["constant_boundary"], self._const_fill
+            )
+            if self._strict:
+                _assert_finite(out["constant_boundary"], "constant_boundary")
+        if self._scan_varying and "varying_boundary" in out and self._varying_fill is not None:
+            out["varying_boundary"] = _nan_to_per_channel(
+                out["varying_boundary"], self._varying_fill
+            )
+            if self._strict:
+                _assert_finite(out["varying_boundary"], "varying_boundary")
+        return out
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset,
+        **kwargs,
+    ) -> "NanFillTransform":
+        """Build a fill aligned with a :class:`PlasimClimateDataset` layout."""
+        return cls(
+            constant_boundary_variables=dataset.layout.constant_boundary_variables,
+            varying_boundary_variables=dataset.layout.varying_boundary_variables,
+            **kwargs,
+        )
+
+
+def _nan_to_per_channel(x: torch.Tensor, fill: torch.Tensor) -> torch.Tensor:
+    """Replace NaN with per-channel fill (broadcast against (C, H, W) or (B, C, H, W))."""
+    return torch.where(torch.isnan(x), fill.to(x.dtype).to(x.device), x)
+
+
+def _assert_finite(t: torch.Tensor, name: str) -> None:
+    if not torch.isfinite(t).all():
+        raise ValueError(
+            f"NanFillTransform(strict=True): non-finite values remain in {name!r} "
+            f"after filling. Check stats/source for unexpected NaN."
+        )
+
+
+class ComposeTransform:
+    r"""Chain multiple sample-level transforms in order.
+
+    Useful for stacking :class:`NanFillTransform` then :class:`PlasimNormalizer`
+    as the ``transform=`` kwarg to :class:`PlasimClimateDataset`.
+    """
+
+    def __init__(self, *transforms) -> None:
+        self.transforms = transforms
+
+    def __call__(self, sample):
+        for t in self.transforms:
+            sample = t(sample)
+        return sample
+
+    def to(self, device):
+        for t in self.transforms:
+            if hasattr(t, "to"):
+                t.to(device)
+        return self
 
 
 def _nearest_indices(

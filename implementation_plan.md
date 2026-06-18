@@ -236,15 +236,30 @@ Components:
   applies `torch.nan_to_num(0)` to constant_boundary + varying_boundary before the model — PLASIM's `lsm`
   carries NaN at the poles by convention; a proper `NanFillTransform` is a follow-up.
 
-**Deferred (Phase 2 follow-ups)**:
-- `PlasimClimateDatapipe(Datapipe)` wrapper that bundles Dataset + Sampler + `torch.utils.data.DataLoader`
-  + `physicsnemo.distributed.DistributedManager` integration into a single class with `__iter__` /
-  `__len__`. (Current usage assembles those pieces explicitly — fine for v1, awkward for v2 recipe code.)
-- `predict_delta` mode: compute `target - state` tendency before normalization, apply separate
-  `delta_std` (the YAML's `surface_ff_std` / `upper_air_ff_std` keys; in `SFNO_PLASIM_H5_DERECHO_5412.yaml`
-  they point at the same file as `_std` — for true delta-mode training a separate stats file is needed).
-- `NanFillTransform` — explicit NaN-handling step that documents PLASIM's
-  high-latitude / land-sea-mask convention (smoke test currently does this inline).
+**Completed Phase 2 follow-ups** (commits `f0a7d412`, `578c3630`, etc.):
+- ✅ `PlasimClimateDatapipe(Datapipe)` wrapper.
+- ✅ Batched-async Zarr reads → 3× faster, now beats PanguH5 (commit `578c3630`).
+- ✅ `predict_delta` mode in `PlasimNormalizer` (constructor `predict_delta=True` +
+  `delta_std_path=...`). Tendency computation is `target = (raw_target − raw_state) / delta_std`
+  (no mean subtraction per PanguWeather convention). Delta-std NetCDF generated via
+  `tools/data/plasim/compute_delta_stats.py` (a small CLI walking the Zarr to compute per-variable
+  per-level tendency std).
+- ✅ `NanFillTransform` — composable CPU-side transform with per-variable fill dict
+  (`{"sst": 273.15, ...}`) + `default=0.0` + `strict=False`. Default scope is
+  `constant_boundary + varying_boundary`. Strict mode raises if any NaN survives the fill
+  (sentinel for stats changes). `ComposeTransform` chains nan-fill → normalizer.
+- ✅ Yearly-repeating boundary substitution: `boundary_zarr_path` (single-year), or
+  `yearly_repeating_boundary=True` + `leap_boundary_zarr_path` + `non_leap_boundary_zarr_path`
+  (PanguWeather convention; cycles via `cftime.is_leap_year(prog_year)` and day-of-year mapping).
+  When all three boundary kwargs are unset, varying boundaries come from the prognostic Zarr at the
+  same time index (the pre-Phase-2-follow-up behavior).
+
+**Deferred (not yet implemented)**:
+- Bias-correction `.npy` loader for the `bias_data_dir` files (separate per-variable / per-level
+  annual + diurnal-cycle 2D fields). This is a distinct concept from boundary substitution —
+  applied at training-time / inference-time to model outputs or to inputs as a residual correction.
+  Lives more naturally in the training recipe (Phase 3) once the recipe defines exactly when
+  bias correction runs (pre-loss vs post-output).
 
 ### Phase 3 — Training recipe (shared, deterministic mode)
 Hydra config groups translated from the YParams YAML schema. Custom loop on `DistributedManager` +

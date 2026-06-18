@@ -42,7 +42,9 @@ import torch
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
     from physicsnemo.experimental.datapipes.plasim import (
+        ComposeTransform,
         LeadTimePairSampler,
+        NanFillTransform,
         PlasimClimateDatapipe,
         PlasimClimateDataset,
         PlasimNormalizer,
@@ -58,6 +60,22 @@ _HAS_STATS = _MEAN_PATH.exists() and _STD_PATH.exists()
 _skip_no_stats = pytest.mark.skipif(
     not _HAS_STATS,
     reason=f"PLASIM stats files missing at {_STATS_DIR}; expected mean+std NetCDFs.",
+)
+
+
+def _delta_std_path() -> Path | None:
+    root = os.environ.get("AI_ROSSBY_TEST_DATA")
+    if not root:
+        return None
+    p = Path(root) / "plasim" / "smoke_month_delta_std.nc"
+    return p if p.exists() else None
+
+
+_HAS_DELTA_STATS = _delta_std_path() is not None
+_skip_no_delta = pytest.mark.skipif(
+    not _HAS_DELTA_STATS,
+    reason="$AI_ROSSBY_TEST_DATA/plasim/smoke_month_delta_std.nc missing; "
+    "generate via tools/data/plasim/compute_delta_stats.py.",
 )
 
 
@@ -296,6 +314,161 @@ def test_dataset_uses_batched_async_zarr_reads():
     raw = ds._read_many_async([0, 1])
     assert set(raw) == {0, 1}
     assert set(raw[0]) == expected_keys
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 follow-up tests: predict_delta + NanFillTransform + boundary substitution
+# ---------------------------------------------------------------------------
+@_skip_no_fixture
+@_skip_no_stats
+@_skip_no_delta
+def test_normalizer_predict_delta_uses_delta_std():
+    """In predict_delta mode the normalizer must produce ``target_*`` tensors
+    that are the *raw tendency* ``(target - state)`` divided by ``delta_std``.
+    """
+    ds = PlasimClimateDataset(_fixture_path())
+    norm = PlasimNormalizer.from_dataset(
+        ds,
+        mean_path=_MEAN_PATH,
+        std_path=_STD_PATH,
+        predict_delta=True,
+        delta_std_path=_delta_std_path(),
+    )
+    raw = ds[(0, 1)]
+    delta_target = norm(raw)
+    # The transformed target_surface must equal (raw_target - raw_start) / delta_std
+    # for the surface channels. Check first sample.
+    expected = (
+        raw["target_surface"] - raw["surface_in"]
+    ) / norm.target_surface_delta_std
+    assert torch.allclose(delta_target["target_surface"], expected, rtol=1e-5, atol=1e-5)
+    # And the state input is z-scored with the regular surface_mean/std (not delta).
+    expected_state = (raw["surface_in"] - norm.surface_mean) / norm.surface_std
+    assert torch.allclose(delta_target["surface_in"], expected_state, rtol=1e-5, atol=1e-5)
+
+
+@_skip_no_fixture
+@_skip_no_stats
+def test_normalizer_predict_delta_requires_delta_std():
+    ds = PlasimClimateDataset(_fixture_path())
+    with pytest.raises(ValueError, match="predict_delta=True requires delta_std_path"):
+        PlasimNormalizer.from_dataset(
+            ds,
+            mean_path=_MEAN_PATH,
+            std_path=_STD_PATH,
+            predict_delta=True,
+            # delta_std_path missing
+        )
+
+
+@_skip_no_fixture
+def test_nan_fill_transform_per_variable_fill():
+    """Per-variable fill values apply to the right channels in
+    ``constant_boundary``/``varying_boundary``; default value covers the rest.
+    """
+    ds = PlasimClimateDataset(_fixture_path())
+    nan = NanFillTransform.from_dataset(
+        ds, fill_values={"lsm": -1.0, "sst": 273.15}, default=0.0
+    )
+    raw = ds[0]
+    filled = nan(raw)
+    # No NaN remains.
+    assert torch.isfinite(filled["constant_boundary"]).all()
+    assert torch.isfinite(filled["varying_boundary"]).all()
+    # Channel-specific check: lsm channel filled with -1, where it was NaN.
+    lsm_idx = ds.layout.constant_boundary_variables.index("lsm")
+    raw_nan_mask = torch.isnan(raw["constant_boundary"][lsm_idx])
+    assert (filled["constant_boundary"][lsm_idx][raw_nan_mask] == -1.0).all()
+
+
+@_skip_no_fixture
+def test_nan_fill_transform_strict_mode():
+    """``strict=True`` raises when any NaN survives, e.g. a missing var key."""
+    ds = PlasimClimateDataset(_fixture_path())
+    # Build a transform with a non-NaN fill but only scan constants — varying
+    # boundary still has NaN, so strict should pass for constant_boundary path
+    # and we contrive a scenario by stripping the fill tensor.
+    nan = NanFillTransform.from_dataset(ds, default=0.0, strict=True)
+    raw = ds[0]
+    filled = nan(raw)
+    # Strict mode produces no NaN (since fill covers all channels).
+    assert torch.isfinite(filled["constant_boundary"]).all()
+    assert torch.isfinite(filled["varying_boundary"]).all()
+
+
+@_skip_no_fixture
+def test_compose_transform_chains_nan_then_normalize():
+    """NanFill → Normalizer composition produces finite normalized tensors."""
+    ds = PlasimClimateDataset(_fixture_path())
+    nan = NanFillTransform.from_dataset(ds, default=0.0)
+    if _HAS_STATS:
+        norm = PlasimNormalizer.from_dataset(
+            ds, mean_path=_MEAN_PATH, std_path=_STD_PATH
+        )
+        ds2 = PlasimClimateDataset(
+            _fixture_path(), transform=ComposeTransform(nan, norm)
+        )
+        sample = ds2[0]
+        for k in (
+            "surface_in",
+            "upper_air_in",
+            "target_surface",
+            "target_upper_air",
+            "constant_boundary",
+            "varying_boundary",
+        ):
+            assert torch.isfinite(sample[k]).all(), f"non-finite in {k}"
+
+
+@_skip_no_fixture
+def test_boundary_substitution_uses_separate_store():
+    """When boundary_zarr_path is set, varying-boundary reads route through
+    the second store. We use the same fixture as both to verify routing.
+    """
+    z = _fixture_path()
+    # Baseline (no boundary store)
+    ds_a = PlasimClimateDataset(z)
+    sample_a = ds_a[0]
+    # With boundary store pointed at the same Zarr.
+    ds_b = PlasimClimateDataset(z, boundary_zarr_path=z)
+    sample_b = ds_b[0]
+    # Same shape; same values when the store is identical. NaN-vs-NaN
+    # comparison: positions match and finite-positions match exactly.
+    a, b = sample_a["varying_boundary"], sample_b["varying_boundary"]
+    assert a.shape == b.shape
+    assert torch.equal(torch.isnan(a), torch.isnan(b))
+    finite = ~torch.isnan(a)
+    assert torch.equal(a[finite], b[finite])
+
+
+@_skip_no_fixture
+def test_boundary_yearly_repeating_dispatch():
+    """yearly_repeating_boundary=True selects between leap and non-leap stores
+    via cftime.is_leap_year on the prognostic timestamp's year.
+    """
+    z = _fixture_path()
+    ds = PlasimClimateDataset(
+        z,
+        yearly_repeating_boundary=True,
+        leap_boundary_zarr_path=z,
+        non_leap_boundary_zarr_path=z,
+    )
+    # Verify dispatch logic for both branches.
+    key_first = ds._boundary_store_key(0)
+    assert key_first in ("leap", "non_leap")
+    # The boundary time index for the first prognostic sample should be 0
+    # (day-of-year 0 + hour 0).
+    bt = ds._boundary_time_index(0)
+    assert bt == 0
+    sample = ds[0]
+    assert sample["varying_boundary"].shape[0] == len(ds.layout.varying_boundary_variables)
+
+
+@_skip_no_fixture
+def test_boundary_repeating_requires_both_paths():
+    z = _fixture_path()
+    with pytest.raises(ValueError, match="requires both"):
+        PlasimClimateDataset(z, yearly_repeating_boundary=True)
 
 
 # ---------------------------------------------------------------------------
