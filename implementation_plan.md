@@ -261,16 +261,51 @@ Components:
   Lives more naturally in the training recipe (Phase 3) once the recipe defines exactly when
   bias correction runs (pre-loss vs post-output).
 
-### Phase 3 — Training recipe (shared, deterministic mode)
+### Phase 3 — Training recipe (shared, deterministic mode) ← *v1 in progress*
 Hydra config groups translated from the YParams YAML schema. Custom loop on `DistributedManager` +
 `save/load_checkpoint` + `LaunchLogger` + `StaticCaptureTraining`, reproducing: AdamW(`fused`)/ZeRO-1,
 OneCycle/cosine/warmup, bf16 AMP, EMA, loss combination + VAE-KL + `predict_delta`/`Integrator`. Modular
 (pluggable model/loss/optimizer/scheduler) so the diffusion port reuses the loop.
-**Tests**:
-- *Unit*: pluggability + config-resolution tests on the loop's components.
-- *Smoke* (Delta): 1–2 train steps on synthetic data, single GPU **and** 2-GPU DDP via `torchrun
-  --nproc-per-node=2`; checkpoint at step 1 reloads and matches.
-A longer real-data shake-out runs on `gpuA40x4` (non-interactive), not as a smoke test.
+
+**v1 (PanguPlasimLegacy, deterministic, no VAE-KL)** at
+[`examples/weather/pangu_plasim/`](examples/weather/pangu_plasim/):
+
+- [`loss.py`](examples/weather/pangu_plasim/loss.py): `PanguPlasimLoss` — per-variable + cos(lat) weighted
+  L1 / L2 residual on surface + upper-air + (optional) diagnostic; diagnostic head off for `LEGACY` config.
+  Both MSE and MAE supported via `loss_type`.
+- [`ema.py`](examples/weather/pangu_plasim/ema.py): `ModelEMA` with PanguWeather decay=0.999, warmup
+  ramp `(1+epoch)/(warmup_epochs+1)`.
+- [`train_loop.py`](examples/weather/pangu_plasim/train_loop.py): `make_optimizer`/`make_scheduler`/`train_step`
+  factories. OneCycleLR (`oc_pct_start=0.1`, `oc_div_factor=1e5`, `oc_final_div_factor=0.00025` per
+  `PANGU_PLASIM_H5_DERECHO_0514.yaml`) for `PanguPlasimLegacy`; LinearWarmup + CosineAnnealing reserved for
+  the VAE variant.
+- [`train.py`](examples/weather/pangu_plasim/train.py): Hydra entrypoint composing
+  `model` / `scheduler` / `loss` groups, wiring `DistributedManager` + DDP + `LaunchLogger` + `ModelEMA` +
+  `save/load_checkpoint`. Drives a `PlasimClimateDatapipe` with `PlasimNormalizer` + `NanFillTransform`
+  attached as the dataset's CPU-side transform.
+- [`conf/`](examples/weather/pangu_plasim/conf/): top-level `config.yaml` + `model/pangu_plasim_legacy.yaml`
+  + `scheduler/{onecycle,cosine_warmup}.yaml` + `loss/{mae,mse}.yaml`.
+- [`hpc/scripts/pangu_plasim_legacy_shake_out.sbatch`](hpc/scripts/pangu_plasim_legacy_shake_out.sbatch):
+  SLURM script for the longer real-data shake-out on Delta `gpuA40x4` (non-interactive, 4× A40,
+  `torchrun --standalone --nproc-per-node=4`).
+
+**Tests** at [`test/recipes/pangu_plasim_legacy/`](test/recipes/pangu_plasim_legacy/):
+- *Unit* (21 cases, CPU): `test_loss.py` (cos-lat weights, identity, per-var amplification, gradient flow,
+  unknown-type rejection), `test_ema.py` (warmup clamp, post-warmup decay, apply/restore round-trip,
+  apply-twice raises, state-dict round-trip), `test_train_loop.py` (AdamW factory, OneCycleLR + cosine
+  composition + unknown rejections, end-to-end loss reduction on a toy model).
+- *Smoke* (Delta `gpuA40x4-interactive`): `test_smoke_single_gpu.py` — real Zarr → datapipe → 2 train steps
+  on a tiny PanguPlasimLegacy + checkpoint roundtrip on cuda:0. `test_smoke_ddp.py` —
+  `torchrun --standalone --nproc-per-node=2` 2-GPU DDP variant that all-gathers params after one step to
+  assert byte-identical sync.
+- Longer shake-out: SLURM script above; not a smoke test.
+
+**Deferred (Phase 3 v2)**:
+- PanguPlasim (VAE-KL) loss term + `LinearWarmupCosineAnnealingLR` driver in `train.py`.
+- bf16 AMP via `StaticCaptureTraining` (currently disabled by default; `cfg.amp=True` no-op until wired).
+- Fused AdamW / ZeRO-1 / gradient clip enable path (config keys present, factories pending).
+- Long-validation rollout + bias correction (Phase 4 territory; rolls into the recipe via the validation
+  hooks already stubbed in `train.py`).
 
 ### Phase 4 — Validation (mid-training + after-the-fact)
 Mid-training: autoregressive rollout → lat-weighted RMSE (mse+reductions) + ACC (`physicsnemo.metrics.climate.acc`

@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Top-level config for the Pangu_Plasim training recipe.
+#
+# Defaults pick the PanguPlasimLegacy + OneCycleLR + L1-loss combination that
+# matches PanguWeather v2.0 PANGU_PLASIM_H5_DERECHO_0514.yaml. Override on the
+# command line, e.g.
+#   python train.py loss=mse scheduler=cosine_warmup
+#
+# The dataset + stats paths are required and intentionally have no defaults;
+# point them at your Zarr store + PanguWeather-style mean/std NetCDFs.
+
+defaults:
+  - _self_
+  - model: pangu_plasim_legacy
+  - scheduler: onecycle
+  - loss: mae
+
+hydra:
+  job:
+    chdir: True
+  run:
+    dir: ./outputs/${run_name}
+
+run_name: pangu_plasim_legacy
+
+# --- Run control -----------------------------------------------------------
+start_epoch: 1
+max_epochs: 100
+seed: 0
+amp: False                    # mixed precision; disabled by default for v1
+grad_clip_norm: 0.0           # 0 disables gradient clipping
+checkpoint_save_interval: 10
+max_checkpoints_to_keep: 5
+log_every_n_steps: 1
+
+# --- EMA --------------------------------------------------------------------
+ema:
+  enabled: True
+  decay: 0.999
+  warmup_epochs: 6
+
+# --- Data -------------------------------------------------------------------
+data:
+  zarr_path: ???              # REQUIRED — Zarr store from tools/data/plasim/pangu_h5_to_zarr.py
+  val_zarr_path: null         # optional — separate validation store
+  mean_path: ???              # REQUIRED — PanguWeather-style per-var mean NetCDF
+  std_path: ???               # REQUIRED — per-var std NetCDF
+  delta_std_path: null        # set + predict_delta=True for tendency mode
+  boundary_zarr_path: null
+  yearly_repeating_boundary: False
+  leap_boundary_zarr_path: null
+  non_leap_boundary_zarr_path: null
+
+  forecast_lead_times: [1]
+  num_samples_per_epoch: null # null defaults to len(dataset)
+  batch_size: 16
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: True
+  pin_memory: True
+  nan_fill_default: 0.0
+  nan_fill_values: {}
+  shuffle: True

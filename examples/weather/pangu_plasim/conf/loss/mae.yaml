@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# MAE / L1 task loss — PanguPlasimLegacy default
+# (PanguWeather v2.0 PANGU_PLASIM_H5_DERECHO_0514: loss=l1).
+
+loss_type: l1
+surface_weight: 1.0
+upper_air_weight: 1.0
+diagnostic_weight: 1.0
+# Optional per-variable weight overrides (omit / leave empty for uniform).
+surface_var_weights: {}
+upper_air_var_weights: {}
+diagnostic_var_weights: {}
