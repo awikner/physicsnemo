@@ -332,8 +332,27 @@ OneCycle/cosine/warmup, bf16 AMP, EMA, loss combination + VAE-KL + `predict_delt
   assert byte-identical sync.
 - Longer shake-out: SLURM script above; not a smoke test.
 
-**Deferred (Phase 3 v2)**:
-- PanguPlasim (VAE-KL) loss term + `LinearWarmupCosineAnnealingLR` driver in `train.py`.
+**v2 — PanguPlasim (VAE) wired** (commits leading up to *Phase 3 v2*):
+
+- ✅ `vae_kl_loss(mu_q, logvar_q, mu_p, logvar_p)` in
+  [`examples/weather/pangu_plasim/loss.py`](examples/weather/pangu_plasim/loss.py)
+  — faithful port of PanguWeather v2.0 `utils/losses.Kl_divergence_gaussians`.
+- ✅ [`train_loop.train_step`](examples/weather/pangu_plasim/train_loop.py) gains
+  `vae_kl_weight` kwarg. Branches on whether the model returned real tensor latents
+  (`torch.Tensor`) vs the int `0` placeholders the legacy model emits.
+- ✅ [`train.py`](examples/weather/pangu_plasim/train.py) `build_model` selects
+  PanguPlasim vs PanguPlasimLegacy via `cfg.model.model_type`; the VAE-KL weight
+  comes from `cfg.loss.vae_kl_weight`.
+- ✅ Hydra: [`conf/model/pangu_plasim.yaml`](examples/weather/pangu_plasim/conf/model/pangu_plasim.yaml)
+  + [`conf/loss/{mae,mse}_with_kl.yaml`](examples/weather/pangu_plasim/conf/loss/);
+  `conf/scheduler/cosine_warmup.yaml` already in place from v1.
+- ✅ Tests: 9 new unit cases (KL analytic properties, train_step VAE-on / VAE-off
+  branches, sanity loss-reduction) + 1 new Delta GPU smoke
+  ([`test_smoke_vae_single_gpu.py`](test/recipes/pangu_plasim_legacy/test_smoke_vae_single_gpu.py))
+  exercising the full VAE training path with `vae_kls_nonzero > 0` guard. All
+  30 non-smoke recipe tests stay green.
+
+**Deferred (Phase 3 v3)**:
 - bf16 AMP via `StaticCaptureTraining` (currently disabled by default; `cfg.amp=True` no-op until wired).
 - Fused AdamW / ZeRO-1 / gradient clip enable path (config keys present, factories pending).
 - Long-validation rollout + bias correction (Phase 4 territory; rolls into the recipe via the validation
