@@ -316,18 +316,40 @@ class ClimateZarrDataset(Dataset):
             for v in self.layout.varying_boundary_variables
         }
 
+    def _decompose_time(self, time_idx: int) -> tuple[int, int, int]:
+        """Return ``(year, dayofyear_0_indexed, hour)`` for a prognostic time index.
+
+        Robust to both cftime objects (PLASIM pre-1582 calendar) and numpy
+        ``datetime64`` (xarray decodes post-1582 dates into numpy time when
+        ``use_cftime=False`` — which is the open_zarr default).
+        """
+        t = self._prog_times[time_idx]
+        # numpy.datetime64 path: convert to Python datetime.
+        if isinstance(t, np.datetime64):
+            import pandas as pd
+
+            ts = pd.Timestamp(t).to_pydatetime()
+            return ts.year, ts.timetuple().tm_yday - 1, ts.hour
+        # cftime path: prefer the explicit `dayofyr` (cftime), falling back to
+        # `timetuple` for cftime variants that don't expose it.
+        year = t.year
+        try:
+            doy = t.dayofyr - 1
+        except AttributeError:
+            doy = t.timetuple().tm_yday - 1
+        return year, doy, t.hour
+
     def _boundary_store_key(self, time_idx: int) -> str:
         """Pick which boundary store to read from for a given prognostic time index."""
         if self._yearly_repeating_boundary:
             import cftime
 
-            t = self._prog_times[time_idx]
-            year = t.year
+            year, _, _ = self._decompose_time(time_idx)
             try:
                 is_leap = cftime.is_leap_year(year, self.layout.calendar)
             except Exception:
-                # cftime API variance across versions; fall back to per-cls method.
-                is_leap = hasattr(t, "daysinmonth") and t.daysinmonth[1] == 29
+                # cftime API variance across versions; fall back to Python.
+                is_leap = (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
             return "leap" if is_leap else "non_leap"
         return "single"
 
@@ -335,13 +357,7 @@ class ClimateZarrDataset(Dataset):
         """Map the prognostic time index to the boundary-store time index."""
         if not self._boundary_async_groups:
             return time_idx
-        t = self._prog_times[time_idx]
-        # Day-of-year (1-indexed in cftime); convert to 0-indexed.
-        try:
-            doy = t.dayofyr - 1
-        except AttributeError:
-            doy = t.timetuple().tm_yday - 1
-        hour = t.hour
+        _, doy, hour = self._decompose_time(time_idx)
         return doy * self._steps_per_day + hour // self.layout.data_timedelta_hours
 
     # ------------------------------------------------------------------ #
