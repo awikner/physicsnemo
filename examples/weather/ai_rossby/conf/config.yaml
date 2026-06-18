@@ -30,7 +30,7 @@ run_name: pangu_plasim_legacy
 start_epoch: 1
 max_epochs: 100
 seed: 0
-amp: False                    # mixed precision; disabled by default for v1
+amp: none                     # mixed precision: none / off / bf16 / fp16 (bf16 matches PanguWeather)
 grad_clip_norm: 0.0           # 0 disables gradient clipping
 checkpoint_save_interval: 10
 max_checkpoints_to_keep: 5

@@ -50,4 +50,4 @@ complex_network: True
 complex_activation: real
 spectral_layers: 3
 checkpointing: 0
-data_grid: equiangular
+data_grid: legendre-gauss

@@ -64,7 +64,12 @@ from physicsnemo.utils.logging import LaunchLogger, PythonLogger
 
 from ema import ModelEMA
 from loss import PanguPlasimLoss
-from train_loop import make_optimizer, make_scheduler, train_step
+from train_loop import (
+    _resolve_amp_dtype,
+    make_optimizer,
+    make_scheduler,
+    train_step,
+)
 
 
 def _resolve_path(p: str | None) -> str | None:
@@ -329,6 +334,18 @@ def main(cfg: DictConfig) -> None:
     optimizer = make_optimizer(inner_model, sched_cfg)
     scheduler = make_scheduler(optimizer, sched_cfg, total_steps=total_steps)
 
+    # --- Mixed precision --------------------------------------------------
+    amp_dtype = _resolve_amp_dtype(cfg.get("amp", None))
+    # fp16 needs a GradScaler; bf16 retains enough dynamic range to skip it.
+    grad_scaler = None
+    if amp_dtype == torch.float16 and dist.device.type == "cuda":
+        grad_scaler = torch.amp.GradScaler(device="cuda")
+        logger.info("AMP enabled with fp16 + GradScaler")
+    elif amp_dtype == torch.bfloat16:
+        logger.info("AMP enabled with bf16 (no GradScaler)")
+    elif amp_dtype is None:
+        logger.info("AMP disabled (cfg.amp=%s)", cfg.get("amp", None))
+
     # --- EMA --------------------------------------------------------------
     ema = None
     if bool(cfg.ema.enabled):
@@ -369,6 +386,8 @@ def main(cfg: DictConfig) -> None:
                     batch=batch,
                     has_diagnostic=has_diagnostic,
                     vae_kl_weight=float(cfg.loss.get("vae_kl_weight", 0.0)),
+                    amp_dtype=amp_dtype,
+                    grad_scaler=grad_scaler,
                 )
                 if float(cfg.grad_clip_norm) > 0:
                     torch.nn.utils.clip_grad_norm_(

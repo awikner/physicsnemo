@@ -485,3 +485,167 @@
 2026-06-18 16:21:01,401 INFO __main__ loaded 1200 / 1460
 2026-06-18 16:21:15,721 INFO __main__ loaded 1400 / 1460
 2026-06-18 16:21:42,868 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2013.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:23:09,897 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 16:23:12 CDT 2026] converting ERA5 year 2014 ...
+2026-06-18 16:23:16,499 INFO __main__ year 2014: 1460 sample files in [0, 1460)
+2026-06-18 16:23:16,502 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:23:31,051 INFO __main__ loaded 200 / 1460
+2026-06-18 16:23:44,088 INFO __main__ loaded 400 / 1460
+2026-06-18 16:23:55,132 INFO __main__ loaded 600 / 1460
+2026-06-18 16:24:06,163 INFO __main__ loaded 800 / 1460
+2026-06-18 16:24:17,793 INFO __main__ loaded 1000 / 1460
+2026-06-18 16:24:28,536 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:24:39,008 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:24:56,385 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2014.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:26:29,099 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 16:26:31 CDT 2026] converting ERA5 year 2015 ...
+2026-06-18 16:26:35,094 INFO __main__ year 2015: 1460 sample files in [0, 1460)
+2026-06-18 16:26:35,098 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:26:48,057 INFO __main__ loaded 200 / 1460
+2026-06-18 16:26:59,101 INFO __main__ loaded 400 / 1460
+2026-06-18 16:27:10,612 INFO __main__ loaded 600 / 1460
+2026-06-18 16:27:21,343 INFO __main__ loaded 800 / 1460
+2026-06-18 16:27:36,209 INFO __main__ loaded 1000 / 1460
+2026-06-18 16:27:52,157 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:28:03,075 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:28:34,346 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2015.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:30:07,523 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 16:30:09 CDT 2026] converting ERA5 year 2016 ...
+2026-06-18 16:30:13,453 INFO __main__ year 2016: 1464 sample files in [0, 1464)
+2026-06-18 16:30:13,457 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:30:29,191 INFO __main__ loaded 200 / 1464
+2026-06-18 16:30:43,452 INFO __main__ loaded 400 / 1464
+2026-06-18 16:30:57,283 INFO __main__ loaded 600 / 1464
+2026-06-18 16:31:12,619 INFO __main__ loaded 800 / 1464
+2026-06-18 16:31:31,845 INFO __main__ loaded 1000 / 1464
+2026-06-18 16:31:47,490 INFO __main__ loaded 1200 / 1464
+2026-06-18 16:32:04,003 INFO __main__ loaded 1400 / 1464
+2026-06-18 16:32:40,478 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2016.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:34:46,029 INFO __main__ done: 15 vars, 1464 timesteps
+[Thu Jun 18 16:34:48 CDT 2026] converting ERA5 year 2017 ...
+2026-06-18 16:34:51,434 INFO __main__ year 2017: 1460 sample files in [0, 1460)
+2026-06-18 16:34:51,438 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:35:08,837 INFO __main__ loaded 200 / 1460
+2026-06-18 16:35:25,890 INFO __main__ loaded 400 / 1460
+2026-06-18 16:35:39,685 INFO __main__ loaded 600 / 1460
+2026-06-18 16:35:52,331 INFO __main__ loaded 800 / 1460
+2026-06-18 16:36:08,146 INFO __main__ loaded 1000 / 1460
+2026-06-18 16:36:19,253 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:36:28,632 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:36:51,451 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2017.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:38:23,985 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 16:38:25 CDT 2026] converting ERA5 year 2018 ...
+2026-06-18 16:38:29,245 INFO __main__ year 2018: 1460 sample files in [0, 1460)
+2026-06-18 16:38:29,247 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:38:43,107 INFO __main__ loaded 200 / 1460
+2026-06-18 16:38:54,286 INFO __main__ loaded 400 / 1460
+2026-06-18 16:39:03,417 INFO __main__ loaded 600 / 1460
+2026-06-18 16:39:12,930 INFO __main__ loaded 800 / 1460
+2026-06-18 16:39:22,992 INFO __main__ loaded 1000 / 1460
+2026-06-18 16:39:35,634 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:39:47,584 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:40:15,025 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2018.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:41:41,028 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 16:41:43 CDT 2026] building normalization variant pangu_s2s ...
+2026-06-18 16:41:49,280 INFO __main__ merged 5 upper-air + 16 surface vars from variant pangu_s2s
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:41:51,824 INFO _common.normalization wrote normalization Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s.zarr (vars=21, sigma_levels=0, pressure_levels=17)
+[Thu Jun 18 16:41:52 CDT 2026] building normalization variant pangu_s2s_withnino ...
+2026-06-18 16:41:54,745 INFO __main__ merged 5 upper-air + 19 surface vars from variant pangu_s2s_withnino
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:41:58,193 INFO _common.normalization wrote normalization Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_withnino.zarr (vars=24, sigma_levels=0, pressure_levels=17)
+[Thu Jun 18 16:41:58 CDT 2026] building normalization variant pangu_s2s_log_precip ...
+2026-06-18 16:42:01,095 INFO __main__ merged 5 upper-air + 16 surface vars from variant pangu_s2s_log_precip
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:42:03,573 INFO _common.normalization wrote normalization Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_log_precip.zarr (vars=21, sigma_levels=0, pressure_levels=17)
+[Thu Jun 18 16:42:03 CDT 2026] building normalization variant pangu_s2s_withnino_log_precip ...
+2026-06-18 16:42:06,617 INFO __main__ merged 5 upper-air + 19 surface vars from variant pangu_s2s_withnino_log_precip
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:42:10,498 INFO _common.normalization wrote normalization Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_withnino_log_precip.zarr (vars=24, sigma_levels=0, pressure_levels=17)
+[Thu Jun 18 16:42:10 CDT 2026] building normalization variant pangu_s2s_Z200 ...
+2026-06-18 16:42:16,181 INFO __main__ merged 5 upper-air + 16 surface vars from variant pangu_s2s_Z200
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:42:19,287 INFO _common.normalization wrote normalization Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_Z200.zarr (vars=21, sigma_levels=0, pressure_levels=18)
+[Thu Jun 18 16:42:20 CDT 2026] building ERA5 climatology Zarr ...
+2026-06-18 16:42:26,441 INFO __main__ loaded mean (21 vars) + std (21 vars) climatologies from /work/hdd/bdiu/bgong1/data/h5data
+2026-06-18 16:42:26,442 INFO _common.climatology_bias merging 21 climatology vars + 0 bias vars → 21 unified vars
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:44:08,886 INFO _common.climatology_bias wrote climatology+bias Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/climatology_bias.zarr (vars=21)
+[Thu Jun 18 16:44:10 CDT 2026] ERA5 full-archive conversion complete.
+total 184
+drwxrws---+ 46 awikner delta_bdiu 4096 Jun 18 16:43 .
+drwxrws---+  5 awikner delta_bdiu 4096 Jun 18 13:27 ..
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:23 1981.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:26 1982.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:29 1983.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:34 1984.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:37 1985.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:40 1986.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:44 1987.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:49 1988.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:53 1989.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 14:56 1990.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:00 1991.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:04 1992.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:07 1993.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:11 1994.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:14 1995.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:19 1996.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:23 1997.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:27 1998.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:30 1999.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:34 2000.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:37 2001.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:41 2002.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:44 2003.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:49 2004.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:52 2005.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 15:56 2006.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:00 2007.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:04 2008.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:08 2009.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:11 2010.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:15 2011.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:19 2012.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:23 2013.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:26 2014.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:30 2015.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:34 2016.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:38 2017.zarr
+drwxrws---+ 21 awikner delta_bdiu 4096 Jun 18 16:41 2018.zarr
+drwxrws---+ 28 awikner delta_bdiu 4096 Jun 18 16:44 climatology_bias.zarr
+drwxrws---+ 25 awikner delta_bdiu 4096 Jun 18 16:41 normalization_pangu_s2s.zarr
+drwxrws---+ 25 awikner delta_bdiu 4096 Jun 18 16:42 normalization_pangu_s2s_Z200.zarr
+drwxrws---+ 25 awikner delta_bdiu 4096 Jun 18 16:42 normalization_pangu_s2s_log_precip.zarr
+drwxrws---+ 28 awikner delta_bdiu 4096 Jun 18 16:41 normalization_pangu_s2s_withnino.zarr
+drwxrws---+ 28 awikner delta_bdiu 4096 Jun 18 16:42 normalization_pangu_s2s_withnino_log_precip.zarr

@@ -501,3 +501,49 @@
 2026-06-18 16:21:31,505 INFO __main__ scanned bias dir /work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/bias (17 vars)
 2026-06-18 16:21:31,505 INFO _common.climatology_bias loading 510 bias .npy files across 64 worker processes
 2026-06-18 16:21:32,541 INFO _common.climatology_bias merging 41 climatology vars + 17 bias vars → 41 unified vars
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:26:22,058 INFO _common.climatology_bias wrote climatology+bias Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/climatology_bias.zarr (vars=75)
+[Thu Jun 18 16:26:22 CDT 2026] E3SM full-archive conversion complete.
+total 156
+drwxrws---+ 39 awikner delta_bdiu 4096 Jun 18 16:25 .
+drwxrws---+  5 awikner delta_bdiu 4096 Jun 18 13:27 ..
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:12 2015.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:15 2016.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:19 2017.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:23 2018.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:27 2019.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:34 2020.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:37 2021.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:40 2022.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:43 2023.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:48 2024.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:52 2025.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:55 2026.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 14:57 2027.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:04 2028.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:07 2029.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:10 2030.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:13 2031.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:18 2032.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:21 2033.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:24 2034.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:27 2035.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:30 2036.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:34 2037.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:37 2038.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:39 2039.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:43 2040.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:48 2041.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:51 2042.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:55 2043.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 15:59 2044.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 16:04 2045.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 16:08 2046.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 16:12 2047.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 16:18 2048.zarr
+drwxrws---+ 22 awikner delta_bdiu 4096 Jun 18 16:21 2049.zarr
+drwxrws---+ 83 awikner delta_bdiu 4096 Jun 18 16:26 climatology_bias.zarr
+drwxrws---+ 30 awikner delta_bdiu 4096 Jun 18 16:21 normalization_2015-2050.zarr

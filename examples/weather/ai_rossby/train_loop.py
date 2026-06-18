@@ -12,6 +12,7 @@ for the future PanguPlasim with VAE).
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Optional
 
 import torch
@@ -26,20 +27,39 @@ from torch.optim.lr_scheduler import (
 def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
     """Build an optimizer from a config dict-like.
 
-    Recognized keys: ``optimizer_type`` (``"AdamW"`` only for v1), ``lr``,
-    ``weight_decay``.
+    Recognized keys:
+
+    * ``optimizer_type`` — ``"AdamW"`` (only supported variant so far).
+    * ``lr`` — base learning rate.
+    * ``weight_decay`` — default 0.
+    * ``fused`` — when True, requests the fused CUDA kernel for AdamW
+      (``torch.optim.AdamW(..., fused=True)``). Requires CUDA; falls back to
+      the eager AdamW with a warning if the runtime can't honor it.
     """
     name = getattr(cfg, "optimizer_type", "AdamW")
     if name != "AdamW":
         raise ValueError(
-            f"Phase 3 v1 only supports optimizer_type='AdamW' (got {name!r}). "
-            "Wire other optimizers (e.g. FusedAdam, Muon) as the recipe matures."
+            f"Phase 3 only supports optimizer_type='AdamW' (got {name!r}). "
+            "Wire other optimizers (e.g. Muon) as the recipe matures."
         )
-    return torch.optim.AdamW(
-        model.parameters(),
+    fused = bool(getattr(cfg, "fused", False))
+    kwargs = dict(
         lr=float(cfg.lr),
         weight_decay=float(getattr(cfg, "weight_decay", 0.0)),
     )
+    if fused:
+        if not torch.cuda.is_available():
+            import warnings as _warnings
+
+            _warnings.warn(
+                "cfg.fused=True requested but CUDA is not available; falling "
+                "back to eager AdamW.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            kwargs["fused"] = True
+    return torch.optim.AdamW(model.parameters(), **kwargs)
 
 
 def make_scheduler(
@@ -90,6 +110,25 @@ def make_scheduler(
     raise ValueError(f"Unknown scheduler {name!r}")
 
 
+_AMP_DTYPES = {
+    "none": None,
+    "off": None,
+    "bf16": torch.bfloat16,
+    "bfloat16": torch.bfloat16,
+    "fp16": torch.float16,
+    "float16": torch.float16,
+}
+
+
+def _resolve_amp_dtype(amp: str | bool | None) -> Optional[torch.dtype]:
+    """Map ``cfg.amp`` (string or bool) to a torch dtype or ``None`` for off."""
+    if amp is None or amp is False:
+        return None
+    if amp is True:
+        return torch.bfloat16  # default-on AMP picks bf16 (matches PanguWeather)
+    return _AMP_DTYPES.get(str(amp).lower())
+
+
 def train_step(
     *,
     model: torch.nn.Module,
@@ -99,6 +138,8 @@ def train_step(
     batch: dict[str, torch.Tensor],
     has_diagnostic: bool,
     vae_kl_weight: float = 0.0,
+    amp_dtype: Optional[torch.dtype] = None,
+    grad_scaler: Optional["torch.amp.GradScaler"] = None,
 ) -> dict[str, torch.Tensor]:
     """One optimizer step: forward + backward + step + scheduler tick.
 
@@ -106,6 +147,16 @@ def train_step(
     entry. Compatible with both PanguPlasimLegacy (5- or 7-tuple output with
     zero latent placeholders — `vae_kl` stays ~0) and PanguPlasim with VAE
     (6- or 7-tuple with real ``mu``/``logvar``).
+
+    Mixed-precision support
+    -----------------------
+    When ``amp_dtype`` is not ``None``, the forward + loss computation runs
+    under ``torch.amp.autocast(device_type="cuda", dtype=amp_dtype)``. For
+    ``bf16`` (matches PanguWeather v2.0's default for SFNO_PLASIM) no
+    :class:`GradScaler` is needed. For ``fp16`` pass an externally-managed
+    ``grad_scaler`` so the trainer can also persist its state across
+    checkpoints. The optimizer step is wrapped in
+    ``grad_scaler.step`` + ``grad_scaler.update`` when present.
 
     When ``vae_kl_weight > 0`` and the model emits real ``(mu, logvar,
     mu_e2, logvar_e2)`` tuples, the KL divergence between the two encoder
@@ -117,63 +168,79 @@ def train_step(
     from loss import vae_kl_loss  # local import keeps train_loop / loss decoupled at import time
 
     optimizer.zero_grad(set_to_none=True)
-    out = model(
-        batch["surface_in"],
-        batch["constant_boundary"],
-        batch["varying_boundary"],
-        batch["upper_air_in"],
-        target_surface=batch.get("target_surface"),
-        target_upper_air=batch.get("target_upper_air"),
-        train=True,
-    ) if _model_accepts_train_kwarg(model) else model(
-        batch["surface_in"],
-        batch["constant_boundary"],
-        batch["varying_boundary"],
-        batch["upper_air_in"],
-    )
 
-    # Output tuple layout:
-    # * PanguPlasimLegacy (no diag): (surface, upper_air, 0, 0, 0, 0)
-    # * PanguPlasimLegacy (diag):    (surface, upper_air, diag, 0, 0, 0, 0)
-    # * PanguPlasim (no diag, train=True): (surface, upper_air, mu, logvar, mu_e2, logvar_e2)
-    # * PanguPlasim (diag, train=True):    (surface, upper_air, diag, mu, logvar, mu_e2, logvar_e2)
-    if has_diagnostic:
-        out_surface, out_upper_air, out_diag = out[0], out[1], out[2]
-        latent_offset = 3
+    # Autocast context — no-op when amp_dtype is None.
+    if amp_dtype is None:
+        amp_ctx = contextlib.nullcontext()
     else:
-        out_surface, out_upper_air = out[0], out[1]
-        out_diag = None
-        latent_offset = 2
+        device_type = "cuda" if batch["surface_in"].is_cuda else "cpu"
+        amp_ctx = torch.amp.autocast(device_type=device_type, dtype=amp_dtype)
 
-    losses = loss_fn(
-        out_surface,
-        out_upper_air,
-        batch["target_surface"],
-        batch["target_upper_air"],
-        out_diagnostic=out_diag,
-        target_diagnostic=batch.get("diagnostic") if has_diagnostic else None,
-    )
+    with amp_ctx:
+        out = model(
+            batch["surface_in"],
+            batch["constant_boundary"],
+            batch["varying_boundary"],
+            batch["upper_air_in"],
+            target_surface=batch.get("target_surface"),
+            target_upper_air=batch.get("target_upper_air"),
+            train=True,
+        ) if _model_accepts_train_kwarg(model) else model(
+            batch["surface_in"],
+            batch["constant_boundary"],
+            batch["varying_boundary"],
+            batch["upper_air_in"],
+        )
 
-    # The VAE-KL branch fires only when (a) KL weight > 0, (b) the model
-    # returned at least four latent slots, AND (c) those slots are torch
-    # Tensors (the legacy port emits Python int `0` placeholders, not
-    # tensors — easy sentinel for "no VAE here").
-    latent_slots = out[latent_offset : latent_offset + 4] if len(out) >= latent_offset + 4 else ()
-    has_real_latents = (
-        len(latent_slots) == 4
-        and all(isinstance(x, torch.Tensor) and x.numel() > 0 for x in latent_slots)
-    )
-    if vae_kl_weight > 0.0 and has_real_latents:
-        mu, logvar, mu_e2, logvar_e2 = latent_slots
-        kl = vae_kl_loss(mu, logvar, mu_e2, logvar_e2)
-        losses["vae_kl"] = kl.detach()
-        losses["loss"] = losses["loss"] + vae_kl_weight * kl
+        # Output tuple layout:
+        # * PanguPlasimLegacy (no diag): (surface, upper_air, 0, 0, 0, 0)
+        # * PanguPlasimLegacy (diag):    (surface, upper_air, diag, 0, 0, 0, 0)
+        # * PanguPlasim (no diag, train=True): (surface, upper_air, mu, logvar, mu_e2, logvar_e2)
+        # * PanguPlasim (diag, train=True):    (surface, upper_air, diag, mu, logvar, mu_e2, logvar_e2)
+        if has_diagnostic:
+            out_surface, out_upper_air, out_diag = out[0], out[1], out[2]
+            latent_offset = 3
+        else:
+            out_surface, out_upper_air = out[0], out[1]
+            out_diag = None
+            latent_offset = 2
+
+        losses = loss_fn(
+            out_surface,
+            out_upper_air,
+            batch["target_surface"],
+            batch["target_upper_air"],
+            out_diagnostic=out_diag,
+            target_diagnostic=batch.get("diagnostic") if has_diagnostic else None,
+        )
+
+        # The VAE-KL branch fires only when (a) KL weight > 0, (b) the model
+        # returned at least four latent slots, AND (c) those slots are torch
+        # Tensors (the legacy port emits Python int `0` placeholders, not
+        # tensors — easy sentinel for "no VAE here").
+        latent_slots = out[latent_offset : latent_offset + 4] if len(out) >= latent_offset + 4 else ()
+        has_real_latents = (
+            len(latent_slots) == 4
+            and all(isinstance(x, torch.Tensor) and x.numel() > 0 for x in latent_slots)
+        )
+        if vae_kl_weight > 0.0 and has_real_latents:
+            mu, logvar, mu_e2, logvar_e2 = latent_slots
+            kl = vae_kl_loss(mu, logvar, mu_e2, logvar_e2)
+            losses["vae_kl"] = kl.detach()
+            losses["loss"] = losses["loss"] + vae_kl_weight * kl
+        else:
+            # VAE disabled or model emits placeholders. Keep the key for logger uniformity.
+            losses["vae_kl"] = torch.zeros((), device=out_surface.device, dtype=out_surface.dtype)
+
+    # Backward + step. GradScaler is required for fp16 (underflow protection);
+    # bf16 retains enough dynamic range that no scaling is needed.
+    if grad_scaler is not None:
+        grad_scaler.scale(losses["loss"]).backward()
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
     else:
-        # VAE disabled or model emits placeholders. Keep the key for logger uniformity.
-        losses["vae_kl"] = torch.zeros((), device=out_surface.device, dtype=out_surface.dtype)
-
-    losses["loss"].backward()
-    optimizer.step()
+        losses["loss"].backward()
+        optimizer.step()
     if scheduler is not None:
         scheduler.step()
     return losses
