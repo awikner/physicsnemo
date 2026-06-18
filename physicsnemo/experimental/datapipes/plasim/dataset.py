@@ -240,7 +240,9 @@ class ClimateZarrDataset(Dataset):
         # standard calendars). Climate datasets straddle both regimes — PLASIM
         # uses fictitious years like 100 (cftime path), ERA5/E3SM use 1979+
         # (datetime64 path). Uniform cftime keeps boundary substitution
-        # (leap-year + day-of-year mapping) on a single code path.
+        # (leap-year + day-of-year mapping) on a single code path. Measured
+        # impact on the loader hot path is < 1% (see
+        # benchmarks/.../RESULTS.md "cftime parity check").
         self._ds = xr.open_zarr(
             self.zarr_path,
             consolidated=consolidated,

@@ -107,6 +107,35 @@ Eager constants + 1 sync call replacing 22 = ~95% reduction in asyncio
 bookkeeping per sample. Confirmed by the load-only Zarr column climbing
 from 76 samples/s to 233 samples/s (3.1×) at `(num_workers=4, batch_size=4)`.
 
+## cftime parity check (2026-06-18)
+
+Phase G forces `decode_times=xr.coders.CFDatetimeCoder(use_cftime=True)` on
+all xarray opens (dataset + converters) so the in-memory time coord is uniform
+across PLASIM (pre-1582 year 1, already cftime by default) and ERA5/E3SM
+(post-1582 dates, otherwise decoded to `numpy.datetime64`). Re-ran the
+load-only microbench on Delta after the change:
+
+| workers | bs | PanguH5 samples/s | Zarr samples/s | Zarr / PanguH5 |
+|---|---|---|---|---|
+| 0 | 1 | 55.1 | 76.3 | **1.38×** |
+| 0 | 4 | 54.5 | 90.9 | **1.67×** |
+| 2 | 1 | 97.9 | 154.0 | **1.57×** |
+| 2 | 4 | 101.5 | 171.5 | **1.69×** |
+| 4 | 1 | 183.1 | 218.8 | **1.19×** |
+| 4 | 4 | 187.4 | 235.6 | **1.26×** |
+
+All cells within ±1% of the pre-cftime numbers above — cftime has **no
+measurable impact** on the loader hot path because the dataset's per-sample
+reads go through the cached async-zarr handles, not xarray. The time-coord
+decode is a one-time cost at `__init__` and the per-sample reads bypass
+xarray entirely (the optimized path documented above).
+
+Footnote: an earlier re-bench against `smoke_month.zarr` (50-step time
+chunks) initially showed a ~10× regression that was actually unrelated to
+cftime — it was the fixture chunk-size mismatch from the previous section.
+The benchmark now hard-codes `smoke_month_t1.zarr` (time_chunk=1) so the
+correct fixture is always used.
+
 ## Future maintenance
 
 A diagnostic test (`test_dataset_uses_batched_async_zarr_reads` in

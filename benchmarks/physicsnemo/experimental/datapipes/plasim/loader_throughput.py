@@ -243,7 +243,12 @@ def _zarr_path() -> Path:
     root = os.environ.get("AI_ROSSBY_TEST_DATA")
     if not root:
         raise RuntimeError("AI_ROSSBY_TEST_DATA is not set")
-    return Path(root) / "plasim" / "smoke_month.zarr"
+    # smoke_month_t1.zarr writes 1 timestep per chunk (the recommended chunking
+    # for per-sample reads — matches a training data loader's access pattern).
+    # smoke_month.zarr exists too but uses a 50-step chunk which forces zarr
+    # to load 50 samples per read; that fixture is for testing chunk-level
+    # behavior, not loader throughput.
+    return Path(root) / "plasim" / "smoke_month_t1.zarr"
 
 
 # ---------------------------------------------------------------------------
