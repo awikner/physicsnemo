@@ -250,19 +250,17 @@ class ClimateZarrDataset(Dataset):
         )
         self.layout = ClimateZarrStoreLayout.from_dataset(self._ds)
 
-        # Sanity: when both level systems are used, the model concat assumes
-        # equal level counts. (Pad-to-max could be added later; v1 = strict.)
-        if (
-            self.layout.sigma_upper_air_variables
-            and self.layout.pressure_upper_air_variables
-        ):
-            if len(self.layout.sigma_levels) != len(self.layout.pressure_levels):
-                raise ValueError(
-                    f"Mismatched level counts: sigma={len(self.layout.sigma_levels)}, "
-                    f"pressure={len(self.layout.pressure_levels)}. v1 requires equal "
-                    "counts to concatenate dual-system upper-air variables; pad-to-max "
-                    "support TBD."
-                )
+        # Whether the per-sample concat into a single `upper_air_in` tensor is
+        # valid. PanguPlasim / PanguPlasimLegacy require it; SFNO doesn't care
+        # (it flattens everything to channels). The dataset doesn't refuse
+        # mismatched counts — it just emits separate `upper_air_sigma_in` +
+        # `upper_air_pressure_in` keys instead of the concatenated convenience
+        # key, and lets the consuming model decide whether that's acceptable.
+        self._upper_air_concat_supported = (
+            not self.layout.sigma_upper_air_variables
+            or not self.layout.pressure_upper_air_variables
+            or len(self.layout.sigma_levels) == len(self.layout.pressure_levels)
+        )
 
         self.n_time = int(self._ds.sizes["time"])
         self.n_lat = int(self._ds.sizes["lat"])
@@ -515,17 +513,23 @@ class ClimateZarrDataset(Dataset):
             raw, self.layout.varying_boundary_variables
         )
 
-        # Upper-air: sigma vars first, then pressure vars, concatenated along var.
-        parts: list[torch.Tensor] = []
+        # Upper-air: sigma vars first, then pressure vars, concatenated along
+        # the variable axis if both systems share the same level count. When
+        # counts differ (mixed sigma/pressure datasets that SFNO consumes), the
+        # convenience `upper_air_in` key is omitted and we emit
+        # `upper_air_sigma_in` + `upper_air_pressure_in` separately.
         sigma = self._stack_named(raw, self.layout.sigma_upper_air_variables)
-        if sigma is not None:
-            parts.append(sigma)
         pressure = self._stack_named(raw, self.layout.pressure_upper_air_variables)
+        if sigma is not None:
+            out["upper_air_sigma_in"] = sigma
         if pressure is not None:
-            parts.append(pressure)
-        out["upper_air_in"] = (
-            parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
-        )
+            out["upper_air_pressure_in"] = pressure
+        if self._upper_air_concat_supported:
+            parts = [t for t in (sigma, pressure) if t is not None]
+            if parts:
+                out["upper_air_in"] = (
+                    parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+                )
 
         if self.layout.diagnostic_variables:
             out["diagnostic"] = self._stack_named(raw, self.layout.diagnostic_variables)
@@ -565,7 +569,15 @@ class ClimateZarrDataset(Dataset):
         sample = self._build_sample(raw[start_idx])
         target = self._build_sample(raw[target_idx])
         sample["target_surface"] = target["surface_in"]
-        sample["target_upper_air"] = target["upper_air_in"]
+        # `upper_air_in` is only emitted when sigma + pressure level counts
+        # match (or only one system is present). For mixed-count datasets the
+        # consumer reads the separate `_sigma_in` / `_pressure_in` keys.
+        if "upper_air_in" in target:
+            sample["target_upper_air"] = target["upper_air_in"]
+        if "upper_air_sigma_in" in target:
+            sample["target_upper_air_sigma"] = target["upper_air_sigma_in"]
+        if "upper_air_pressure_in" in target:
+            sample["target_upper_air_pressure"] = target["upper_air_pressure_in"]
         sample["lead_time"] = torch.tensor(lead, dtype=torch.long)
         sample["time_idx"] = torch.tensor(start_idx, dtype=torch.long)
         if self.transform is not None:
