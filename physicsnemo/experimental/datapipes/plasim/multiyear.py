@@ -5,12 +5,12 @@
 r"""Composite Dataset that glues a directory of per-year PLASIM Zarr stores.
 
 The new format produced by ``tools/data/plasim/pangu_h5_to_zarr.py`` writes one
-Zarr per year. For multi-year training, :class:`PlasimMultiYearDataset` wraps
+Zarr per year. For multi-year training, :class:`ClimateZarrMultiYearDataset` wraps
 many such per-year stores into a single ``torch.utils.data.Dataset`` with one
 contiguous global time index — start (and target) sample reads dispatch to the
 sub-dataset for whichever year covers the global index.
 
-This composition layer reuses :class:`PlasimClimateDataset` unchanged for each
+This composition layer reuses :class:`ClimateZarrDataset` unchanged for each
 year. Channel layout (surface vars, level systems, calendar) must match across
 years; constant boundaries are taken from the first year (they're static).
 
@@ -35,10 +35,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .dataset import PlasimClimateDataset, PlasimStoreLayout
+from .dataset import ClimateZarrDataset, ClimateZarrStoreLayout
 
 
-class PlasimMultiYearDataset(Dataset):
+class ClimateZarrMultiYearDataset(Dataset):
     r"""Composite PLASIM dataset across a directory of per-year Zarr stores.
 
     Parameters
@@ -64,7 +64,7 @@ class PlasimMultiYearDataset(Dataset):
     Notes
     -----
     The dataset returns the SAME per-sample dict shape as
-    :class:`PlasimClimateDataset` (no additional fields), with one
+    :class:`ClimateZarrDataset` (no additional fields), with one
     addition: ``time_idx`` is the GLOBAL time index, not the per-year index.
     This matches the contract :class:`LeadTimePairSampler` already uses.
 
@@ -90,7 +90,7 @@ class PlasimMultiYearDataset(Dataset):
         if not root_path.is_dir():
             raise ValueError(
                 f"root {root_path} is not a directory; "
-                "PlasimMultiYearDataset expects a directory of *.zarr sub-stores"
+                "ClimateZarrMultiYearDataset expects a directory of *.zarr sub-stores"
             )
         store_paths = sorted(root_path.glob("*.zarr"))
         if not store_paths:
@@ -109,8 +109,8 @@ class PlasimMultiYearDataset(Dataset):
             leap_boundary_zarr_path=leap_boundary_zarr_path,
             non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
         )
-        sub_datasets: list[PlasimClimateDataset] = [
-            PlasimClimateDataset(p, **sub_kwargs) for p in store_paths
+        sub_datasets: list[ClimateZarrDataset] = [
+            ClimateZarrDataset(p, **sub_kwargs) for p in store_paths
         ]
 
         # Sort sub-datasets by start time of each store, then validate layout match.
@@ -128,10 +128,10 @@ class PlasimMultiYearDataset(Dataset):
         # Global index map: cumulative time index → (sub_idx, local_idx)
         sub_lengths = np.asarray([len(d) for d in self.sub_datasets], dtype=np.int64)
         self._cum_lengths = np.concatenate(([0], np.cumsum(sub_lengths)))
-        self.layout: PlasimStoreLayout = ref_layout
+        self.layout: ClimateZarrStoreLayout = ref_layout
 
     # ------------------------------------------------------------------ #
-    # Read-only attributes mirroring PlasimClimateDataset's public surface
+    # Read-only attributes mirroring ClimateZarrDataset's public surface
     # ------------------------------------------------------------------ #
     @property
     def pressure_levels(self) -> list[float]:
@@ -218,7 +218,7 @@ class PlasimMultiYearDataset(Dataset):
         return sample
 
 
-def _assert_layouts_match(ref: PlasimStoreLayout, other: PlasimStoreLayout, path: Path) -> None:
+def _assert_layouts_match(ref: ClimateZarrStoreLayout, other: ClimateZarrStoreLayout, path: Path) -> None:
     """Raise if a per-year sub-store's layout disagrees with the reference."""
     for field in (
         "surface_variables",
@@ -238,3 +238,8 @@ def _assert_layouts_match(ref: PlasimStoreLayout, other: PlasimStoreLayout, path
                 f"reference: ref={getattr(ref, field)!r}, "
                 f"this={getattr(other, field)!r}"
             )
+
+
+# Backward-compat alias. The canonical name lives in the
+# `physicsnemo.experimental.datapipes.climate` sub-package.
+PlasimMultiYearDataset = ClimateZarrMultiYearDataset

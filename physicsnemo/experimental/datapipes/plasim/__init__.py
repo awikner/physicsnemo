@@ -41,18 +41,31 @@ See :doc:`../../../../../pangu_plasim_reuse_plan` for the design context.
 """
 
 from .datapipe import PlasimClimateDatapipe
-from .dataset import PLASIM_ZARR_SCHEMA_VERSION, PlasimClimateDataset
-from .multiyear import PlasimMultiYearDataset
+from .dataset import (
+    CLIMATE_ZARR_SCHEMA_VERSION,
+    PLASIM_ZARR_SCHEMA_VERSION,
+    ClimateZarrDataset,
+    ClimateZarrStoreLayout,
+    PlasimClimateDataset,
+)
+from .multiyear import ClimateZarrMultiYearDataset, PlasimMultiYearDataset
 from .samplers import LeadTimePairSampler
 from .transforms import ComposeTransform, NanFillTransform, PlasimNormalizer
 
 __all__ = [
+    # Canonical climate-Zarr names (shared across PLASIM/ERA5/E3SM).
+    "CLIMATE_ZARR_SCHEMA_VERSION",
+    "ClimateZarrDataset",
+    "ClimateZarrMultiYearDataset",
+    "ClimateZarrStoreLayout",
+    # PLASIM-flavored aliases (backward compatibility).
     "PLASIM_ZARR_SCHEMA_VERSION",
+    "PlasimClimateDataset",
+    "PlasimMultiYearDataset",
+    # Other PLASIM datapipe pieces.
     "ComposeTransform",
     "LeadTimePairSampler",
     "NanFillTransform",
     "PlasimClimateDatapipe",
-    "PlasimClimateDataset",
-    "PlasimMultiYearDataset",
     "PlasimNormalizer",
 ]

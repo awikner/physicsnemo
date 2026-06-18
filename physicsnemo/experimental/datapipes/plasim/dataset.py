@@ -38,7 +38,9 @@ from torch.utils.data import Dataset
 from zarr.api.asynchronous import open_group as _zarr_open_group_async
 from zarr.core.sync import sync as _zarr_sync
 
-PLASIM_ZARR_SCHEMA_VERSION = "1.0"
+CLIMATE_ZARR_SCHEMA_VERSION = "1.0"
+# Backward-compat alias — see the climate sub-package for the canonical name.
+PLASIM_ZARR_SCHEMA_VERSION = CLIMATE_ZARR_SCHEMA_VERSION
 
 
 # Raise zarr's async concurrency cap to a generous default. The library default
@@ -54,8 +56,13 @@ except Exception:  # pragma: no cover — defensive; older zarr layouts
 
 
 @dataclass
-class PlasimStoreLayout:
-    """Channel-group bookkeeping read from the Zarr store's ``attrs``."""
+class ClimateZarrStoreLayout:
+    """Channel-group bookkeeping read from the Zarr store's ``attrs``.
+
+    Generic across PLASIM, ERA5, and E3SM Zarr stores produced by the
+    ai-rossby per-year H5→Zarr converters: each writes the same attrs schema
+    so the dataset can read any of them without per-dataset code paths.
+    """
 
     surface_variables: list[str] = field(default_factory=list)
     constant_boundary_variables: list[str] = field(default_factory=list)
@@ -69,7 +76,7 @@ class PlasimStoreLayout:
     sigma_levels: list[float] = field(default_factory=list)
 
     @classmethod
-    def from_dataset(cls, ds: xr.Dataset) -> "PlasimStoreLayout":
+    def from_dataset(cls, ds: xr.Dataset) -> "ClimateZarrStoreLayout":
         a = ds.attrs
 
         def _strlist(key: str) -> list[str]:
@@ -97,8 +104,29 @@ class PlasimStoreLayout:
         return layout
 
 
-class PlasimClimateDataset(Dataset):
-    r"""Random-access PLASIM climate dataset backed by a Zarr store.
+class ClimateZarrDataset(Dataset):
+    r"""Random-access climate dataset backed by a Zarr store.
+
+    Used by PLASIM, ERA5, and E3SM through the same per-year Zarr layout
+    (``surface_variables``, ``constant_boundary_variables``,
+    ``varying_boundary_variables``, ``diagnostic_variables``,
+    ``pressure_upper_air_variables``, ``sigma_upper_air_variables``,
+    ``calendar``, ``data_timedelta_hours`` in the store ``attrs``;
+    ``sigma_level`` and ``pressure_level`` coords).
+
+    Boundary substitution stays the same for all three datasets:
+
+    * Default (no kwargs): varying boundaries come from the prognostic store
+      at the same time index.
+    * Single static boundary store (e.g. ERA5 fixed-SST experiments): pass
+      ``boundary_zarr_path=<one_store>`` — the dataset reads varying-boundary
+      vars from that store at the prognostic time index.
+    * Yearly-repeating boundary cycle (PLASIM convention): pass
+      ``yearly_repeating_boundary=True`` + ``leap_boundary_zarr_path`` +
+      ``non_leap_boundary_zarr_path``. The dataset routes each prognostic
+      time index through ``cftime.is_leap_year(year, calendar)`` and uses the
+      day-of-year + hour-of-day mapping to pick the right slot in the
+      single-year boundary store.
 
     Yields per-sample dicts containing the four tensors
     :class:`PanguPlasim.forward` consumes (``surface_in``,
@@ -108,7 +136,7 @@ class PlasimClimateDataset(Dataset):
     drives the (``t``, ``lead``) iteration.
 
     Channel ordering exactly follows the source-config lists carried in
-    the store ``attrs`` (see :class:`PlasimStoreLayout`). Sigma- and
+    the store ``attrs`` (see :class:`ClimateZarrStoreLayout`). Sigma- and
     pressure-level upper-air variables are concatenated **along the
     variable dim** (sigma vars first, pressure vars second) — the model
     treats both as opaque ``(n_upper, n_levels, H, W)`` channels. The
@@ -207,7 +235,7 @@ class PlasimClimateDataset(Dataset):
         # consolidated=True is the fast path when the store has consolidated
         # metadata; xarray transparently falls back if it doesn't.
         self._ds = xr.open_zarr(self.zarr_path, consolidated=consolidated)
-        self.layout = PlasimStoreLayout.from_dataset(self._ds)
+        self.layout = ClimateZarrStoreLayout.from_dataset(self._ds)
 
         # Sanity: when both level systems are used, the model concat assumes
         # equal level counts. (Pad-to-max could be added later; v1 = strict.)
@@ -515,3 +543,10 @@ class PlasimClimateDataset(Dataset):
         if self.transform is not None:
             sample = self.transform(sample)
         return sample
+
+
+# Backward-compat aliases. The canonical names live in the
+# `physicsnemo.experimental.datapipes.climate` sub-package; existing PLASIM
+# imports keep working through these aliases.
+PlasimStoreLayout = ClimateZarrStoreLayout
+PlasimClimateDataset = ClimateZarrDataset
