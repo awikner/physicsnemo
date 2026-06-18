@@ -1703,3 +1703,231 @@
 2026-06-18 15:57:57,280 INFO Reading 1401/1464 56_1400.h5
 2026-06-18 15:57:59,219 INFO Reading 1451/1464 56_1450.h5
 2026-06-18 15:58:01,680 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/56.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+/work/nvme/bdiu/awikner/physicsnemo/tools/data/plasim/pangu_h5_to_zarr.py:428: FutureWarning: The return type of `Dataset.dims` will be changed to return a set of dimension names in future, in order to be more consistent with `DataArray.dims`. To access a mapping from dimension names to lengths, please use `Dataset.sizes`.
+  logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+2026-06-18 15:59:06,227 INFO Done. Total variables: 14, times: 1464
+[Thu Jun 18 15:59:07 CDT 2026] converting PLASIM year 57 ...
+2026-06-18 15:59:11,973 INFO Found 1460 files in /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data for year 57, sample range None
+2026-06-18 15:59:11,973 INFO Reading 1/1460 57_0000.h5
+2026-06-18 15:59:13,268 INFO Reading 51/1460 57_0050.h5
+2026-06-18 15:59:14,542 INFO Reading 101/1460 57_0100.h5
+2026-06-18 15:59:15,953 INFO Reading 151/1460 57_0150.h5
+2026-06-18 15:59:18,031 INFO Reading 201/1460 57_0200.h5
+2026-06-18 15:59:19,790 INFO Reading 251/1460 57_0250.h5
+2026-06-18 15:59:21,124 INFO Reading 301/1460 57_0300.h5
+2026-06-18 15:59:23,160 INFO Reading 351/1460 57_0350.h5
+2026-06-18 15:59:25,047 INFO Reading 401/1460 57_0400.h5
+2026-06-18 15:59:26,433 INFO Reading 451/1460 57_0450.h5
+2026-06-18 15:59:27,700 INFO Reading 501/1460 57_0500.h5
+2026-06-18 15:59:29,269 INFO Reading 551/1460 57_0550.h5
+2026-06-18 15:59:30,882 INFO Reading 601/1460 57_0600.h5
+2026-06-18 15:59:32,517 INFO Reading 651/1460 57_0650.h5
+2026-06-18 15:59:33,822 INFO Reading 701/1460 57_0700.h5
+2026-06-18 15:59:35,073 INFO Reading 751/1460 57_0750.h5
+2026-06-18 15:59:36,320 INFO Reading 801/1460 57_0800.h5
+2026-06-18 15:59:37,571 INFO Reading 851/1460 57_0850.h5
+2026-06-18 15:59:38,828 INFO Reading 901/1460 57_0900.h5
+2026-06-18 15:59:40,080 INFO Reading 951/1460 57_0950.h5
+2026-06-18 15:59:41,332 INFO Reading 1001/1460 57_1000.h5
+2026-06-18 15:59:42,578 INFO Reading 1051/1460 57_1050.h5
+2026-06-18 15:59:43,818 INFO Reading 1101/1460 57_1100.h5
+2026-06-18 15:59:45,056 INFO Reading 1151/1460 57_1150.h5
+2026-06-18 15:59:46,297 INFO Reading 1201/1460 57_1200.h5
+2026-06-18 15:59:47,576 INFO Reading 1251/1460 57_1250.h5
+2026-06-18 15:59:48,944 INFO Reading 1301/1460 57_1300.h5
+2026-06-18 15:59:50,278 INFO Reading 1351/1460 57_1350.h5
+2026-06-18 15:59:51,538 INFO Reading 1401/1460 57_1400.h5
+2026-06-18 15:59:52,787 INFO Reading 1451/1460 57_1450.h5
+2026-06-18 15:59:55,243 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/57.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+/work/nvme/bdiu/awikner/physicsnemo/tools/data/plasim/pangu_h5_to_zarr.py:428: FutureWarning: The return type of `Dataset.dims` will be changed to return a set of dimension names in future, in order to be more consistent with `DataArray.dims`. To access a mapping from dimension names to lengths, please use `Dataset.sizes`.
+  logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+2026-06-18 16:03:48,175 INFO Done. Total variables: 14, times: 1460
+[Thu Jun 18 16:03:49 CDT 2026] converting PLASIM year 58 ...
+2026-06-18 16:03:53,648 INFO Found 1460 files in /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data for year 58, sample range None
+2026-06-18 16:03:53,648 INFO Reading 1/1460 58_0000.h5
+2026-06-18 16:03:54,926 INFO Reading 51/1460 58_0050.h5
+2026-06-18 16:03:56,190 INFO Reading 101/1460 58_0100.h5
+2026-06-18 16:03:57,451 INFO Reading 151/1460 58_0150.h5
+2026-06-18 16:03:58,712 INFO Reading 201/1460 58_0200.h5
+2026-06-18 16:03:59,965 INFO Reading 251/1460 58_0250.h5
+2026-06-18 16:04:01,766 INFO Reading 301/1460 58_0300.h5
+2026-06-18 16:04:03,791 INFO Reading 351/1460 58_0350.h5
+2026-06-18 16:04:05,335 INFO Reading 401/1460 58_0400.h5
+2026-06-18 16:04:07,087 INFO Reading 451/1460 58_0450.h5
+2026-06-18 16:04:09,161 INFO Reading 501/1460 58_0500.h5
+2026-06-18 16:04:11,177 INFO Reading 551/1460 58_0550.h5
+2026-06-18 16:04:12,747 INFO Reading 601/1460 58_0600.h5
+2026-06-18 16:04:14,089 INFO Reading 651/1460 58_0650.h5
+2026-06-18 16:04:15,351 INFO Reading 701/1460 58_0700.h5
+2026-06-18 16:04:16,620 INFO Reading 751/1460 58_0750.h5
+2026-06-18 16:04:17,903 INFO Reading 801/1460 58_0800.h5
+2026-06-18 16:04:19,842 INFO Reading 851/1460 58_0850.h5
+2026-06-18 16:04:21,727 INFO Reading 901/1460 58_0900.h5
+2026-06-18 16:04:23,145 INFO Reading 951/1460 58_0950.h5
+2026-06-18 16:04:24,899 INFO Reading 1001/1460 58_1000.h5
+2026-06-18 16:04:26,957 INFO Reading 1051/1460 58_1050.h5
+2026-06-18 16:04:28,636 INFO Reading 1101/1460 58_1100.h5
+2026-06-18 16:04:29,977 INFO Reading 1151/1460 58_1150.h5
+2026-06-18 16:04:31,223 INFO Reading 1201/1460 58_1200.h5
+2026-06-18 16:04:32,480 INFO Reading 1251/1460 58_1250.h5
+2026-06-18 16:04:33,719 INFO Reading 1301/1460 58_1300.h5
+2026-06-18 16:04:34,974 INFO Reading 1351/1460 58_1350.h5
+2026-06-18 16:04:36,220 INFO Reading 1401/1460 58_1400.h5
+2026-06-18 16:04:37,474 INFO Reading 1451/1460 58_1450.h5
+2026-06-18 16:04:39,654 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/58.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+/work/nvme/bdiu/awikner/physicsnemo/tools/data/plasim/pangu_h5_to_zarr.py:428: FutureWarning: The return type of `Dataset.dims` will be changed to return a set of dimension names in future, in order to be more consistent with `DataArray.dims`. To access a mapping from dimension names to lengths, please use `Dataset.sizes`.
+  logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+2026-06-18 16:05:59,385 INFO Done. Total variables: 14, times: 1460
+[Thu Jun 18 16:06:00 CDT 2026] converting PLASIM year 59 ...
+2026-06-18 16:06:04,622 INFO Found 1460 files in /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data for year 59, sample range None
+2026-06-18 16:06:04,623 INFO Reading 1/1460 59_0000.h5
+2026-06-18 16:06:05,901 INFO Reading 51/1460 59_0050.h5
+2026-06-18 16:06:07,427 INFO Reading 101/1460 59_0100.h5
+2026-06-18 16:06:09,476 INFO Reading 151/1460 59_0150.h5
+2026-06-18 16:06:11,166 INFO Reading 201/1460 59_0200.h5
+2026-06-18 16:06:13,168 INFO Reading 251/1460 59_0250.h5
+2026-06-18 16:06:15,019 INFO Reading 301/1460 59_0300.h5
+2026-06-18 16:06:16,408 INFO Reading 351/1460 59_0350.h5
+2026-06-18 16:06:18,062 INFO Reading 401/1460 59_0400.h5
+2026-06-18 16:06:20,090 INFO Reading 451/1460 59_0450.h5
+2026-06-18 16:06:21,608 INFO Reading 501/1460 59_0500.h5
+2026-06-18 16:06:22,871 INFO Reading 551/1460 59_0550.h5
+2026-06-18 16:06:24,259 INFO Reading 601/1460 59_0600.h5
+2026-06-18 16:06:25,894 INFO Reading 651/1460 59_0650.h5
+2026-06-18 16:06:27,478 INFO Reading 701/1460 59_0700.h5
+2026-06-18 16:06:28,955 INFO Reading 751/1460 59_0750.h5
+2026-06-18 16:06:30,897 INFO Reading 801/1460 59_0800.h5
+2026-06-18 16:06:32,788 INFO Reading 851/1460 59_0850.h5
+2026-06-18 16:06:34,202 INFO Reading 901/1460 59_0900.h5
+2026-06-18 16:06:35,456 INFO Reading 951/1460 59_0950.h5
+2026-06-18 16:06:36,704 INFO Reading 1001/1460 59_1000.h5
+2026-06-18 16:06:37,949 INFO Reading 1051/1460 59_1050.h5
+2026-06-18 16:06:39,207 INFO Reading 1101/1460 59_1100.h5
+2026-06-18 16:06:40,466 INFO Reading 1151/1460 59_1150.h5
+2026-06-18 16:06:41,718 INFO Reading 1201/1460 59_1200.h5
+2026-06-18 16:06:42,975 INFO Reading 1251/1460 59_1250.h5
+2026-06-18 16:06:44,228 INFO Reading 1301/1460 59_1300.h5
+2026-06-18 16:06:45,474 INFO Reading 1351/1460 59_1350.h5
+2026-06-18 16:06:46,727 INFO Reading 1401/1460 59_1400.h5
+2026-06-18 16:06:47,970 INFO Reading 1451/1460 59_1450.h5
+2026-06-18 16:06:50,307 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/59.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+/work/nvme/bdiu/awikner/physicsnemo/tools/data/plasim/pangu_h5_to_zarr.py:428: FutureWarning: The return type of `Dataset.dims` will be changed to return a set of dimension names in future, in order to be more consistent with `DataArray.dims`. To access a mapping from dimension names to lengths, please use `Dataset.sizes`.
+  logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+2026-06-18 16:08:07,255 INFO Done. Total variables: 14, times: 1460
+[Thu Jun 18 16:08:07 CDT 2026] converting PLASIM year 60 ...
+2026-06-18 16:08:12,211 INFO Found 1464 files in /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data for year 60, sample range None
+2026-06-18 16:08:12,211 INFO Reading 1/1464 60_0000.h5
+2026-06-18 16:08:13,530 INFO Reading 51/1464 60_0050.h5
+2026-06-18 16:08:14,809 INFO Reading 101/1464 60_0100.h5
+2026-06-18 16:08:16,084 INFO Reading 151/1464 60_0150.h5
+2026-06-18 16:08:17,362 INFO Reading 201/1464 60_0200.h5
+2026-06-18 16:08:19,050 INFO Reading 251/1464 60_0250.h5
+2026-06-18 16:08:21,083 INFO Reading 301/1464 60_0300.h5
+2026-06-18 16:08:23,124 INFO Reading 351/1464 60_0350.h5
+2026-06-18 16:08:25,081 INFO Reading 401/1464 60_0400.h5
+2026-06-18 16:08:26,500 INFO Reading 451/1464 60_0450.h5
+2026-06-18 16:08:27,760 INFO Reading 501/1464 60_0500.h5
+2026-06-18 16:08:29,036 INFO Reading 551/1464 60_0550.h5
+2026-06-18 16:08:30,353 INFO Reading 601/1464 60_0600.h5
+2026-06-18 16:08:31,784 INFO Reading 651/1464 60_0650.h5
+2026-06-18 16:08:33,282 INFO Reading 701/1464 60_0700.h5
+2026-06-18 16:08:34,885 INFO Reading 751/1464 60_0750.h5
+2026-06-18 16:08:36,619 INFO Reading 801/1464 60_0800.h5
+2026-06-18 16:08:38,708 INFO Reading 851/1464 60_0850.h5
+2026-06-18 16:08:40,366 INFO Reading 901/1464 60_0900.h5
+2026-06-18 16:08:41,691 INFO Reading 951/1464 60_0950.h5
+2026-06-18 16:08:43,693 INFO Reading 1001/1464 60_1000.h5
+2026-06-18 16:08:45,765 INFO Reading 1051/1464 60_1050.h5
+2026-06-18 16:08:47,834 INFO Reading 1101/1464 60_1100.h5
+2026-06-18 16:08:49,544 INFO Reading 1151/1464 60_1150.h5
+2026-06-18 16:08:51,189 INFO Reading 1201/1464 60_1200.h5
+2026-06-18 16:08:53,239 INFO Reading 1251/1464 60_1250.h5
+2026-06-18 16:08:54,807 INFO Reading 1301/1464 60_1300.h5
+2026-06-18 16:08:56,080 INFO Reading 1351/1464 60_1350.h5
+2026-06-18 16:08:57,328 INFO Reading 1401/1464 60_1400.h5
+2026-06-18 16:08:58,778 INFO Reading 1451/1464 60_1450.h5
+2026-06-18 16:09:01,827 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/60.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+/work/nvme/bdiu/awikner/physicsnemo/tools/data/plasim/pangu_h5_to_zarr.py:428: FutureWarning: The return type of `Dataset.dims` will be changed to return a set of dimension names in future, in order to be more consistent with `DataArray.dims`. To access a mapping from dimension names to lengths, please use `Dataset.sizes`.
+  logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+2026-06-18 16:10:18,726 INFO Done. Total variables: 14, times: 1464
+[Thu Jun 18 16:10:19 CDT 2026] converting PLASIM year 61 ...
+2026-06-18 16:10:23,786 INFO Found 1460 files in /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data for year 61, sample range None
+2026-06-18 16:10:23,786 INFO Reading 1/1460 61_0000.h5
+2026-06-18 16:10:25,059 INFO Reading 51/1460 61_0050.h5
+2026-06-18 16:10:26,328 INFO Reading 101/1460 61_0100.h5
+2026-06-18 16:10:27,602 INFO Reading 151/1460 61_0150.h5
+2026-06-18 16:10:28,864 INFO Reading 201/1460 61_0200.h5
+2026-06-18 16:10:30,238 INFO Reading 251/1460 61_0250.h5
+2026-06-18 16:10:32,335 INFO Reading 301/1460 61_0300.h5
+2026-06-18 16:10:34,150 INFO Reading 351/1460 61_0350.h5
+2026-06-18 16:10:35,637 INFO Reading 401/1460 61_0400.h5
+2026-06-18 16:10:37,088 INFO Reading 451/1460 61_0450.h5
+2026-06-18 16:10:38,546 INFO Reading 501/1460 61_0500.h5
+2026-06-18 16:10:40,177 INFO Reading 551/1460 61_0550.h5
+2026-06-18 16:10:41,814 INFO Reading 601/1460 61_0600.h5
+2026-06-18 16:10:43,472 INFO Reading 651/1460 61_0650.h5
+2026-06-18 16:10:44,969 INFO Reading 701/1460 61_0700.h5
+2026-06-18 16:10:46,589 INFO Reading 751/1460 61_0750.h5
+2026-06-18 16:10:48,237 INFO Reading 801/1460 61_0800.h5
+2026-06-18 16:10:50,342 INFO Reading 851/1460 61_0850.h5
+2026-06-18 16:10:52,128 INFO Reading 901/1460 61_0900.h5
+2026-06-18 16:10:53,481 INFO Reading 951/1460 61_0950.h5
+2026-06-18 16:10:54,756 INFO Reading 1001/1460 61_1000.h5
+2026-06-18 16:10:56,040 INFO Reading 1051/1460 61_1050.h5
+2026-06-18 16:10:57,310 INFO Reading 1101/1460 61_1100.h5
+2026-06-18 16:10:58,587 INFO Reading 1151/1460 61_1150.h5
+2026-06-18 16:10:59,865 INFO Reading 1201/1460 61_1200.h5
+2026-06-18 16:11:01,361 INFO Reading 1251/1460 61_1250.h5
+2026-06-18 16:11:03,013 INFO Reading 1301/1460 61_1300.h5
+2026-06-18 16:11:04,805 INFO Reading 1351/1460 61_1350.h5
+2026-06-18 16:11:06,909 INFO Reading 1401/1460 61_1400.h5
+2026-06-18 16:11:08,560 INFO Reading 1451/1460 61_1450.h5
+2026-06-18 16:11:10,800 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/61.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+/work/nvme/bdiu/awikner/physicsnemo/tools/data/plasim/pangu_h5_to_zarr.py:428: FutureWarning: The return type of `Dataset.dims` will be changed to return a set of dimension names in future, in order to be more consistent with `DataArray.dims`. To access a mapping from dimension names to lengths, please use `Dataset.sizes`.
+  logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+2026-06-18 16:12:12,590 INFO Done. Total variables: 14, times: 1460
+[Thu Jun 18 16:12:13 CDT 2026] converting PLASIM year 62 ...
+2026-06-18 16:12:18,835 INFO Found 1460 files in /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data for year 62, sample range None
+2026-06-18 16:12:18,837 INFO Reading 1/1460 62_0000.h5
+2026-06-18 16:12:20,179 INFO Reading 51/1460 62_0050.h5
+2026-06-18 16:12:22,113 INFO Reading 101/1460 62_0100.h5
+2026-06-18 16:12:24,077 INFO Reading 151/1460 62_0150.h5
+2026-06-18 16:12:25,510 INFO Reading 201/1460 62_0200.h5
+2026-06-18 16:12:26,788 INFO Reading 251/1460 62_0250.h5
+2026-06-18 16:12:28,061 INFO Reading 301/1460 62_0300.h5
+2026-06-18 16:12:29,355 INFO Reading 351/1460 62_0350.h5
+2026-06-18 16:12:30,686 INFO Reading 401/1460 62_0400.h5
+2026-06-18 16:12:32,046 INFO Reading 451/1460 62_0450.h5
+2026-06-18 16:12:33,415 INFO Reading 501/1460 62_0500.h5
+2026-06-18 16:12:34,798 INFO Reading 551/1460 62_0550.h5
+2026-06-18 16:12:36,235 INFO Reading 601/1460 62_0600.h5
+2026-06-18 16:12:37,568 INFO Reading 651/1460 62_0650.h5
+2026-06-18 16:12:39,057 INFO Reading 701/1460 62_0700.h5
+2026-06-18 16:12:41,127 INFO Reading 751/1460 62_0750.h5
+2026-06-18 16:12:42,779 INFO Reading 801/1460 62_0800.h5
+2026-06-18 16:12:44,093 INFO Reading 851/1460 62_0850.h5
+2026-06-18 16:12:45,571 INFO Reading 901/1460 62_0900.h5
+2026-06-18 16:12:47,659 INFO Reading 951/1460 62_0950.h5
+2026-06-18 16:12:49,758 INFO Reading 1001/1460 62_1000.h5
+2026-06-18 16:12:51,423 INFO Reading 1051/1460 62_1050.h5
+2026-06-18 16:12:53,125 INFO Reading 1101/1460 62_1100.h5
+2026-06-18 16:12:55,159 INFO Reading 1151/1460 62_1150.h5
+2026-06-18 16:12:56,656 INFO Reading 1201/1460 62_1200.h5
+2026-06-18 16:12:58,075 INFO Reading 1251/1460 62_1250.h5
+2026-06-18 16:13:00,111 INFO Reading 1301/1460 62_1300.h5
+2026-06-18 16:13:02,199 INFO Reading 1351/1460 62_1350.h5
+2026-06-18 16:13:04,282 INFO Reading 1401/1460 62_1400.h5
+2026-06-18 16:13:06,256 INFO Reading 1451/1460 62_1450.h5
+2026-06-18 16:13:08,429 INFO Writing /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/62.zarr

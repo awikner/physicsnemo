@@ -56,6 +56,7 @@ with warnings.catch_warnings():
         PanguPlasim,
         PanguPlasimLegacy,
     )
+    from physicsnemo.experimental.models.sfno_plasim import SfnoPlasim
 
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.utils import load_checkpoint, save_checkpoint
@@ -75,48 +76,91 @@ def build_model(cfg_model: DictConfig):
 
     ``model_type``:
 
-    * ``"PanguPlasimLegacy"`` (default) — deterministic no-VAE variant.
-    * ``"PanguPlasim"`` — full VAE-enabled variant; pairs with
+    * ``"PanguPlasimLegacy"`` (default) — deterministic no-VAE Pangu variant.
+    * ``"PanguPlasim"`` — VAE-enabled Pangu variant; pairs with
       ``cfg.loss.vae_kl_weight > 0`` to enable the KL term in ``train_step``.
+    * ``"SfnoPlasim"`` — vendored Modulus SFNO with the PLASIM-routing
+      wrapper; pairs with the ``raw_l2`` loss and ``cosine_warmup`` scheduler
+      defaults per PanguWeather v2.0 SFNO_PLASIM_H5_DERECHO_5412.yaml.
 
-    Both variants share the same constructor kwargs.
+    Each ``model_type`` reads only the subset of ``cfg_model`` keys it needs;
+    Pangu-specific (patch_size, depths, num_heads, …) and SFNO-specific
+    (filter_type, spectral_layers, …) kwargs coexist in their respective YAML
+    groups.
     """
     model_type = str(cfg_model.get("model_type", "PanguPlasimLegacy"))
-    cls = {"PanguPlasim": PanguPlasim, "PanguPlasimLegacy": PanguPlasimLegacy}.get(model_type)
-    if cls is None:
-        raise ValueError(
-            f"Unknown cfg.model.model_type={model_type!r}; expected "
-            "'PanguPlasim' or 'PanguPlasimLegacy'"
+    if model_type in ("PanguPlasim", "PanguPlasimLegacy"):
+        cls = {"PanguPlasim": PanguPlasim, "PanguPlasimLegacy": PanguPlasimLegacy}[model_type]
+        return cls(
+            surface_variables=list(cfg_model.surface_variables),
+            upper_air_variables=list(cfg_model.upper_air_variables),
+            constant_boundary_variables=list(cfg_model.constant_boundary_variables),
+            varying_boundary_variables=list(cfg_model.varying_boundary_variables),
+            diagnostic_variables=list(cfg_model.diagnostic_variables),
+            land_variables=list(cfg_model.get("land_variables", [])),
+            ocean_variables=list(cfg_model.get("ocean_variables", [])),
+            levels=list(cfg_model.levels),
+            horizontal_resolution=list(cfg_model.horizontal_resolution),
+            patch_size=list(cfg_model.patch_size),
+            window_size=list(cfg_model.window_size),
+            depths=list(cfg_model.depths),
+            num_heads=list(cfg_model.num_heads),
+            embed_dim=int(cfg_model.embed_dim),
+            updown_scale_factor=int(cfg_model.updown_scale_factor),
+            predict_delta=bool(cfg_model.predict_delta),
+            mask_output=bool(cfg_model.mask_output),
+            upper_air_boundary=bool(cfg_model.upper_air_boundary),
+            vertical_windowing=bool(cfg_model.vertical_windowing),
+            subpixel_deconv=bool(cfg_model.subpixel_deconv),
+            polar_pad=bool(cfg_model.polar_pad),
+            grid_has_poles=bool(cfg_model.grid_has_poles),
+            recovery_head=bool(cfg_model.recovery_head),
+            diagnostic_head=bool(cfg_model.diagnostic_head),
+            has_diagnostic=bool(cfg_model.has_diagnostic),
+            drop_rate=float(cfg_model.drop_rate),
+            checkpointing=int(cfg_model.checkpointing),
+            use_reentrant=bool(cfg_model.use_reentrant),
         )
-    return cls(
-        surface_variables=list(cfg_model.surface_variables),
-        upper_air_variables=list(cfg_model.upper_air_variables),
-        constant_boundary_variables=list(cfg_model.constant_boundary_variables),
-        varying_boundary_variables=list(cfg_model.varying_boundary_variables),
-        diagnostic_variables=list(cfg_model.diagnostic_variables),
-        land_variables=list(cfg_model.get("land_variables", [])),
-        ocean_variables=list(cfg_model.get("ocean_variables", [])),
-        levels=list(cfg_model.levels),
-        horizontal_resolution=list(cfg_model.horizontal_resolution),
-        patch_size=list(cfg_model.patch_size),
-        window_size=list(cfg_model.window_size),
-        depths=list(cfg_model.depths),
-        num_heads=list(cfg_model.num_heads),
-        embed_dim=int(cfg_model.embed_dim),
-        updown_scale_factor=int(cfg_model.updown_scale_factor),
-        predict_delta=bool(cfg_model.predict_delta),
-        mask_output=bool(cfg_model.mask_output),
-        upper_air_boundary=bool(cfg_model.upper_air_boundary),
-        vertical_windowing=bool(cfg_model.vertical_windowing),
-        subpixel_deconv=bool(cfg_model.subpixel_deconv),
-        polar_pad=bool(cfg_model.polar_pad),
-        grid_has_poles=bool(cfg_model.grid_has_poles),
-        recovery_head=bool(cfg_model.recovery_head),
-        diagnostic_head=bool(cfg_model.diagnostic_head),
-        has_diagnostic=bool(cfg_model.has_diagnostic),
-        drop_rate=float(cfg_model.drop_rate),
-        checkpointing=int(cfg_model.checkpointing),
-        use_reentrant=bool(cfg_model.use_reentrant),
+    if model_type == "SfnoPlasim":
+        return SfnoPlasim(
+            surface_variables=list(cfg_model.surface_variables),
+            upper_air_variables=list(cfg_model.upper_air_variables),
+            constant_boundary_variables=list(cfg_model.constant_boundary_variables),
+            varying_boundary_variables=list(cfg_model.varying_boundary_variables),
+            diagnostic_variables=list(cfg_model.diagnostic_variables),
+            levels=list(cfg_model.levels),
+            horizontal_resolution=list(cfg_model.horizontal_resolution),
+            spectral_transform=str(cfg_model.get("spectral_transform", "sht")),
+            filter_type=str(cfg_model.get("filter_type", "linear")),
+            operator_type=str(cfg_model.get("operator_type", "dhconv")),
+            scale_factor=int(cfg_model.get("scale_factor", 1)),
+            embed_dim=int(cfg_model.embed_dim),
+            num_layers=int(cfg_model.get("num_layers", 12)),
+            use_mlp=bool(cfg_model.get("use_mlp", True)),
+            mlp_ratio=float(cfg_model.get("mlp_ratio", 2.0)),
+            activation_function=str(cfg_model.get("activation_function", "gelu")),
+            encoder_layers=int(cfg_model.get("encoder_layers", 1)),
+            pos_embed=bool(cfg_model.get("pos_embed", False)),
+            drop_rate=float(cfg_model.get("drop_rate", 0.0)),
+            drop_path_rate=float(cfg_model.get("drop_path_rate", 0.0)),
+            num_blocks=int(cfg_model.get("num_blocks", 8)),
+            sparsity_threshold=float(cfg_model.get("sparsity_threshold", 0.0)),
+            normalization_layer=str(cfg_model.get("normalization_layer", "instance_norm")),
+            hard_thresholding_fraction=float(cfg_model.get("hard_thresholding_fraction", 1.0)),
+            use_complex_kernels=bool(cfg_model.get("use_complex_kernels", True)),
+            big_skip=bool(cfg_model.get("big_skip", True)),
+            rank=float(cfg_model.get("rank", 1.0)),
+            factorization=cfg_model.get("factorization", None),
+            separable=bool(cfg_model.get("separable", False)),
+            complex_network=bool(cfg_model.get("complex_network", True)),
+            complex_activation=str(cfg_model.get("complex_activation", "real")),
+            spectral_layers=int(cfg_model.get("spectral_layers", 3)),
+            checkpointing=int(cfg_model.get("checkpointing", 0)),
+            data_grid=str(cfg_model.get("data_grid", "equiangular")),
+        )
+    raise ValueError(
+        f"Unknown cfg.model.model_type={model_type!r}; expected "
+        "'PanguPlasim', 'PanguPlasimLegacy', or 'SfnoPlasim'"
     )
 
 
