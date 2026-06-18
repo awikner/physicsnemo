@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PLASIM sim52 conversion config — FULL source-level coverage for the
+# ai-rossby archive at /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/.
+#
+# Combines:
+# * The 13-level pressure axis from PANGU_PLASIM_H5_DERECHO_0514.yaml
+#   (full PanguWeather pressure set; includes 5000, 10000, 15000 Pa that the
+#   SFNO_PLASIM_H5_DERECHO_5412.yaml subset drops).
+# * The 10-level sigma axis from SFNO_PLASIM_H5_DERECHO_5412.yaml
+#   (full PLASIM sigma set as written in the H5 archives).
+# * `use_sigma_levels: True` so the converter routes ta/ua/va/hus onto sigma
+#   (their native PLASIM coord) and `zg` onto pressure (its native).
+#
+# This config is read by tools/data/plasim/pangu_h5_to_zarr.py via
+# `--config <path> --config-key PLASIM`. Channel groups + var lists match
+# PanguWeather sim52 conventions.
+
+PLASIM:
+  upper_air_variables: ['ta', 'ua', 'va', 'hus', 'zg']
+  surface_variables: ['pl', 'tas']
+  diagnostic_variables: ["pr_6h"]
+  land_variables: []
+  ocean_variables: []
+  constant_boundary_variables: ['lsm', 'z0', 'sg']
+  varying_boundary_variables: ['sst', 'rsdt', 'sic']
+  data_timedelta_hours: 6
+  calendar: 'proleptic_gregorian'
+  has_year_zero: True
+  num_levels: 13
+  use_sigma_levels: True
+  # Full 13-level pressure axis (Pa) — superset of the SFNO_PLASIM_5412 subset.
+  levels:
+    - 5000
+    - 10000
+    - 15000
+    - 20000
+    - 25000
+    - 30000
+    - 40000
+    - 50000
+    - 60000
+    - 70000
+    - 85000
+    - 92500
+    - 100000
+  # Full 10-level sigma axis (unitless 0..1).
+  sigma_levels:
+    - 0.03830000013113022
+    - 0.11910000443458557
+    - 0.21085000783205032
+    - 0.3168500065803528
+    - 0.4368000030517578
+    - 0.5668000280857086
+    - 0.6993500888347626
+    - 0.8233500719070435
+    - 0.9240999817848206
+    - 0.983299970626831
+  horizontal_resolution: [64, 128]

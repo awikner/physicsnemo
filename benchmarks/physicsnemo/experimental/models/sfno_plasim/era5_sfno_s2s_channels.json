@@ -1,0 +1,37 @@
+{
+  "_comment": "Channel config matching PanguWeather v2.0 SFNO_S2S_0003_test.yaml — passed to tools/data/era5/pangu_h5_to_zarr.py via --channel-config so the converted Zarr has the same set of vars + levels the SFNO_S2S model trains on.",
+  "surface_variables": [
+    "2m_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "mean_sea_level_pressure",
+    "surface_pressure",
+    "volumetric_soil_water_layer_1",
+    "soil_temperature_level_1",
+    "skin_temperature",
+    "sea_surface_temperature"
+  ],
+  "constant_boundary_variables": [
+    "land_sea_mask",
+    "geopotential_at_surface"
+  ],
+  "varying_boundary_variables": [
+    "toa_incident_solar_radiation"
+  ],
+  "diagnostic_variables": [
+    "total_precipitation_24hr",
+    "mean_top_net_long_wave_radiation_flux"
+  ],
+  "pressure_upper_air_variables": [
+    "temperature",
+    "u_component_of_wind",
+    "v_component_of_wind",
+    "specific_humidity",
+    "geopotential"
+  ],
+  "sigma_upper_air_variables": [],
+  "pressure_levels": [
+    5.0, 10.0, 20.0, 30.0, 50.0, 70.0, 100.0, 150.0,
+    250.0, 300.0, 400.0, 500.0, 600.0, 700.0, 850.0, 925.0, 1000.0
+  ]
+}

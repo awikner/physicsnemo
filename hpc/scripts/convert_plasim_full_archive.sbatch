@@ -52,7 +52,7 @@ for YEAR in $(seq 12 132); do
     fi
     echo "[$(date)] converting PLASIM year $YEAR ..."
     python tools/data/plasim/pangu_h5_to_zarr.py \
-        --config /work/nvme/bdiu/awikner/PanguWeather/v2.0/config/SFNO_PLASIM_H5_DERECHO_5412.yaml \
+        --config tools/data/plasim/configs/sim52_full_coverage.yaml \
         --config-key PLASIM \
         --input-dir "$H5_DIR" \
         --year "$YEAR" \

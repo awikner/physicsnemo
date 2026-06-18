@@ -163,6 +163,16 @@ def test_pangu_e3sm_channels_has_uppercase_vars():
     assert PANGU_E3SM_CHANNELS["sigma_upper_air_variables"] == []
 
 
+def test_pangu_e3sm_channels_full_source_levels():
+    levels = PANGU_E3SM_CHANNELS["pressure_levels"]
+    # Full E3SM source coverage: 18 hybrid-pressure levels in hPa.
+    assert len(levels) == 18
+    # The top stratospheric levels (4.7, 10.7 hPa) were missing in the old
+    # 13-level default — make sure they're present now.
+    assert min(levels) < 5.0
+    assert max(levels) > 990.0
+
+
 # ---------------------------------------------------------------------------
 # End-to-end synthetic round-trip.
 # ---------------------------------------------------------------------------

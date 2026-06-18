@@ -181,10 +181,13 @@ def test_level_key_matches_with_tolerance():
     assert _level_key(g, "temperature", 50.0) == "temperature_50.0"
 
 
-def test_pangu_era5_channels_defaults_have_pressure_levels():
+def test_pangu_era5_channels_defaults_have_full_source_levels():
     levels = PANGU_ERA5_CHANNELS["pressure_levels"]
-    # The default set is 13-level Pangu-Weather standard, in hPa.
-    assert 50.0 in levels and 1000.0 in levels
+    # Full ERA5 source coverage: 18 pressure levels in hPa.
+    assert len(levels) == 18
+    # Spot-check both ends of the axis (the stratospheric levels were missing
+    # in the old 13-level default).
+    assert 5.0 in levels and 10.0 in levels and 1000.0 in levels
     # No sigma vars for ERA5.
     assert PANGU_ERA5_CHANNELS["sigma_upper_air_variables"] == []
 

@@ -98,9 +98,17 @@ PANGU_ERA5_CHANNELS = {
         "geopotential",
     ],
     "sigma_upper_air_variables": [],
-    # Levels: standard 13-level Pangu-Weather pressure set in hPa.
+    # Levels: FULL ERA5 source coverage — 18 pressure levels in hPa
+    # (PanguWeather v2.0 ERA5 H5 archives include all 18). Model configs may
+    # subset (e.g. SFNO_S2S drops 200 hPa to use 17 levels); the *archive*
+    # captures everything so subsetting is a downstream choice.
     "pressure_levels": [
+        5.0,
+        10.0,
+        20.0,
+        30.0,
         50.0,
+        70.0,
         100.0,
         150.0,
         200.0,

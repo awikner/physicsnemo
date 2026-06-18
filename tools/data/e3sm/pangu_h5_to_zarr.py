@@ -83,25 +83,30 @@ PANGU_E3SM_CHANNELS = {
         "Z3",
     ],
     "sigma_upper_air_variables": [],
-    # 13-level subset of the 18-level E3SM hybrid pressure grid (hPa). These
-    # are the actual hybrid-pressure values written into the H5 keys (e.g.
+    # FULL E3SM hybrid-pressure coverage — all 18 levels (hPa). These are
+    # the actual hybrid-pressure values written into the H5 keys (e.g.
     # `T_50.11779996521295`); the converter rounds to float32 for the unified
-    # `pressure_level` coord. The 13 chosen levels are E3SM's near-equivalents
-    # of the standard Pangu_Weather set (50, 100, 150, …, 1000 hPa).
+    # `pressure_level` coord. Model configs may subset; the archive keeps
+    # everything so we don't drop stratospheric levels by default.
     "pressure_levels": [
-        50.11779996521295,    # ~50  hPa
-        96.46377266572703,    # ~100 hPa
-        145.04282239200347,   # ~150 hPa
-        200.99889546355382,   # ~200 hPa
-        256.72368590525895,   # ~250 hPa
-        302.21364012188303,   # ~300 hPa
-        385.999023919911,     # ~400 hPa
-        492.46857402252755,   # ~500 hPa
-        608.6437744215842,    # ~600 hPa
-        713.7046383204334,    # ~700 hPa
-        849.6612491105952,    # ~850 hPa
-        925.5197481473349,    # ~925 hPa
-        998.4964394917621,    # ~1000 hPa
+        4.714998332947841,    # ~5
+        10.655023096474308,   # ~10
+        19.235455601758737,   # ~20
+        28.79458853709195,    # ~30
+        50.11779996521295,    # ~50
+        69.59908688413749,    # ~70
+        96.46377266572703,    # ~100
+        145.04282239200347,   # ~150
+        200.99889546355382,   # ~200
+        256.72368590525895,   # ~250
+        302.21364012188303,   # ~300
+        385.999023919911,     # ~400
+        492.46857402252755,   # ~500
+        608.6437744215842,    # ~600
+        713.7046383204334,    # ~700
+        849.6612491105952,    # ~850
+        925.5197481473349,    # ~925
+        998.4964394917621,    # ~1000
     ],
 }
 
