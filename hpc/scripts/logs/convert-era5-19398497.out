@@ -457,3 +457,31 @@
 2026-06-18 16:12:49,500 INFO __main__ loaded 1200 / 1460
 2026-06-18 16:13:04,341 INFO __main__ loaded 1400 / 1460
 2026-06-18 16:13:37,100 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2011.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:15:00,386 INFO __main__ done: 15 vars, 1460 timesteps
+[Thu Jun 18 16:15:02 CDT 2026] converting ERA5 year 2012 ...
+2026-06-18 16:15:06,175 INFO __main__ year 2012: 1464 sample files in [0, 1464)
+2026-06-18 16:15:06,176 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:15:18,900 INFO __main__ loaded 200 / 1464
+2026-06-18 16:15:31,905 INFO __main__ loaded 400 / 1464
+2026-06-18 16:15:41,931 INFO __main__ loaded 600 / 1464
+2026-06-18 16:15:52,150 INFO __main__ loaded 800 / 1464
+2026-06-18 16:16:04,688 INFO __main__ loaded 1000 / 1464
+2026-06-18 16:16:15,965 INFO __main__ loaded 1200 / 1464
+2026-06-18 16:16:25,200 INFO __main__ loaded 1400 / 1464
+2026-06-18 16:16:48,201 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2012.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:19:40,051 INFO __main__ done: 15 vars, 1464 timesteps
+[Thu Jun 18 16:19:42 CDT 2026] converting ERA5 year 2013 ...
+2026-06-18 16:19:45,582 INFO __main__ year 2013: 1460 sample files in [0, 1460)
+2026-06-18 16:19:45,585 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:19:58,428 INFO __main__ loaded 200 / 1460
+2026-06-18 16:20:10,132 INFO __main__ loaded 400 / 1460
+2026-06-18 16:20:22,892 INFO __main__ loaded 600 / 1460
+2026-06-18 16:20:35,806 INFO __main__ loaded 800 / 1460
+2026-06-18 16:20:46,860 INFO __main__ loaded 1000 / 1460
+2026-06-18 16:21:01,401 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:21:15,721 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:21:42,868 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/2013.zarr

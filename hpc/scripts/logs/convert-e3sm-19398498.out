@@ -469,3 +469,35 @@
 2026-06-18 16:13:26,730 INFO __main__ loaded 800 / 1460
 2026-06-18 16:13:37,069 INFO __main__ loaded 1000 / 1460
 2026-06-18 16:13:46,134 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:13:52,971 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:14:21,787 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2048.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:18:26,469 INFO __main__ done: 16 vars, 1460 timesteps
+[Thu Jun 18 16:18:28 CDT 2026] converting E3SM year 2049 ...
+2026-06-18 16:18:30,463 INFO __main__ year 2049: 1460 sample files in [0, 1460)
+2026-06-18 16:18:30,464 INFO __main__ loading per-file H5 reads across 64 workers
+2026-06-18 16:18:38,705 INFO __main__ loaded 200 / 1460
+2026-06-18 16:18:44,976 INFO __main__ loaded 400 / 1460
+2026-06-18 16:18:51,737 INFO __main__ loaded 600 / 1460
+2026-06-18 16:18:58,890 INFO __main__ loaded 800 / 1460
+2026-06-18 16:19:06,137 INFO __main__ loaded 1000 / 1460
+2026-06-18 16:19:13,100 INFO __main__ loaded 1200 / 1460
+2026-06-18 16:19:20,076 INFO __main__ loaded 1400 / 1460
+2026-06-18 16:19:44,613 INFO __main__ writing Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2049.zarr
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:21:08,123 INFO __main__ done: 16 vars, 1460 timesteps
+[Thu Jun 18 16:21:10 CDT 2026] building E3SM normalization Zarr ...
+2026-06-18 16:21:13,395 INFO __main__ loaded 26 vars (mean) + 26 vars (std)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/core/dtype/npy/string.py:249: UnstableSpecificationWarning: The data type (FixedLengthUTF32(length=4, endianness='little')) does not have a Zarr V3 specification. That means that the representation of arrays saved with this data type may change without warning in a future version of Zarr Python. Arrays stored with this data type may be unreadable by other Zarr libraries. Use this data type at your own risk! Check https://github.com/zarr-developers/zarr-extensions/tree/main/data-types for the status of data type specifications for Zarr V3.
+  v3_unstable_dtype_warning(self)
+/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/zarr/api/asynchronous.py:231: ZarrUserWarning: Consolidated metadata is currently not part in the Zarr format 3 specification. It may not be supported by other zarr implementations and may change in the future.
+  warnings.warn(
+2026-06-18 16:21:17,192 INFO _common.normalization wrote normalization Zarr to /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/normalization_2015-2050.zarr (vars=26, sigma_levels=0, pressure_levels=18)
+[Thu Jun 18 16:21:17 CDT 2026] building E3SM climatology+bias Zarr ...
+2026-06-18 16:21:31,474 INFO __main__ loaded climatology /work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/sigma_data/climatology.nc (34 vars, time=365, lat=180, lon=360)
+2026-06-18 16:21:31,492 INFO __main__ post soil decomposition: 42 vars (e.g. ['TSOI_10CM', 'H2OSOI_0.0071006352081894875', 'H2OSOI_0.027924999594688416', 'H2OSOI_0.06225857511162758', 'H2OSOI_0.11886506527662277', 'H2OSOI_0.21219339966773987'])
+2026-06-18 16:21:31,505 INFO __main__ scanned bias dir /work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/bias (17 vars)
+2026-06-18 16:21:31,505 INFO _common.climatology_bias loading 510 bias .npy files across 64 worker processes
+2026-06-18 16:21:32,541 INFO _common.climatology_bias merging 41 climatology vars + 17 bias vars → 41 unified vars
