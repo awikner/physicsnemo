@@ -82,6 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     std_ds = xr.open_dataset(std_p, decode_times=_cftime_decoder)
     logger.info("loaded %d vars (mean) + %d vars (std)", len(mean_ds.data_vars), len(std_ds.data_vars))
 
+    # The source mean+std NetCDFs disagree on the vertical-coord name (mean
+    # uses `Z_2`, std uses `Z`). Normalize the std file's coord name to match
+    # the mean so the shared converter sees a consistent dim name.
+    if "Z" in std_ds.coords and "Z_2" not in std_ds.coords:
+        std_ds = std_ds.rename({"Z": "Z_2"})
+
     # E3SM uses Z_2 for its 18-level hybrid pressure coord (in hPa); no sigma.
     out = build_normalization_dataset(
         mean_ds,
