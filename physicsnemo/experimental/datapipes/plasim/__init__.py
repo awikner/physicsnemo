@@ -42,6 +42,7 @@ See :doc:`../../../../../pangu_plasim_reuse_plan` for the design context.
 
 from .datapipe import PlasimClimateDatapipe
 from .dataset import PLASIM_ZARR_SCHEMA_VERSION, PlasimClimateDataset
+from .multiyear import PlasimMultiYearDataset
 from .samplers import LeadTimePairSampler
 from .transforms import ComposeTransform, NanFillTransform, PlasimNormalizer
 
@@ -52,5 +53,6 @@ __all__ = [
     "NanFillTransform",
     "PlasimClimateDatapipe",
     "PlasimClimateDataset",
+    "PlasimMultiYearDataset",
     "PlasimNormalizer",
 ]
