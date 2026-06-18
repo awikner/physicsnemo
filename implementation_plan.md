@@ -261,6 +261,38 @@ Components:
   Lives more naturally in the training recipe (Phase 3) once the recipe defines exactly when
   bias correction runs (pre-loss vs post-output).
 
+### Phase 2 follow-up: shared `ClimateZarrDataset` + unified data format ← *complete*
+
+After the initial PLASIM datapipe shipped (`PlasimClimateDataset` / `PlasimClimateDatapipe`),
+we generalized the loader and built per-dataset converters for ERA5 and E3SM under one schema.
+The loader is metadata-driven (channel groups + level coords + calendar from store ``attrs``),
+so a single class handles all three datasets.
+
+- **Rename + alias** (`3ed6c25c`): `PlasimClimateDataset` → `ClimateZarrDataset`,
+  `PlasimMultiYearDataset` → `ClimateZarrMultiYearDataset`,
+  `PlasimStoreLayout` → `ClimateZarrStoreLayout`, in a new sub-package
+  [`physicsnemo.experimental.datapipes.climate`](physicsnemo/experimental/datapipes/climate/).
+  PLASIM-flavored names retained as backward-compat aliases.
+- **Climatology schema v1.1** (`faf6eb1b`): every `{var}` climatology array carries a leading
+  `stat` axis (`mean`, `std`). PLASIM sources have no separate std → NaN-filled.
+- **Yearly-repeating boundary tests** (`bd285dc7`): cftime + numpy.datetime64 robustness for the
+  three boundary modes (inline / single-year / yearly-repeating leap+non-leap).
+- **cftime everywhere** (`39eb9dd2`, `d95eca63`): all xarray opens force
+  `decode_times=CFDatetimeCoder(use_cftime=True)` so the time-coord semantics are uniform
+  across PLASIM (pre-1582 year 1) and ERA5/E3SM (post-1582 dates). Loader bench shows < 1%
+  impact on the hot path; see
+  [`benchmarks/.../RESULTS.md`](benchmarks/physicsnemo/experimental/datapipes/plasim/RESULTS.md)
+  cftime parity check.
+- **ERA5 converters** (`ed5ae9d7`): per-year H5→Zarr, 5 normalization variants (pangu_s2s ±
+  withnino / log_precip), climatology+std Zarr.
+- **E3SM converters** (`041dbfec`, `481f79d2`, `4573e437`): per-year H5→Zarr (uppercase var
+  names, hybrid pressure levels in hPa, noleap calendar), normalization, climatology+bias with
+  soil-level (`levgrnd`) decomposition into per-depth flat 2D channels.
+- **Full-archive SLURM scripts** (`71048006`): three sbatch jobs at
+  [`hpc/scripts/convert_{plasim,era5,e3sm}_full_archive.sbatch`](hpc/scripts/) covering PLASIM
+  (12–132), ERA5 (1979–2018), E3SM (2015–2049). All target
+  `/work/nvme/bdiu/awikner/physicsnemo-zarr/{dataset}/`.
+
 ### Phase 3 — Training recipe (shared, deterministic mode) ← *v1 in progress*
 Hydra config groups translated from the YParams YAML schema. Custom loop on `DistributedManager` +
 `save/load_checkpoint` + `LaunchLogger` + `StaticCaptureTraining`, reproducing: AdamW(`fused`)/ZeRO-1,
