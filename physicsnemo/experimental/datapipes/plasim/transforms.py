@@ -125,8 +125,12 @@ class PlasimNormalizer:
                 "NetCDF). Generate one via tools/data/plasim/compute_delta_stats.py."
             )
 
-        mean = xr.open_dataset(mean_path)
-        std = xr.open_dataset(std_path)
+        # Force cftime decoding for consistency with the dataset's open_zarr;
+        # the per-variable mean/std .nc files have no time coord so this is a
+        # no-op at the data layer but keeps the open kwargs uniform.
+        _cftime_decoder = xr.coders.CFDatetimeCoder(use_cftime=True)
+        mean = xr.open_dataset(mean_path, decode_times=_cftime_decoder)
+        std = xr.open_dataset(std_path, decode_times=_cftime_decoder)
 
         # Surface / varying boundary / diagnostic / constant boundary are scalars.
         self.surface_mean, self.surface_std = self._stack_scalars(
@@ -158,7 +162,7 @@ class PlasimNormalizer:
         # In predict_delta mode, the target tensors carry tendencies normalized
         # by delta_std (no mean subtraction — PanguWeather convention).
         if self._predict_delta:
-            delta = xr.open_dataset(delta_std_path)
+            delta = xr.open_dataset(delta_std_path, decode_times=_cftime_decoder)
             # delta_std for surface vars is scalar per var; broadcast as (C, 1, 1).
             self.target_surface_delta_std = self._stack_scalars(
                 delta, delta, surface_variables

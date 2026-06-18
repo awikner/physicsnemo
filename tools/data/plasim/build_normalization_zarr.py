@@ -93,8 +93,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    mean_ds = xr.open_dataset(args.mean)
-    std_ds = xr.open_dataset(args.std)
+    # cftime everywhere — for the per-variable stats .nc files this is a no-op
+    # (no time coord), but it keeps the open kwargs uniform across the codebase.
+    _cftime_decoder = xr.coders.CFDatetimeCoder(use_cftime=True)
+    mean_ds = xr.open_dataset(args.mean, decode_times=_cftime_decoder)
+    std_ds = xr.open_dataset(args.std, decode_times=_cftime_decoder)
     logger.info(
         "loaded mean (%d vars) + std (%d vars) from %s + %s",
         len(mean_ds.data_vars),

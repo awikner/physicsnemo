@@ -99,7 +99,13 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
     logger.info("Opening source zarr %s", args.zarr)
-    ds = xr.open_zarr(args.zarr, consolidated=True)
+    # cftime everywhere — uniform time coord across PLASIM (year 1, cftime
+    # already) and ERA5/E3SM (post-1582, would otherwise decode to datetime64).
+    ds = xr.open_zarr(
+        args.zarr,
+        consolidated=True,
+        decode_times=xr.coders.CFDatetimeCoder(use_cftime=True),
+    )
     logger.info("Computing delta std (stride=%d) over %d timesteps", args.stride, ds.sizes["time"])
     delta = compute_delta_std(ds, args.stride)
     args.output.parent.mkdir(parents=True, exist_ok=True)

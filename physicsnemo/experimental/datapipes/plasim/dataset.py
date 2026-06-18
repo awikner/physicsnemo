@@ -234,7 +234,18 @@ class ClimateZarrDataset(Dataset):
         # `xr.open_zarr` is lazy; the actual slice reads happen in __getitem__.
         # consolidated=True is the fast path when the store has consolidated
         # metadata; xarray transparently falls back if it doesn't.
-        self._ds = xr.open_zarr(self.zarr_path, consolidated=consolidated)
+        # Force cftime decoding so the time coord is calendar-aware regardless
+        # of source year (xarray's default decodes post-1582 dates to
+        # numpy.datetime64 and only falls back to cftime for pre-1582 / non-
+        # standard calendars). Climate datasets straddle both regimes — PLASIM
+        # uses fictitious years like 100 (cftime path), ERA5/E3SM use 1979+
+        # (datetime64 path). Uniform cftime keeps boundary substitution
+        # (leap-year + day-of-year mapping) on a single code path.
+        self._ds = xr.open_zarr(
+            self.zarr_path,
+            consolidated=consolidated,
+            decode_times=xr.coders.CFDatetimeCoder(use_cftime=True),
+        )
         self.layout = ClimateZarrStoreLayout.from_dataset(self._ds)
 
         # Sanity: when both level systems are used, the model concat assumes
@@ -319,19 +330,18 @@ class ClimateZarrDataset(Dataset):
     def _decompose_time(self, time_idx: int) -> tuple[int, int, int]:
         """Return ``(year, dayofyear_0_indexed, hour)`` for a prognostic time index.
 
-        Robust to both cftime objects (PLASIM pre-1582 calendar) and numpy
-        ``datetime64`` (xarray decodes post-1582 dates into numpy time when
-        ``use_cftime=False`` — which is the open_zarr default).
+        Time coords are uniformly cftime objects (forced via
+        ``CFDatetimeCoder(use_cftime=True)`` on open_zarr). The
+        ``numpy.datetime64`` branch survives as a defensive fallback for
+        callers that hand us a dataset opened with a different decoder.
         """
         t = self._prog_times[time_idx]
-        # numpy.datetime64 path: convert to Python datetime.
         if isinstance(t, np.datetime64):
+            # Defensive: only triggered if a caller bypasses __init__'s open_zarr.
             import pandas as pd
 
             ts = pd.Timestamp(t).to_pydatetime()
             return ts.year, ts.timetuple().tm_yday - 1, ts.hour
-        # cftime path: prefer the explicit `dayofyr` (cftime), falling back to
-        # `timetuple` for cftime variants that don't expose it.
         year = t.year
         try:
             doy = t.dayofyr - 1

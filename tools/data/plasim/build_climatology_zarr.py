@@ -115,7 +115,10 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    climatology = xr.open_dataset(args.climatology, use_cftime=True)
+    # cftime everywhere — use the modern CFDatetimeCoder kwarg (the old
+    # `use_cftime=True` is deprecated for xarray 2025+).
+    _cftime_decoder = xr.coders.CFDatetimeCoder(use_cftime=True)
+    climatology = xr.open_dataset(args.climatology, decode_times=_cftime_decoder)
     logger.info(
         "loaded mean climatology %s (%d vars, dayofyear=%d, lat=%d, lon=%d)",
         args.climatology,
@@ -127,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
 
     std_climatology = None
     if args.std_climatology is not None:
-        std_climatology = xr.open_dataset(args.std_climatology, use_cftime=True)
+        std_climatology = xr.open_dataset(
+            args.std_climatology, decode_times=_cftime_decoder
+        )
         logger.info(
             "loaded std climatology %s (%d vars)",
             args.std_climatology,
