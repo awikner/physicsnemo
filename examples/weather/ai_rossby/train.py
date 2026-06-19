@@ -194,6 +194,16 @@ def build_datapipe(
     if data.delta_std_path:
         normalizer_kwargs["predict_delta"] = True
         normalizer_kwargs["delta_std_path"] = _resolve_path(data.delta_std_path)
+    # Opt-in normalization for constant boundary + diagnostic fields. Off by
+    # default for back-compat (ERA5 stats often skip the const-boundary vars);
+    # PLASIM stats include lsm/sg/z0, so PLASIM recipes should flip these on
+    # to match PanguWeather's data loader (which always normalizes them).
+    normalizer_kwargs["normalize_constant_boundary"] = bool(
+        data.get("normalize_constant_boundary", False)
+    )
+    normalizer_kwargs["normalize_diagnostic"] = bool(
+        data.get("normalize_diagnostic", False)
+    )
 
     normalizer = PlasimNormalizer.from_dataset(
         raw_dataset,

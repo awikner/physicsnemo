@@ -71,6 +71,8 @@ torchrun \
         data.zarr_path=${ZARR_PATH} \
         data.mean_path=${MEAN_PATH} \
         data.std_path=${STD_PATH} \
+        +data.normalize_constant_boundary=True \
+        +data.normalize_diagnostic=True \
         data.batch_size=8 \
         data.num_workers=8 \
         data.prefetch_factor=2 \
