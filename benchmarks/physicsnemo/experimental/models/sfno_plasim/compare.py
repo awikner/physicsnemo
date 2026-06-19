@@ -73,8 +73,8 @@ def summarize(name: str, losses: list[float], wall_s: list[float] | None) -> dic
     }
     if wall_s:
         out["wall_s"] = wall_s[-1]
-        # global batch_size = 8 → samples = 8 × n_batches
-        out["samples_per_s"] = (8 * len(losses)) / max(wall_s[-1], 1e-9)
+        # global batch_size = 32 → samples = 32 × n_batches
+        out["samples_per_s"] = (32 * len(losses)) / max(wall_s[-1], 1e-9)
     else:
         out["wall_s"] = float("nan")
         out["samples_per_s"] = float("nan")

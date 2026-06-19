@@ -3,9 +3,10 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# PanguWeather v2.0 side of the SFNO_PLASIM_S2S benchmark. Trains 1 epoch
-# on ERA5 1981 using the original PanguWeather code + the SFNO_S2S_0003_test
-# config, for head-to-head comparison with ai-rossby's SfnoPlasim.
+# PanguWeather v2.0 side of the SFNO_PLASIM_5412 benchmark. Trains 1 epoch
+# on PLASIM sim52 year 12 using the original PanguWeather code + the
+# SFNO_PLASIM_H5_DERECHO_5412_test config, for head-to-head comparison with
+# ai-rossby's SfnoPlasim.
 #
 # Captures stdout (which includes per-batch `Loss: X.XXXX` lines from tqdm)
 # so the comparison script can parse the loss curve.
@@ -59,19 +60,21 @@ export MASTER_PORT=12347     # avoid colliding with ai-rossby's job if both run 
 export WORLD_SIZE
 export OMP_NUM_THREADS=1
 
-# SFNO_S2S_0003_test.yaml's batch_size=4 + fp32 OOMs on a 40GB A100
-# (~37 GiB just for params + activations + AdamW state). Spin up a
-# copy of the YAML with batch_size=2 per rank (global=8) for this run.
-# PanguWeather has no CLI batch_size override.
+# SFNO_PLASIM_H5_DERECHO_5412_test.yaml uses years 12-13 for training and a
+# multi-step forecast_lead_times list. For benchmark parity with ai-rossby
+# (single-year, single-step), copy the YAML and override:
+#   train_year_end: 14 → 13          (year 12 only)
+#   forecast_lead_times: [1,12,20,40,60] → [1]
 BENCH_YAML=hpc/scripts/logs/bench_sfno_pangu_${SLURM_JOB_ID}.yaml
 cd /work/nvme/bdiu/awikner/physicsnemo
-sed 's/^  batch_size: 4$/  batch_size: 2/' \
-    "${PW_DIR}/config/SFNO_S2S_0003_test.yaml" > "${BENCH_YAML}"
+sed -e 's/^  train_year_end: 14$/  train_year_end: 13/' \
+    -e 's/^  forecast_lead_times: \[1, 12, 20, 40, 60\]$/  forecast_lead_times: [1]/' \
+    "${PW_DIR}/config/SFNO_PLASIM_H5_DERECHO_5412_test.yaml" > "${BENCH_YAML}"
 cd "${PW_DIR}"
 
-# Override SFNO_S2S_0003_test.yaml's bf16 default with fp32 (--no_amp).
-# Disable ZeRO so both code paths use the same optimizer.
-# --epochs=1 → single epoch over 1981.
+# Override SFNO_PLASIM_H5_DERECHO_5412_test.yaml's bf16 default with fp32
+# (--no_amp). Disable ZeRO so both code paths use the same optimizer.
+# --epochs=1 → single epoch over year 12.
 # --global_seed 0 → matches ai-rossby.
 # Wandb is disabled via WANDB_MODE=offline at env level (NOT --debug, which
 # also clobbers world_size=1 and batch_size=num_workers).
@@ -83,7 +86,7 @@ srun --ntasks=1 --gpus-per-task=${NUM_TASKS_PER_NODE} \
         --master_port=${MASTER_PORT} \
         train.py \
             --yaml_config="/work/nvme/bdiu/awikner/physicsnemo/${BENCH_YAML}" \
-            --config=SFNOS2S \
+            --config=SFNO \
             --epochs=1 \
             --no_amp \
             --use_zero_optimizer false \

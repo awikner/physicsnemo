@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim model config — PLASIM SFNO_5412 benchmark
+# (mirrors PanguWeather v2.0 SFNO_PLASIM_H5_DERECHO_5412_test.yaml SFNO block).
+#
+# Used by benchmarks/.../sfno_plasim/ for the apples-to-apples comparison
+# against PanguWeather's SFNO. Differs from the lighter sfno_plasim.yaml
+# (num_blocks=8, pos_embed=False) in that it tracks the upstream Pangu
+# config exactly.
+
+name: sfno_plasim_5412
+target: physicsnemo.experimental.models.sfno_plasim.SfnoPlasim
+model_type: SfnoPlasim
+
+# Variable groups (sim52 channel order; sigma+pressure concat for SfnoPlasim).
+surface_variables: [pl, tas]
+upper_air_variables: [ta, ua, va, hus, zg]
+constant_boundary_variables: [lsm, sg, z0]
+varying_boundary_variables: [sst, rsdt, sic]
+diagnostic_variables: [pr_6h]
+
+# L dim for SfnoPlasim is 10 (sigma=10 for ta/ua/va/hus, pressure=10 for zg).
+# The actual sigma_levels / pressure_levels lists used by PlasimNormalizer are
+# read off the zarr's attrs at runtime.
+levels: [0.0383, 0.1191, 0.2109, 0.3168, 0.4368, 0.5668, 0.6993, 0.8233, 0.9241, 0.9833]
+horizontal_resolution: [64, 128]
+
+# SFNO-specific kwargs — track SFNO_PLASIM_H5_DERECHO_5412_test SFNO block.
+spectral_transform: sht
+filter_type: linear
+operator_type: dhconv
+scale_factor: 1
+embed_dim: 256
+num_layers: 12
+use_mlp: True
+mlp_ratio: 2.0
+activation_function: gelu
+encoder_layers: 1
+pos_embed: True
+drop_rate: 0.0
+drop_path_rate: 0.0
+num_blocks: 16
+sparsity_threshold: 0.0
+normalization_layer: instance_norm
+hard_thresholding_fraction: 1.0
+use_complex_kernels: True
+big_skip: True
+rank: 1.0
+factorization: null
+separable: False
+complex_network: True
+complex_activation: real
+spectral_layers: 3
+checkpointing: 0
+data_grid: legendre-gauss
