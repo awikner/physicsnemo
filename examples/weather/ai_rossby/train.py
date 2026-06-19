@@ -344,7 +344,7 @@ def main(cfg: DictConfig) -> None:
     elif amp_dtype == torch.bfloat16:
         logger.info("AMP enabled with bf16 (no GradScaler)")
     elif amp_dtype is None:
-        logger.info("AMP disabled (cfg.amp=%s)", cfg.get("amp", None))
+        logger.info(f"AMP disabled (cfg.amp={cfg.get('amp', None)})")
 
     # --- EMA --------------------------------------------------------------
     ema = None
@@ -380,7 +380,7 @@ def main(cfg: DictConfig) -> None:
             bench_tsv_file.write(
                 "epoch\tbatch_idx\twall_s\tloss\tsurface\tupper_air\tdiagnostic\tvae_kl\tlr\n"
             )
-            logger.info("benchmark per-batch TSV → %s", bench_tsv_path)
+            logger.info(f"benchmark per-batch TSV → {bench_tsv_path}")
 
     import time as _time
     _bench_start_wall = _time.perf_counter() if bench_tsv_file is not None else None

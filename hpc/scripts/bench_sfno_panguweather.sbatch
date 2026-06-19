@@ -63,7 +63,8 @@ export OMP_NUM_THREADS=1
 # Disable ZeRO so both code paths use the same optimizer.
 # --epochs=1 → single epoch over 1981.
 # --global_seed 0 → matches ai-rossby.
-# --debug → disables wandb (sets WANDB_MODE=offline).
+# Wandb is disabled via WANDB_MODE=offline at env level (NOT --debug, which
+# also clobbers world_size=1 and batch_size=num_workers).
 # Omit --with_profiling → no nsys overhead.
 srun --ntasks=1 --gpus-per-task=${NUM_TASKS_PER_NODE} \
     "${TORCHRUN}" \
@@ -77,7 +78,7 @@ srun --ntasks=1 --gpus-per-task=${NUM_TASKS_PER_NODE} \
             --no_amp \
             --use_zero_optimizer false \
             --global_seed 0 \
-            --debug
+            --run_num=bench
 
 # The SLURM stdout (hpc/scripts/logs/bench-sfno-panguweather-${SLURM_JOB_ID}.out)
 # contains the tqdm `Loss: ` lines that benchmarks/.../sfno_plasim/compare.py
