@@ -132,6 +132,15 @@ class PlasimNormalizer:
         mean = xr.open_dataset(mean_path, decode_times=_cftime_decoder)
         std = xr.open_dataset(std_path, decode_times=_cftime_decoder)
 
+        # PanguWeather's normalization_pangu_s2s.zarr packs mean+std into one
+        # file with a 'stat' coord {'mean','std'}; mean_path == std_path in
+        # that case. Slice each side here so downstream lookups behave like
+        # the per-var .nc files PLASIM uses.
+        if "stat" in mean.coords:
+            mean = mean.sel(stat="mean", drop=True)
+        if "stat" in std.coords:
+            std = std.sel(stat="std", drop=True)
+
         # Surface / varying boundary / diagnostic / constant boundary are scalars.
         self.surface_mean, self.surface_std = self._stack_scalars(
             mean, std, surface_variables
@@ -139,12 +148,21 @@ class PlasimNormalizer:
         self.varying_mean, self.varying_std = self._stack_scalars(
             mean, std, varying_boundary_variables
         )
-        self.constant_mean, self.constant_std = self._stack_scalars(
-            mean, std, constant_boundary_variables
-        )
-        self.diagnostic_mean, self.diagnostic_std = self._stack_scalars(
-            mean, std, diagnostic_variables
-        )
+        # Skip constant-boundary stats lookup unless we'll actually normalize
+        # them — the SFNO_S2S stats zarr doesn't ship stats for land_sea_mask
+        # / geopotential_at_surface (they're truly constant).
+        if normalize_constant_boundary:
+            self.constant_mean, self.constant_std = self._stack_scalars(
+                mean, std, constant_boundary_variables
+            )
+        else:
+            self.constant_mean, self.constant_std = None, None
+        if normalize_diagnostic:
+            self.diagnostic_mean, self.diagnostic_std = self._stack_scalars(
+                mean, std, diagnostic_variables
+            )
+        else:
+            self.diagnostic_mean, self.diagnostic_std = None, None
 
         # Upper-air vars: sigma (Z_2-dim) + pressure (Z-dim), concatenated along
         # the variable axis matching PlasimClimateDataset.upper_air_variable_names.
@@ -227,14 +245,24 @@ class PlasimNormalizer:
         if not names:
             return None, None
         target = np.asarray(target_levels, dtype="float32")
+        # ERA5-style stats use 'pressure_level' / 'sigma_level' rather than the
+        # PLASIM-native 'Z' / 'Z_2'. Accept either spelling so PanguWeather's
+        # normalization_pangu_s2s.zarr drops in unchanged.
+        _aliases = {"Z": "pressure_level", "Z_2": "sigma_level"}
         per_var_mean: list[np.ndarray] = []
         per_var_std: list[np.ndarray] = []
         for v in names:
-            if dim not in mean[v].dims:
+            var_dims = mean[v].dims
+            if dim in var_dims:
+                actual_dim = dim
+            elif _aliases.get(dim) in var_dims:
+                actual_dim = _aliases[dim]
+            else:
                 raise ValueError(
-                    f"Stats var {v!r} expected dim {dim}; got dims {mean[v].dims}"
+                    f"Stats var {v!r} expected dim {dim} (or {_aliases.get(dim)!r}); "
+                    f"got dims {var_dims}"
                 )
-            stats_levels = mean.coords[dim].values.astype("float32")
+            stats_levels = mean.coords[actual_dim].values.astype("float32")
             idx = _nearest_indices(stats_levels, target)
             per_var_mean.append(mean[v].values.astype("float32")[idx])
             per_var_std.append(std[v].values.astype("float32")[idx])

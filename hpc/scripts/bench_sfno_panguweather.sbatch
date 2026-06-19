@@ -32,9 +32,13 @@ export HDF5_USE_FILE_LOCKING=FALSE
 export WANDB_MODE=offline
 
 # Activate PanguWeather v2.0's conda env (per the upstream submission
-# scripts at PanguWeather/v2.0/submit_scripts/deltagpu/).
+# scripts at PanguWeather/v2.0/submit_scripts/deltagpu/). One activate.d
+# script (cartopy_offline_data-activate.sh) tests an unset env var, which
+# blows up under `set -u`; relax just for the activate call.
+set +u
 source /sw/rh9.4/user/python/conda-env/pytorch-2.8-cu128/etc/profile.d/conda.sh
 conda activate /projects/bdiu/awikner/.conda/envs/aires_panguplasim_cu126
+set -u
 
 # Use the absolute path — srun subprocesses don't inherit conda's PATH mods.
 TORCHRUN=/projects/bdiu/awikner/.conda/envs/aires_panguplasim_cu126/bin/torchrun
