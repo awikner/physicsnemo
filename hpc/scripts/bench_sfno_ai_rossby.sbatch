@@ -69,9 +69,9 @@ torchrun \
         grad_clip_norm=0.0 \
         ema.enabled=False \
         data.zarr_path=${ZARR_PATH} \
-        data.mean_path=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s.zarr \
-        data.std_path=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s.zarr \
-        data.batch_size=4 \
+        data.mean_path=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_mean.zarr \
+        data.std_path=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_std.zarr \
+        data.batch_size=2 \
         data.num_workers=4 \
         data.prefetch_factor=2 \
         data.persistent_workers=True \

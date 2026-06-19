@@ -17,8 +17,8 @@ and the original PanguWeather v2.0 SFNO_v2 at
 | Data | ERA5 1981 (1460 timesteps); converted to
 [`/work/hdd/bdiu/awikner/physicsnemo-zarr/era5_sfno_s2s/1981.zarr`](/work/hdd/bdiu/awikner/physicsnemo-zarr/era5_sfno_s2s/) for ai-rossby |
 | Reference config | [`config/SFNO_S2S_0003_test.yaml`](/work/nvme/bdiu/awikner/PanguWeather/v2.0/config/SFNO_S2S_0003_test.yaml) (PanguWeather v2.0) |
-| Per-rank batch size | 4 |
-| Global batch size | 16 |
+| Per-rank batch size | 2 (downsized from 4: fp32 + batch=4 OOMs on 40 GB A100 — ~37 GiB for params + activations + AdamW state) |
+| Global batch size | 8 |
 | DataLoader workers | 4 |
 | Random seed | 0 (`global_seed 0` for PanguWeather; `seed: 0` for ai-rossby) |
 | EMA | OFF (warmup is 6 epochs anyway → no behavioral difference at 1 epoch) |

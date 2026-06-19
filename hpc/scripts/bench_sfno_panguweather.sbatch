@@ -59,6 +59,16 @@ export MASTER_PORT=12347     # avoid colliding with ai-rossby's job if both run 
 export WORLD_SIZE
 export OMP_NUM_THREADS=1
 
+# SFNO_S2S_0003_test.yaml's batch_size=4 + fp32 OOMs on a 40GB A100
+# (~37 GiB just for params + activations + AdamW state). Spin up a
+# copy of the YAML with batch_size=2 per rank (global=8) for this run.
+# PanguWeather has no CLI batch_size override.
+BENCH_YAML=hpc/scripts/logs/bench_sfno_pangu_${SLURM_JOB_ID}.yaml
+cd /work/nvme/bdiu/awikner/physicsnemo
+sed 's/^  batch_size: 4$/  batch_size: 2/' \
+    "${PW_DIR}/config/SFNO_S2S_0003_test.yaml" > "${BENCH_YAML}"
+cd "${PW_DIR}"
+
 # Override SFNO_S2S_0003_test.yaml's bf16 default with fp32 (--no_amp).
 # Disable ZeRO so both code paths use the same optimizer.
 # --epochs=1 → single epoch over 1981.
@@ -72,7 +82,7 @@ srun --ntasks=1 --gpus-per-task=${NUM_TASKS_PER_NODE} \
         --master_addr=${MASTER_ADDR} \
         --master_port=${MASTER_PORT} \
         train.py \
-            --yaml_config="${PW_DIR}/config/SFNO_S2S_0003_test.yaml" \
+            --yaml_config="/work/nvme/bdiu/awikner/physicsnemo/${BENCH_YAML}" \
             --config=SFNOS2S \
             --epochs=1 \
             --no_amp \
