@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim model config — ERA5 S2S benchmark
+# (mirrors PanguWeather v2.0 SFNO_S2S_0003_test.yaml's SFNOS2S block).
+#
+# Used by benchmarks/.../sfno_plasim/ for side-by-side training comparison.
+# All channel groups and SFNO hyperparams match the upstream config exactly;
+# land + ocean vars are concat'd into surface_variables (SfnoPlasim doesn't
+# distinguish — both are flat surface channels).
+
+name: sfno_plasim_s2s
+target: physicsnemo.experimental.models.sfno_plasim.SfnoPlasim
+model_type: SfnoPlasim
+
+# Variable groups — match SFNO_S2S_0003_test exactly. Surface = 5 prognostic
+# + 3 land + 1 ocean (SfnoPlasim treats them all as flat surface channels).
+surface_variables:
+  - 2m_temperature
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+  - mean_sea_level_pressure
+  - surface_pressure
+  - volumetric_soil_water_layer_1
+  - soil_temperature_level_1
+  - skin_temperature
+  - sea_surface_temperature
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - specific_humidity
+  - geopotential
+constant_boundary_variables:
+  - land_sea_mask
+  - geopotential_at_surface
+varying_boundary_variables:
+  - toa_incident_solar_radiation
+diagnostic_variables:
+  - total_precipitation_24hr
+  - mean_top_net_long_wave_radiation_flux
+
+# 17 ERA5 pressure levels (SFNO_S2S_0003 drops 200 hPa from the full 18).
+levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
+horizontal_resolution: [180, 360]
+
+# SFNO-specific kwargs from SFNO_S2S_0003_test:
+spectral_transform: sht
+filter_type: linear
+operator_type: dhconv
+scale_factor: 1
+embed_dim: 512
+num_layers: 12
+use_mlp: True
+mlp_ratio: 2.0
+activation_function: gelu
+encoder_layers: 1
+pos_embed: True
+drop_rate: 0.0
+drop_path_rate: 0.0
+num_blocks: 16
+sparsity_threshold: 0.0
+normalization_layer: instance_norm
+hard_thresholding_fraction: 1.0
+use_complex_kernels: True
+big_skip: True
+rank: 1.0
+factorization: null
+separable: False
+complex_network: True
+complex_activation: real
+spectral_layers: 3
+checkpointing: 0
+data_grid: equiangular

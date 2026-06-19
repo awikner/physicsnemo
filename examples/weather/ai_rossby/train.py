@@ -366,6 +366,25 @@ def main(cfg: DictConfig) -> None:
     )
     start_epoch = max(int(cfg.start_epoch), loaded_epoch + 1)
 
+    # --- Per-batch loss TSV (benchmarking) --------------------------------
+    # When cfg.bench.per_batch_tsv is set, every minibatch's wall-clock time
+    # + loss components are appended to a TSV for downstream comparison
+    # against PanguWeather. Only rank 0 writes to avoid file contention.
+    bench_tsv_path = None
+    bench_tsv_file = None
+    if cfg.get("bench") and cfg.bench.get("per_batch_tsv"):
+        if dist.rank == 0:
+            bench_tsv_path = Path(_resolve_path(cfg.bench.per_batch_tsv))
+            bench_tsv_path.parent.mkdir(parents=True, exist_ok=True)
+            bench_tsv_file = open(bench_tsv_path, "w", buffering=1)  # line-buffered
+            bench_tsv_file.write(
+                "epoch\tbatch_idx\twall_s\tloss\tsurface\tupper_air\tdiagnostic\tvae_kl\tlr\n"
+            )
+            logger.info("benchmark per-batch TSV → %s", bench_tsv_path)
+
+    import time as _time
+    _bench_start_wall = _time.perf_counter() if bench_tsv_file is not None else None
+
     # --- Training loop ----------------------------------------------------
     has_diagnostic = inner_model.has_diagnostic
     for epoch in range(start_epoch, int(cfg.max_epochs) + 1):
@@ -377,7 +396,7 @@ def main(cfg: DictConfig) -> None:
             num_mini_batch=steps_per_epoch,
             epoch_alert_freq=1,
         ) as log:
-            for batch in datapipe:
+            for batch_idx, batch in enumerate(datapipe):
                 losses = train_step(
                     model=model,
                     loss_fn=loss_fn,
@@ -404,6 +423,17 @@ def main(cfg: DictConfig) -> None:
                         "vae_kl": losses["vae_kl"],
                     }
                 )
+                if bench_tsv_file is not None:
+                    bench_tsv_file.write(
+                        f"{epoch}\t{batch_idx}\t"
+                        f"{_time.perf_counter() - _bench_start_wall:.4f}\t"
+                        f"{float(losses['loss'].detach()):.6f}\t"
+                        f"{float(losses['surface']):.6f}\t"
+                        f"{float(losses['upper_air']):.6f}\t"
+                        f"{float(losses['diagnostic']):.6f}\t"
+                        f"{float(losses['vae_kl']):.6f}\t"
+                        f"{optimizer.param_groups[0]['lr']:.6e}\n"
+                    )
             log.log_epoch({"lr": optimizer.param_groups[0]["lr"]})
 
         # --- Validation (optional) ---------------------------------------

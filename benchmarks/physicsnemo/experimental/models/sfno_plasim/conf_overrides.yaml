@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hydra overrides for the SFNO_S2S 1981 benchmark.
+#
+# Mirrors PanguWeather v2.0 SFNO_S2S_0003_test.yaml under the ai-rossby
+# trainer. Pair with `model=sfno_plasim_s2s`, `loss=raw_l2`,
+# `scheduler=cosine_warmup`. Run via:
+#
+#   python examples/weather/ai_rossby/train.py \
+#       --config-dir /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/conf \
+#       --config-name config \
+#       +bench=path/to/benchmarks/.../sfno_plasim/conf_overrides.yaml \
+#       model=sfno_plasim_s2s loss=raw_l2 scheduler=cosine_warmup
+#
+# (The sbatch script `bench_sfno_ai_rossby.sbatch` wraps the full command.)
+
+# Run control — single epoch over ERA5 1981, fp32, fixed seed.
+start_epoch: 1
+max_epochs: 1
+seed: 0
+amp: none
+grad_clip_norm: 0.0
+checkpoint_save_interval: 9999
+max_checkpoints_to_keep: 1
+log_every_n_steps: 1
+run_name: bench_sfno_ai_rossby
+
+# EMA off — benchmark is about per-batch loss + wall time. EMA only affects
+# inference-time weights and adds variance to logging.
+ema:
+  enabled: False
+  decay: 0.999
+  warmup_epochs: 6
+
+# Data — ERA5 1981 (single per-year store) with SFNO_S2S channel groups.
+# The benchmark sbatch script re-converts this with the 17-level config first.
+data:
+  zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5_sfno_s2s/1981.zarr
+  val_zarr_path: null
+  mean_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s.zarr
+  std_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s.zarr
+  delta_std_path: null
+  boundary_zarr_path: null
+  yearly_repeating_boundary: False
+  leap_boundary_zarr_path: null
+  non_leap_boundary_zarr_path: null
+  forecast_lead_times: [1]
+  num_samples_per_epoch: null  # null → len(dataset) = 1460
+  batch_size: 4                # global = 4 ranks × 4 = 16
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: True
+  pin_memory: True
+  nan_fill_default: 0.0
+  nan_fill_values: {}
+  shuffle: True
+
+# Per-batch loss capture.
+bench:
+  per_batch_tsv: /work/hdd/bdiu/awikner/sfno_bench/ai_rossby_${oc.env:SLURM_JOB_ID,interactive}.tsv
