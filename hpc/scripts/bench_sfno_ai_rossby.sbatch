@@ -50,8 +50,8 @@ nvidia-smi
 
 # All overrides are passed as Hydra CLI args (no extra config files needed).
 # Matches SFNO_PLASIM_H5_DERECHO_5412_test.yaml SFNO block exactly via
-# conf/model/sfno_plasim_5412.yaml. Pair with scheduler=cosine_warmup,
-# loss=raw_l2.
+# conf/model/sfno_plasim_5412.yaml + conf/training/sfno_plasim.yaml.
+# dataset.* overrides point at the prebuilt year-12 zarr.
 torchrun \
     --nnodes=1 \
     --nproc-per-node=4 \
@@ -62,25 +62,28 @@ torchrun \
         run_name=bench_sfno_ai_rossby \
         model=sfno_plasim_5412 \
         loss=raw_l2 \
-        scheduler=cosine_warmup \
-        amp=none \
+        training=sfno_plasim \
+        validation=off \
+        dataset=plasim_sim52_year12 \
         seed=0 \
-        max_epochs=1 \
-        grad_clip_norm=0.0 \
-        ema.enabled=False \
-        data.zarr_path=${ZARR_PATH} \
-        data.mean_path=${MEAN_PATH} \
-        data.std_path=${STD_PATH} \
-        +data.normalize_constant_boundary=True \
-        +data.normalize_diagnostic=True \
-        data.batch_size=8 \
-        data.num_workers=8 \
-        data.prefetch_factor=2 \
-        data.persistent_workers=True \
-        data.pin_memory=True \
-        data.shuffle=True \
-        data.forecast_lead_times=[1] \
-        +bench.per_batch_tsv=${OUT_DIR}/ai_rossby_${SLURM_JOB_ID}.tsv
+        training.max_epochs=1 \
+        training.stages.0.num_epochs=1 \
+        training.amp=none \
+        training.grad_clip_norm=0.0 \
+        training.ema.enabled=False \
+        dataset.zarr_path=${ZARR_PATH} \
+        dataset.mean_path=${MEAN_PATH} \
+        dataset.std_path=${STD_PATH} \
+        dataset.normalize_constant_boundary=True \
+        dataset.normalize_diagnostic=True \
+        dataset.batch_size=8 \
+        dataset.num_workers=8 \
+        dataset.prefetch_factor=2 \
+        dataset.persistent_workers=True \
+        dataset.pin_memory=True \
+        dataset.shuffle=True \
+        dataset.forecast_lead_times=[1] \
+        bench.per_batch_tsv=${OUT_DIR}/ai_rossby_${SLURM_JOB_ID}.tsv
 
 echo
 echo "ai-rossby benchmark TSV: ${OUT_DIR}/ai_rossby_${SLURM_JOB_ID}.tsv"

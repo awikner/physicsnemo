@@ -2,21 +2,29 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Top-level config for the Pangu_Plasim training recipe.
+# Top-level config for the ai_rossby training recipe.
 #
-# Defaults pick the PanguPlasimLegacy + OneCycleLR + L1-loss combination that
-# matches PanguWeather v2.0 PANGU_PLASIM_H5_DERECHO_0514.yaml. Override on the
-# command line, e.g.
-#   python train.py loss=mse scheduler=cosine_warmup
+# Compositional structure (Hydra groups):
+#   model      — model architecture + variable-group routing
+#   loss       — loss-function family (raw/lat-weighted L1/L2, +/- VAE-KL)
+#   dataset    — Zarr store paths, normalization stats, batch/loader knobs
+#   training   — optimizer + EMA + multi-stage curriculum (each stage names
+#                its own scheduler + unroll_steps + num_epochs)
+#   validation — rollout validator + ensemble settings
 #
-# The dataset + stats paths are required and intentionally have no defaults;
-# point them at your Zarr store + PanguWeather-style mean/std NetCDFs.
+# Defaults pick the PanguPlasimLegacy + OneCycle + raw L1 + single-step
+# combination that matches PanguWeather v2.0 PANGU_PLASIM_H5_DERECHO_0514.yaml.
+# Override on the command line, e.g.
+#   python train.py model=sfno_plasim_5412 training=sfno_plasim \
+#                   dataset=plasim_sim52_year12 validation=rollout_5412
 
 defaults:
   - _self_
   - model: pangu_plasim_legacy
-  - scheduler: onecycle
   - loss: mae
+  - dataset: plasim_sim52_year12
+  - training: pangu_plasim_legacy
+  - validation: off
 
 hydra:
   job:
@@ -28,60 +36,12 @@ run_name: pangu_plasim_legacy
 
 # --- Run control -----------------------------------------------------------
 start_epoch: 1
-max_epochs: 100
 seed: 0
-amp: none                     # mixed precision: none / off / bf16 / fp16 (bf16 matches PanguWeather)
-grad_clip_norm: 0.0           # 0 disables gradient clipping
 checkpoint_save_interval: 10
 max_checkpoints_to_keep: 5
 log_every_n_steps: 1
 
-# --- EMA --------------------------------------------------------------------
-ema:
-  enabled: True
-  decay: 0.999
-  warmup_epochs: 6
-
-# --- Data -------------------------------------------------------------------
-data:
-  zarr_path: ???              # REQUIRED — Zarr store from tools/data/plasim/pangu_h5_to_zarr.py
-  val_zarr_path: null         # optional — separate validation store
-  mean_path: ???              # REQUIRED — PanguWeather-style per-var mean NetCDF
-  std_path: ???               # REQUIRED — per-var std NetCDF
-  delta_std_path: null        # set + predict_delta=True for tendency mode
-  boundary_zarr_path: null
-  yearly_repeating_boundary: False
-  leap_boundary_zarr_path: null
-  non_leap_boundary_zarr_path: null
-
-  forecast_lead_times: [1]
-  num_samples_per_epoch: null # null defaults to len(dataset)
-  batch_size: 16
-  num_workers: 4
-  prefetch_factor: 2
-  persistent_workers: True
-  pin_memory: True
-  nan_fill_default: 0.0
-  nan_fill_values: {}
-  shuffle: True
-
-# --- Validation -------------------------------------------------------------
-# Single-step val_loss runs every epoch when data.val_zarr_path is set. The
-# multi-step rollout validator below is opt-in and adds RMSE + ACC at the
-# requested lead times.
-validation:
-  every_n_epochs: 1               # cadence for rollout validation
-  rollout:
-    enabled: False                # turn on to score multi-step rollouts
-    log_steps: [1, 12, 20, 40, 60]
-    max_initial_conditions: 4     # ICs per epoch across all ranks
-    ic_stride: 30                 # spacing between ICs (in dataset timesteps)
-    batch_size: 1                 # ICs per rollout pass (× ensemble_size on GPU)
-    ensemble_size: 1              # >1 needs a perturber other than 'deterministic'
-    perturber: deterministic      # one of: deterministic, replicate, gaussian_ic
-    perturber_scales: {}          # for gaussian_ic: {surface_in: 0.01, upper_air_in: 0.01}
-
-# --- Wandb (optional) -------------------------------------------------------
+# --- Wandb (optional) ------------------------------------------------------
 # When enabled=True (rank 0 only) initialize_wandb runs and LaunchLogger
 # routes all log_minibatch / log_epoch dicts through it under 'train/' and
 # 'valid/' namespaces.
@@ -91,3 +51,9 @@ wandb:
   entity: null
   name: ${run_name}
   mode: offline                   # offline | online | disabled
+
+# --- Bench-time per-batch TSV emission (optional) --------------------------
+# When non-null and rank 0, every training-step's loss components are
+# appended to a TSV at this path. Used by benchmarks/.../sfno_plasim/.
+bench:
+  per_batch_tsv: null

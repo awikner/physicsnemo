@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ensemble validation — 4-member IC-perturbation ensemble at short rollout
+# horizons. Effective per-rank batch is `batch_size × ensemble_size = 4`.
+
+every_n_epochs: 5
+rollout:
+  enabled: True
+  log_steps: [1, 5, 10]
+  max_initial_conditions: 4
+  ic_stride: 30
+  batch_size: 1
+  ensemble_size: 4
+  perturber: gaussian_ic
+  perturber_scales:
+    surface_in: 0.01
+    upper_air_in: 0.01

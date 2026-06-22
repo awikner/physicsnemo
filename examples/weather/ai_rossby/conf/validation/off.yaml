@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Validation disabled (only single-step val_loss runs when a val_zarr_path
+# is set in the dataset config).
+
+every_n_epochs: 1
+rollout:
+  enabled: False
+  log_steps: [1]
+  max_initial_conditions: 4
+  ic_stride: 30
+  batch_size: 1
+  ensemble_size: 1
+  perturber: deterministic
+  perturber_scales: {}

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PanguPlasimLegacy single-stage training config.
+# Mirrors PanguWeather v2.0 PANGU_PLASIM_H5_DERECHO_0514.yaml:
+#   AdamW(lr=1e-4, wd=3e-6), OneCycleLR(pct_start=0.1, div=1e5, fdiv=2.5e-4),
+#   no AMP, no grad clip, EMA on with 6-epoch warmup.
+
+amp: none                       # none/off | bf16 | fp16
+grad_clip_norm: 0.0             # 0 disables gradient clipping
+max_epochs: 100                 # sum of stage num_epochs; redundant guard
+
+optimizer:
+  type: AdamW
+  lr: 1.0e-4
+  weight_decay: 3.0e-6
+  fused: null                   # null → torch.cuda.is_available()
+
+ema:
+  enabled: True
+  decay: 0.999
+  warmup_epochs: 6
+
+# Training is organized as a list of stages. Each stage:
+#   * runs `num_epochs` epochs from the dataset
+#   * unrolls the model `unroll_steps` times per step
+#     (use unroll_steps=1 for the standard single-step training; >1
+#      requires the dataset's sequence-mode emission, set via dataset config)
+#   * builds its own scheduler from `scheduler.{type, ...}` against
+#     `len(datapipe) * num_epochs` total iterations
+#   * stops early when `max_iterations` is hit (.inf means no cap)
+#   * may override `batch_size` (null inherits cfg.dataset.batch_size)
+stages:
+  - name: default
+    num_epochs: ${training.max_epochs}
+    unroll_steps: 1
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: OneCycleLR
+      oc_pct_start: 0.1
+      oc_div_factor: 1.0e5
+      oc_final_div_factor: 0.00025

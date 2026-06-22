@@ -62,6 +62,8 @@ from physicsnemo.distributed import DistributedManager
 from physicsnemo.utils import load_checkpoint, save_checkpoint
 from physicsnemo.utils.logging import LaunchLogger, PythonLogger
 
+from typing import Optional
+
 from ema import ModelEMA
 from loss import PanguPlasimLoss
 from train_loop import (
@@ -102,6 +104,49 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> None:
         mode=str(wb.get("mode", "offline")),
         config=OmegaConf.to_container(cfg, resolve=True),
     )
+
+
+def _flatten_optimizer_cfg(opt_cfg: DictConfig) -> DictConfig:
+    """Map ``cfg.training.optimizer.{type, lr, weight_decay, fused}`` → the
+    flat keys ``make_optimizer`` expects (``optimizer_type``, ``lr``,
+    ``weight_decay``, ``fused``). Keeps :func:`make_optimizer`'s API stable
+    so the unit tests covering it stay untouched.
+    """
+    return OmegaConf.create(
+        {
+            "optimizer_type": str(opt_cfg.type),
+            "lr": float(opt_cfg.lr),
+            "weight_decay": float(opt_cfg.get("weight_decay", 0.0)),
+            "fused": opt_cfg.get("fused", None),
+        }
+    )
+
+
+def _flatten_scheduler_cfg(
+    sched_cfg: DictConfig,
+    *,
+    lr: float,
+    steps_per_epoch: int,
+    num_epochs: int,
+) -> DictConfig:
+    """Map ``stage.scheduler.{type, ...}`` → the flat keys
+    ``make_scheduler`` expects.
+
+    Computes the LinearWarmupCosineAnnealingLR warmup-step count from
+    ``num_warmup_epochs`` (epoch-count is the natural unit at config time).
+    Provides a CosineAnnealingLR ``T_max`` default of ``steps_per_epoch *
+    num_epochs`` when the user didn't override.
+    """
+    flat = OmegaConf.to_container(sched_cfg, resolve=True) or {}
+    flat["scheduler"] = flat.pop("type", "OneCycleLR")
+    flat["lr"] = lr
+    if flat["scheduler"] == "LinearWarmupCosineAnnealingLR":
+        flat["num_warmup_steps"] = int(
+            flat.get("num_warmup_epochs", 0) * steps_per_epoch
+        )
+    if flat["scheduler"] == "CosineAnnealingLR" and "T_max" not in flat:
+        flat["T_max"] = max(1, steps_per_epoch * num_epochs)
+    return OmegaConf.create(flat)
 
 
 def _build_perturber(cfg_val: DictConfig) -> Perturber:
@@ -225,9 +270,10 @@ def build_datapipe(
     device: torch.device,
     shuffle: bool,
     seed: int,
+    batch_size_override: Optional[int] = None,
 ) -> PlasimClimateDatapipe:
     """Construct a PlasimClimateDatapipe wired with normalizer + NaN fill."""
-    data = cfg.data
+    data = cfg.dataset
     model = cfg.model
 
     raw_dataset = PlasimClimateDataset(
@@ -267,12 +313,13 @@ def build_datapipe(
         default=float(data.nan_fill_default),
     )
 
+    effective_batch = int(batch_size_override) if batch_size_override else int(data.batch_size)
     pipe = PlasimClimateDatapipe(
         zarr_path,
         forecast_lead_times=list(data.forecast_lead_times),
         normalizer=normalizer,
         nan_fill=None,  # per-variable NaN fill runs CPU-side via dataset.transform below.
-        batch_size=int(data.batch_size),
+        batch_size=effective_batch,
         num_samples_per_epoch=data.num_samples_per_epoch,
         shuffle=shuffle,
         num_workers=int(data.num_workers),
@@ -357,19 +404,19 @@ def main(cfg: DictConfig) -> None:
     # --- Data -------------------------------------------------------------
     datapipe = build_datapipe(
         cfg,
-        zarr_path=_resolve_path(cfg.data.zarr_path),
+        zarr_path=_resolve_path(cfg.dataset.zarr_path),
         distributed=(dist.world_size > 1),
         device=dist.device,
-        shuffle=bool(cfg.data.shuffle),
+        shuffle=bool(cfg.dataset.shuffle),
         seed=int(cfg.seed),
     )
 
-    has_val = cfg.data.val_zarr_path is not None
+    has_val = cfg.dataset.val_zarr_path is not None
     val_datapipe = None
     if has_val:
         val_datapipe = build_datapipe(
             cfg,
-            zarr_path=_resolve_path(cfg.data.val_zarr_path),
+            zarr_path=_resolve_path(cfg.dataset.val_zarr_path),
             distributed=(dist.world_size > 1),
             device=dist.device,
             shuffle=False,
@@ -385,7 +432,7 @@ def main(cfg: DictConfig) -> None:
     if cfg_rollout is not None and bool(cfg_rollout.get("enabled", False)):
         if not has_val:
             logger.warning(
-                "validation.rollout.enabled=True but data.val_zarr_path is None; "
+                "validation.rollout.enabled=True but dataset.val_zarr_path is None; "
                 "skipping rollout validation."
             )
         else:
@@ -405,11 +452,14 @@ def main(cfg: DictConfig) -> None:
                 seed=int(cfg.seed) + 17,
             )
 
+    cfg_train = cfg.training
+    stages = list(cfg_train.stages)
+    total_epochs = sum(int(s.num_epochs) for s in stages)
     steps_per_epoch = len(datapipe)
-    total_steps = max(1, steps_per_epoch * int(cfg.max_epochs))
     logger.info(
-        f"steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, "
-        f"world_size={dist.world_size}, device={dist.device}"
+        f"steps_per_epoch={steps_per_epoch}, stages={len(stages)}, "
+        f"total_epochs={total_epochs}, world_size={dist.world_size}, "
+        f"device={dist.device}"
     )
 
     # --- Model + DDP ------------------------------------------------------
@@ -427,20 +477,10 @@ def main(cfg: DictConfig) -> None:
 
     # --- Loss + optim ------------------------------------------------------
     loss_fn = build_loss(cfg).to(dist.device)
-
-    # Cosine-warmup wants ``num_warmup_steps`` filled from epoch-count.
-    sched_cfg = OmegaConf.to_container(cfg.scheduler, resolve=True)
-    if sched_cfg.get("scheduler") == "LinearWarmupCosineAnnealingLR":
-        sched_cfg["num_warmup_steps"] = int(
-            sched_cfg.get("num_warmup_epochs", 0) * steps_per_epoch
-        )
-    sched_cfg = OmegaConf.create(sched_cfg)
-
-    optimizer = make_optimizer(inner_model, sched_cfg)
-    scheduler = make_scheduler(optimizer, sched_cfg, total_steps=total_steps)
+    optimizer = make_optimizer(inner_model, _flatten_optimizer_cfg(cfg_train.optimizer))
 
     # --- Mixed precision --------------------------------------------------
-    amp_dtype = _resolve_amp_dtype(cfg.get("amp", None))
+    amp_dtype = _resolve_amp_dtype(cfg_train.get("amp", None))
     # fp16 needs a GradScaler; bf16 retains enough dynamic range to skip it.
     grad_scaler = None
     if amp_dtype == torch.float16 and dist.device.type == "cuda":
@@ -449,27 +489,30 @@ def main(cfg: DictConfig) -> None:
     elif amp_dtype == torch.bfloat16:
         logger.info("AMP enabled with bf16 (no GradScaler)")
     elif amp_dtype is None:
-        logger.info(f"AMP disabled (cfg.amp={cfg.get('amp', None)})")
+        logger.info(f"AMP disabled (cfg.training.amp={cfg_train.get('amp', None)})")
 
     # --- EMA --------------------------------------------------------------
     ema = None
-    if bool(cfg.ema.enabled):
+    if bool(cfg_train.ema.enabled):
         ema = ModelEMA(
             inner_model,
-            decay=float(cfg.ema.decay),
-            warmup_epochs=int(cfg.ema.warmup_epochs),
+            decay=float(cfg_train.ema.decay),
+            warmup_epochs=int(cfg_train.ema.warmup_epochs),
         )
 
     # --- Checkpoint resume ------------------------------------------------
+    # We resume the model + optimizer state only — the scheduler is
+    # reconstructed per-stage to keep the multi-stage semantics clean. To
+    # resume the scheduler exactly, the per-stage iteration count is replayed
+    # in-loop below.
     ckpt_dir = Path("./checkpoints")
     loaded_epoch = load_checkpoint(
         str(ckpt_dir),
         models=inner_model,
         optimizer=optimizer,
-        scheduler=scheduler,
         device=dist.device,
     )
-    start_epoch = max(int(cfg.start_epoch), loaded_epoch + 1)
+    start_global_epoch = max(int(cfg.start_epoch), loaded_epoch + 1)
 
     # --- Per-batch loss TSV (benchmarking) --------------------------------
     # When cfg.bench.per_batch_tsv is set, every minibatch's wall-clock time
@@ -490,132 +533,204 @@ def main(cfg: DictConfig) -> None:
     import time as _time
     _bench_start_wall = _time.perf_counter() if bench_tsv_file is not None else None
 
-    # --- Training loop ----------------------------------------------------
+    # --- Training loop: iterate stages -----------------------------------
+    # Each stage has its own scheduler (built fresh at stage start), its own
+    # num_epochs, optionally its own batch_size and unroll_steps. The global
+    # epoch index advances continuously across stages so checkpoint resume
+    # and EMA warmup keep working unchanged.
     has_diagnostic = inner_model.has_diagnostic
     if rollout_validator is not None:
         rollout_validator.has_diagnostic = has_diagnostic
-    for epoch in range(start_epoch, int(cfg.max_epochs) + 1):
-        datapipe.set_epoch(epoch)
-        model.train()
-        with LaunchLogger(
-            "train",
-            epoch=epoch,
-            num_mini_batch=steps_per_epoch,
-            epoch_alert_freq=1,
-        ) as log:
-            for batch_idx, batch in enumerate(datapipe):
-                losses = train_step(
-                    model=model,
-                    loss_fn=loss_fn,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    batch=batch,
-                    has_diagnostic=has_diagnostic,
-                    vae_kl_weight=float(cfg.loss.get("vae_kl_weight", 0.0)),
-                    amp_dtype=amp_dtype,
-                    grad_scaler=grad_scaler,
-                )
-                if float(cfg.grad_clip_norm) > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        inner_model.parameters(), float(cfg.grad_clip_norm)
+    grad_clip_norm = float(cfg_train.get("grad_clip_norm", 0.0))
+    vae_kl_weight = float(cfg.loss.get("vae_kl_weight", 0.0))
+
+    global_epoch = 1
+    for stage_idx, stage in enumerate(stages):
+        stage_num_epochs = int(stage.num_epochs)
+        stage_end = global_epoch + stage_num_epochs
+        if start_global_epoch >= stage_end:
+            global_epoch = stage_end
+            continue
+        unroll_steps = int(stage.get("unroll_steps", 1))
+        if unroll_steps != 1:
+            raise NotImplementedError(
+                f"stage {stage_idx} ({stage.get('name', '?')!r}) has "
+                f"unroll_steps={unroll_steps}; multi-step rollout training "
+                "lands in the next commit. For now set unroll_steps: 1."
+            )
+        max_iterations = stage.get("max_iterations", float("inf"))
+        max_iterations = (
+            int(max_iterations) if max_iterations != float("inf") else None
+        )
+        stage_batch_override = stage.get("batch_size", None)
+
+        # Rebuild the datapipe if the stage overrides batch_size.
+        stage_datapipe = datapipe
+        if stage_batch_override and int(stage_batch_override) != int(cfg.dataset.batch_size):
+            stage_datapipe = build_datapipe(
+                cfg,
+                zarr_path=_resolve_path(cfg.dataset.zarr_path),
+                distributed=(dist.world_size > 1),
+                device=dist.device,
+                shuffle=bool(cfg.dataset.shuffle),
+                seed=int(cfg.seed) + stage_idx,
+                batch_size_override=int(stage_batch_override),
+            )
+
+        steps_per_epoch_stage = len(stage_datapipe)
+        scheduler = make_scheduler(
+            optimizer,
+            _flatten_scheduler_cfg(
+                stage.scheduler,
+                lr=float(cfg_train.optimizer.lr),
+                steps_per_epoch=steps_per_epoch_stage,
+                num_epochs=stage_num_epochs,
+            ),
+            total_steps=steps_per_epoch_stage * stage_num_epochs,
+        )
+
+        # If resuming partway through this stage, advance the scheduler.
+        epochs_already_run_in_stage = max(0, start_global_epoch - global_epoch)
+        for _ in range(epochs_already_run_in_stage * steps_per_epoch_stage):
+            scheduler.step()
+        global_epoch = max(global_epoch, start_global_epoch)
+        epochs_remaining = stage_end - global_epoch
+
+        if dist.rank == 0:
+            logger.info(
+                f"stage {stage_idx} '{stage.get('name', '?')}' starting at "
+                f"global_epoch={global_epoch}, num_epochs_remaining={epochs_remaining}, "
+                f"unroll_steps={unroll_steps}, batch_size={int(stage_batch_override) if stage_batch_override else int(cfg.dataset.batch_size)}"
+            )
+
+        stage_iter = 0
+        for _ in range(epochs_remaining):
+            stage_datapipe.set_epoch(global_epoch)
+            model.train()
+            with LaunchLogger(
+                "train",
+                epoch=global_epoch,
+                num_mini_batch=steps_per_epoch_stage,
+                epoch_alert_freq=1,
+            ) as log:
+                for batch_idx, batch in enumerate(stage_datapipe):
+                    if max_iterations is not None and stage_iter >= max_iterations:
+                        break
+                    losses = train_step(
+                        model=model,
+                        loss_fn=loss_fn,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        batch=batch,
+                        has_diagnostic=has_diagnostic,
+                        vae_kl_weight=vae_kl_weight,
+                        amp_dtype=amp_dtype,
+                        grad_scaler=grad_scaler,
                     )
-                if ema is not None:
-                    ema.update(inner_model, epoch=epoch)
-                log.log_minibatch(
+                    if grad_clip_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            inner_model.parameters(), grad_clip_norm
+                        )
+                    if ema is not None:
+                        ema.update(inner_model, epoch=global_epoch)
+                    log.log_minibatch(
+                        {
+                            "loss": losses["loss"].detach(),
+                            "surface": losses["surface"],
+                            "upper_air": losses["upper_air"],
+                            "diagnostic": losses["diagnostic"],
+                            "vae_kl": losses["vae_kl"],
+                        }
+                    )
+                    if bench_tsv_file is not None:
+                        bench_tsv_file.write(
+                            f"{global_epoch}\t{batch_idx}\t"
+                            f"{_time.perf_counter() - _bench_start_wall:.4f}\t"
+                            f"{float(losses['loss'].detach()):.6f}\t"
+                            f"{float(losses['surface']):.6f}\t"
+                            f"{float(losses['upper_air']):.6f}\t"
+                            f"{float(losses['diagnostic']):.6f}\t"
+                            f"{float(losses['vae_kl']):.6f}\t"
+                            f"{optimizer.param_groups[0]['lr']:.6e}\n"
+                        )
+                    stage_iter += 1
+                log.log_epoch(
                     {
-                        "loss": losses["loss"].detach(),
-                        "surface": losses["surface"],
-                        "upper_air": losses["upper_air"],
-                        "diagnostic": losses["diagnostic"],
-                        "vae_kl": losses["vae_kl"],
+                        "lr": optimizer.param_groups[0]["lr"],
+                        "stage_idx": stage_idx,
                     }
                 )
-                if bench_tsv_file is not None:
-                    bench_tsv_file.write(
-                        f"{epoch}\t{batch_idx}\t"
-                        f"{_time.perf_counter() - _bench_start_wall:.4f}\t"
-                        f"{float(losses['loss'].detach()):.6f}\t"
-                        f"{float(losses['surface']):.6f}\t"
-                        f"{float(losses['upper_air']):.6f}\t"
-                        f"{float(losses['diagnostic']):.6f}\t"
-                        f"{float(losses['vae_kl']):.6f}\t"
-                        f"{optimizer.param_groups[0]['lr']:.6e}\n"
-                    )
-            log.log_epoch({"lr": optimizer.param_groups[0]["lr"]})
 
-        # --- Validation (optional) ---------------------------------------
-        # Two-pass: (1) single-step val_loss on the held-out datapipe — fast
-        # MSE sanity number on every epoch; (2) multi-step rollout RMSE + ACC
-        # via the RolloutValidator, gated on validation.rollout.enabled and
-        # cadence cfg.validation.every_n_epochs.
-        if val_datapipe is not None:
-            val_datapipe.set_epoch(epoch)
-            if ema is not None:
-                ema.apply_to(inner_model)
-            model.eval()
+            # --- Validation (optional) ----------------------------------
+            if val_datapipe is not None:
+                val_datapipe.set_epoch(global_epoch)
+                if ema is not None:
+                    ema.apply_to(inner_model)
+                model.eval()
+                with LaunchLogger("valid", epoch=global_epoch) as log:
+                    with torch.no_grad():
+                        total = 0
+                        accum = torch.zeros((), device=dist.device)
+                        for batch in val_datapipe:
+                            out = inner_model(
+                                batch["surface_in"],
+                                batch["constant_boundary"],
+                                batch["varying_boundary"],
+                                batch["upper_air_in"],
+                            )
+                            if has_diagnostic:
+                                o_s, o_u, o_d = out[0], out[1], out[2]
+                            else:
+                                o_s, o_u = out[0], out[1]
+                                o_d = None
+                            l = loss_fn(
+                                o_s,
+                                o_u,
+                                batch["target_surface"],
+                                batch["target_upper_air"],
+                                out_diagnostic=o_d,
+                                target_diagnostic=batch.get("diagnostic")
+                                if has_diagnostic
+                                else None,
+                            )["loss"]
+                            accum += l.detach() * batch["surface_in"].shape[0]
+                            total += batch["surface_in"].shape[0]
+                        val_loss = (accum / max(total, 1)).item()
 
-            with LaunchLogger("valid", epoch=epoch) as log:
-                with torch.no_grad():
-                    total = 0
-                    accum = torch.zeros((), device=dist.device)
-                    for batch in val_datapipe:
-                        out = inner_model(
-                            batch["surface_in"],
-                            batch["constant_boundary"],
-                            batch["varying_boundary"],
-                            batch["upper_air_in"],
+                    rollout_metrics: dict[str, float] = {}
+                    if rollout_validator is not None:
+                        every = int(
+                            (cfg.get("validation") or {}).get("every_n_epochs", 1)
                         )
-                        if has_diagnostic:
-                            o_s, o_u, o_d = out[0], out[1], out[2]
-                        else:
-                            o_s, o_u = out[0], out[1]
-                            o_d = None
-                        l = loss_fn(
-                            o_s,
-                            o_u,
-                            batch["target_surface"],
-                            batch["target_upper_air"],
-                            out_diagnostic=o_d,
-                            target_diagnostic=batch.get("diagnostic")
-                            if has_diagnostic
-                            else None,
-                        )["loss"]
-                        accum += l.detach() * batch["surface_in"].shape[0]
-                        total += batch["surface_in"].shape[0]
-                    val_loss = (accum / max(total, 1)).item()
+                        if every > 0 and global_epoch % every == 0:
+                            rollout_metrics = rollout_validator.run(
+                                inner_model, epoch=global_epoch
+                            )
 
-                # Multi-step rollout (cadenced).
-                rollout_metrics: dict[str, float] = {}
-                if rollout_validator is not None:
-                    every = int(
-                        (cfg.get("validation") or {}).get("every_n_epochs", 1)
-                    )
-                    if every > 0 and epoch % every == 0:
-                        rollout_metrics = rollout_validator.run(
-                            inner_model, epoch=epoch
-                        )
+                    log.log_epoch({"val_loss": val_loss, **rollout_metrics})
+                if ema is not None:
+                    ema.restore(inner_model)
+                model.train()
 
-                log.log_epoch({"val_loss": val_loss, **rollout_metrics})
-            if ema is not None:
-                ema.restore(inner_model)
-            model.train()
+            if dist.world_size > 1:
+                torch.distributed.barrier()
 
-        if dist.world_size > 1:
-            torch.distributed.barrier()
+            # --- Save checkpoint ----------------------------------------
+            if (
+                global_epoch % int(cfg.checkpoint_save_interval) == 0
+                and dist.rank == 0
+            ):
+                save_checkpoint(
+                    str(ckpt_dir),
+                    models=inner_model,
+                    optimizer=optimizer,
+                    epoch=global_epoch,
+                    metadata={"ema": ema.state_dict() if ema is not None else None},
+                )
 
-        # --- Save checkpoint ---------------------------------------------
-        if (
-            epoch % int(cfg.checkpoint_save_interval) == 0
-            and dist.rank == 0
-        ):
-            save_checkpoint(
-                str(ckpt_dir),
-                models=inner_model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                metadata={"ema": ema.state_dict() if ema is not None else None},
-            )
+            global_epoch += 1
+            if max_iterations is not None and stage_iter >= max_iterations:
+                break
 
     if dist.world_size > 1:
         torch.distributed.barrier()

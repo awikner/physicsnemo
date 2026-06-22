@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim multi-stage curriculum: ramp unroll_steps over training to
+# trade off per-step training-loss against rollout stability. This is the
+# standard recipe for autoregressive weather models (FCN, GraphCast, Pangu).
+#
+# Stages:
+#   short  — 1-step training with linear-warmup + cosine to ramp the LR
+#   medium — 4-step rollout at a lower LR; stabilizes longer horizons
+#   long   — 8-step rollout at fine-tuning LR; final polish
+#
+# Each stage's scheduler runs over `len(datapipe) * num_epochs` total iters
+# from a fresh start (LR resets at each stage boundary).
+
+amp: none
+grad_clip_norm: 0.5             # multi-step rollouts need gradient clipping
+max_epochs: 80
+
+optimizer:
+  type: AdamW
+  lr: 5.0e-4                    # initial LR for stage 1; later stages override
+  weight_decay: 3.0e-6
+  fused: null
+
+ema:
+  enabled: True
+  decay: 0.999
+  warmup_epochs: 6
+
+stages:
+  - name: short_1step
+    num_epochs: 40
+    unroll_steps: 1
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: LinearWarmupCosineAnnealingLR
+      num_warmup_epochs: 5
+      warmup_start_lr: 1.0e-8
+      eta_min: 1.0e-5
+
+  - name: medium_4step
+    num_epochs: 25
+    unroll_steps: 4
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: CosineAnnealingLR
+      eta_min: 1.0e-6
+
+  - name: long_8step
+    num_epochs: 15
+    unroll_steps: 8
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: CosineAnnealingLR
+      eta_min: 1.0e-7

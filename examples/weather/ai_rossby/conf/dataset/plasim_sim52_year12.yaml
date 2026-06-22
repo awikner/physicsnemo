@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PLASIM sim52 single-year (year 12) dataset config.
+# Pairs with conf/model/sfno_plasim_5412.yaml or conf/model/pangu_plasim.yaml
+# (matching sigma+pressure level layout). Used by the SFNO_PLASIM benchmark.
+
+zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/12.zarr
+val_zarr_path: null
+mean_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_mean_sigma.nc
+std_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_std_sigma.nc
+delta_std_path: null
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+forecast_lead_times: [1]
+num_samples_per_epoch: null     # null → len(dataset)
+batch_size: 8                   # PanguWeather SFNO_PLASIM_5412 default
+num_workers: 8
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+nan_fill_default: 0.0
+nan_fill_values: {}
+shuffle: True
+
+# Normalize the constant-boundary fields (lsm/sg/z0) and diagnostics (pr_6h)
+# against the climatological stats — required for PLASIM data where `sg`
+# (surface geopotential) has raw values up to ~58000 m²/s² and would blow up
+# the SFNO encoder output otherwise.
+normalize_constant_boundary: True
+normalize_diagnostic: True

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim single-stage training config — matches PanguWeather v2.0
+# SFNO_PLASIM_H5_DERECHO_5412.yaml scheduler block.
+
+amp: none
+grad_clip_norm: 0.0
+max_epochs: 50
+
+optimizer:
+  type: AdamW
+  lr: 1.0e-4
+  weight_decay: 3.0e-6
+  fused: null
+
+ema:
+  enabled: False
+  decay: 0.999
+  warmup_epochs: 6
+
+stages:
+  - name: default
+    num_epochs: ${training.max_epochs}
+    unroll_steps: 1
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: LinearWarmupCosineAnnealingLR
+      num_warmup_epochs: 5
+      warmup_start_lr: 1.0e-8
+      eta_min: 1.0e-8

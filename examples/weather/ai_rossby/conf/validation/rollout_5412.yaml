@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Validation lead times from PanguWeather v2.0 SFNO_PLASIM_H5_DERECHO_5412
+# (`forecast_lead_times: [1, 12, 20, 40, 60]`). 60 dataset steps at 6h is
+# 15-day rollout. Run every 5 epochs (heavier than rollout_short).
+
+every_n_epochs: 5
+rollout:
+  enabled: True
+  log_steps: [1, 12, 20, 40, 60]
+  max_initial_conditions: 8
+  ic_stride: 60
+  batch_size: 1
+  ensemble_size: 1
+  perturber: deterministic
+  perturber_scales: {}

@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PLASIM sim52 split: year 12 for training, year 13 for held-out validation.
+# Use with training configs that enable validation/rollout to score rollouts
+# on the held-out year.
+
+zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/12.zarr
+val_zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/13.zarr
+mean_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_mean_sigma.nc
+std_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_std_sigma.nc
+delta_std_path: null
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+forecast_lead_times: [1]
+num_samples_per_epoch: null
+batch_size: 8
+num_workers: 8
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+nan_fill_default: 0.0
+nan_fill_values: {}
+shuffle: True
+
+normalize_constant_boundary: True
+normalize_diagnostic: True
