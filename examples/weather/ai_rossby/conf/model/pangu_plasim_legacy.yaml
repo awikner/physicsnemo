@@ -5,8 +5,8 @@
 # PanguPlasimLegacy model config — deterministic (no VAE) variant.
 # Matches PanguWeather v2.0 PANGU_PLASIM_H5_DERECHO_0514.yaml backbone defaults.
 
-name: pangu_plasim_legacy
-target: physicsnemo.experimental.models.pangu_plasim.PanguPlasimLegacy
+name: PanguPlasimLegacy
+module: physicsnemo.experimental.models.pangu_plasim
 
 # Variable groups — PanguWeather sim52 channel order.
 surface_variables: [pl, tas]

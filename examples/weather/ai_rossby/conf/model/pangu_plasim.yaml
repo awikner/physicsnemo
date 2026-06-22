@@ -7,9 +7,8 @@
 # the difference is `model_type` and pairing with `loss=mae_with_kl` (or
 # `mse_with_kl`) + `scheduler=cosine_warmup`.
 
-name: pangu_plasim
-target: physicsnemo.experimental.models.pangu_plasim.PanguPlasim
-model_type: PanguPlasim
+name: PanguPlasim
+module: physicsnemo.experimental.models.pangu_plasim
 
 # Variable groups — PanguWeather sim52 channel order.
 surface_variables: [pl, tas]

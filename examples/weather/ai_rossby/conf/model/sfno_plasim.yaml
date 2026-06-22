@@ -6,9 +6,8 @@
 # routing wrapper. Mirrors PanguWeather v2.0 SFNO_PLASIM_H5_DERECHO_5412.yaml.
 # Pair with `loss=raw_l2` + `scheduler=cosine_warmup`.
 
-name: sfno_plasim
-target: physicsnemo.experimental.models.sfno_plasim.SfnoPlasim
-model_type: SfnoPlasim
+name: SfnoPlasim
+module: physicsnemo.experimental.models.sfno_plasim
 
 # Variable groups — match the Pangu_Plasim configs so the same datapipe + sample
 # dict layout works for both model families.

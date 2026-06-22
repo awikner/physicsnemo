@@ -10,9 +10,8 @@
 # (num_blocks=8, pos_embed=False) in that it tracks the upstream Pangu
 # config exactly.
 
-name: sfno_plasim_5412
-target: physicsnemo.experimental.models.sfno_plasim.SfnoPlasim
-model_type: SfnoPlasim
+name: SfnoPlasim
+module: physicsnemo.experimental.models.sfno_plasim
 
 # Variable groups (sim52 channel order; sigma+pressure concat for SfnoPlasim).
 surface_variables: [pl, tas]

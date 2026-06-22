@@ -10,9 +10,8 @@
 # land + ocean vars are concat'd into surface_variables (SfnoPlasim doesn't
 # distinguish — both are flat surface channels).
 
-name: sfno_plasim_s2s
-target: physicsnemo.experimental.models.sfno_plasim.SfnoPlasim
-model_type: SfnoPlasim
+name: SfnoPlasim
+module: physicsnemo.experimental.models.sfno_plasim
 
 # Variable groups — match SFNO_S2S_0003_test exactly. Surface = 5 prognostic
 # + 3 land + 1 ocean (SfnoPlasim treats them all as flat surface channels).
