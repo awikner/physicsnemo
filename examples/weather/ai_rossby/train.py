@@ -70,10 +70,58 @@ from train_loop import (
     make_scheduler,
     train_step,
 )
+from validate import (
+    Deterministic,
+    GaussianIC,
+    Perturber,
+    ReplicateOnly,
+    RolloutValidator,
+)
 
 
 def _resolve_path(p: str | None) -> str | None:
     return to_absolute_path(p) if p else None
+
+
+def _maybe_init_wandb(cfg: DictConfig, *, dist) -> None:
+    """Initialize wandb if ``cfg.wandb.enabled`` and rank == 0.
+
+    No-op otherwise. LaunchLogger detects wandb at construction time and
+    routes ``log_minibatch`` / ``log_epoch`` dicts through it under the
+    section name (``train`` / ``valid``).
+    """
+    wb = cfg.get("wandb", None)
+    if wb is None or not bool(wb.get("enabled", False)) or dist.rank != 0:
+        return
+    from physicsnemo.utils.logging.wandb import initialize_wandb
+
+    initialize_wandb(
+        project=str(wb.get("project", "ai-rossby")),
+        entity=str(wb.get("entity", "")) or None,
+        name=str(wb.get("name", cfg.get("run_name", "train"))),
+        mode=str(wb.get("mode", "offline")),
+        config=OmegaConf.to_container(cfg, resolve=True),
+    )
+
+
+def _build_perturber(cfg_val: DictConfig) -> Perturber:
+    """Translate ``cfg.validation.rollout.perturber`` into a Perturber."""
+    kind = str(cfg_val.get("perturber", "deterministic")).lower()
+    if kind in ("deterministic", "off", "none"):
+        return Deterministic()
+    if kind in ("replicate", "replicate_only", "stochastic_model"):
+        return ReplicateOnly()
+    if kind in ("gaussian_ic", "ic_gaussian", "gaussian"):
+        scales = OmegaConf.to_container(
+            cfg_val.get("perturber_scales", {}), resolve=True
+        )
+        if not scales:
+            raise ValueError(
+                "validation.rollout.perturber=gaussian_ic requires "
+                "validation.rollout.perturber_scales={var: std, ...}"
+            )
+        return GaussianIC(scales=scales)
+    raise ValueError(f"unknown validation.rollout.perturber={kind!r}")
 
 
 def build_model(cfg_model: DictConfig):
@@ -300,6 +348,12 @@ def main(cfg: DictConfig) -> None:
 
     LaunchLogger.initialize()
 
+    # --- Wandb (optional) -------------------------------------------------
+    # When cfg.wandb is present and enabled, hook wandb up to LaunchLogger
+    # so all log_minibatch / log_epoch dicts (training AND validation) flow
+    # to the run automatically. Rank-0 only.
+    _maybe_init_wandb(cfg, dist=dist)
+
     # --- Data -------------------------------------------------------------
     datapipe = build_datapipe(
         cfg,
@@ -321,6 +375,35 @@ def main(cfg: DictConfig) -> None:
             shuffle=False,
             seed=int(cfg.seed) + 1,
         )
+
+    # --- Rollout validator (optional) -------------------------------------
+    # Multi-step autoregressive RMSE + ACC against the held-out year. Streams
+    # metrics on the fly (no per-step history retained) and is ensemble-aware
+    # via the Perturber API.
+    rollout_validator = None
+    cfg_rollout = cfg.get("validation", {}).get("rollout", None) if cfg.get("validation") else None
+    if cfg_rollout is not None and bool(cfg_rollout.get("enabled", False)):
+        if not has_val:
+            logger.warning(
+                "validation.rollout.enabled=True but data.val_zarr_path is None; "
+                "skipping rollout validation."
+            )
+        else:
+            rollout_validator = RolloutValidator(
+                dataset=val_datapipe.dataset,
+                log_steps=list(cfg_rollout.get("log_steps", [1])),
+                device=dist.device,
+                ensemble_size=int(cfg_rollout.get("ensemble_size", 1)),
+                perturber=_build_perturber(cfg_rollout),
+                has_diagnostic=False,  # populated after model is built
+                batch_size=int(cfg_rollout.get("batch_size", 1)),
+                max_initial_conditions=int(
+                    cfg_rollout.get("max_initial_conditions", 4)
+                ),
+                ic_stride=int(cfg_rollout.get("ic_stride", 1)),
+                normalizer=val_datapipe.normalizer,
+                seed=int(cfg.seed) + 17,
+            )
 
     steps_per_epoch = len(datapipe)
     total_steps = max(1, steps_per_epoch * int(cfg.max_epochs))
@@ -409,6 +492,8 @@ def main(cfg: DictConfig) -> None:
 
     # --- Training loop ----------------------------------------------------
     has_diagnostic = inner_model.has_diagnostic
+    if rollout_validator is not None:
+        rollout_validator.has_diagnostic = has_diagnostic
     for epoch in range(start_epoch, int(cfg.max_epochs) + 1):
         datapipe.set_epoch(epoch)
         model.train()
@@ -459,11 +544,16 @@ def main(cfg: DictConfig) -> None:
             log.log_epoch({"lr": optimizer.param_groups[0]["lr"]})
 
         # --- Validation (optional) ---------------------------------------
+        # Two-pass: (1) single-step val_loss on the held-out datapipe — fast
+        # MSE sanity number on every epoch; (2) multi-step rollout RMSE + ACC
+        # via the RolloutValidator, gated on validation.rollout.enabled and
+        # cadence cfg.validation.every_n_epochs.
         if val_datapipe is not None:
             val_datapipe.set_epoch(epoch)
             if ema is not None:
                 ema.apply_to(inner_model)
             model.eval()
+
             with LaunchLogger("valid", epoch=epoch) as log:
                 with torch.no_grad():
                     total = 0
@@ -493,7 +583,19 @@ def main(cfg: DictConfig) -> None:
                         accum += l.detach() * batch["surface_in"].shape[0]
                         total += batch["surface_in"].shape[0]
                     val_loss = (accum / max(total, 1)).item()
-                log.log_epoch({"val_loss": val_loss})
+
+                # Multi-step rollout (cadenced).
+                rollout_metrics: dict[str, float] = {}
+                if rollout_validator is not None:
+                    every = int(
+                        (cfg.get("validation") or {}).get("every_n_epochs", 1)
+                    )
+                    if every > 0 and epoch % every == 0:
+                        rollout_metrics = rollout_validator.run(
+                            inner_model, epoch=epoch
+                        )
+
+                log.log_epoch({"val_loss": val_loss, **rollout_metrics})
             if ema is not None:
                 ema.restore(inner_model)
             model.train()

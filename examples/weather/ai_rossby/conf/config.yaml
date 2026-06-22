@@ -64,3 +64,30 @@ data:
   nan_fill_default: 0.0
   nan_fill_values: {}
   shuffle: True
+
+# --- Validation -------------------------------------------------------------
+# Single-step val_loss runs every epoch when data.val_zarr_path is set. The
+# multi-step rollout validator below is opt-in and adds RMSE + ACC at the
+# requested lead times.
+validation:
+  every_n_epochs: 1               # cadence for rollout validation
+  rollout:
+    enabled: False                # turn on to score multi-step rollouts
+    log_steps: [1, 12, 20, 40, 60]
+    max_initial_conditions: 4     # ICs per epoch across all ranks
+    ic_stride: 30                 # spacing between ICs (in dataset timesteps)
+    batch_size: 1                 # ICs per rollout pass (× ensemble_size on GPU)
+    ensemble_size: 1              # >1 needs a perturber other than 'deterministic'
+    perturber: deterministic      # one of: deterministic, replicate, gaussian_ic
+    perturber_scales: {}          # for gaussian_ic: {surface_in: 0.01, upper_air_in: 0.01}
+
+# --- Wandb (optional) -------------------------------------------------------
+# When enabled=True (rank 0 only) initialize_wandb runs and LaunchLogger
+# routes all log_minibatch / log_epoch dicts through it under 'train/' and
+# 'valid/' namespaces.
+wandb:
+  enabled: False
+  project: ai-rossby
+  entity: null
+  name: ${run_name}
+  mode: offline                   # offline | online | disabled
