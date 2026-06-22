@@ -387,10 +387,32 @@ reusing the shipped Pangu's Earth-Specific attention/patch ops where compatible;
 checkpoint-compatible with the faithful variants — that's the faithful variants' role.)
 **Tests**: same unit + smoke contract as Phase 1, both variants.
 
-### Phase 7 — SFNO (rest of v2.0) — *in scope*
+### Phase 7 — SFNO (rest of v2.0) — *faithful substantively complete; native deferred*
 Map the vendored SFNO to PhysicsNeMo's SFNO (makani plugin) or port the vendored copy as `sfno_plasim`
 (faithful + native). (Legacy Pangu moved into Phase 1; `pangu_lite` deferred unless needed.)
 **Tests**: same unit + smoke contract as Phase 1, applied to the SFNO variants.
+
+**Faithful side delivered** (commits `d0ff0619` → `094e72b2`):
+- Vendored Modulus SFNO at [`physicsnemo/experimental/models/modulus_sfno/`](physicsnemo/experimental/models/modulus_sfno/)
+  (sfnonet.py + layers.py + s2convolutions.py + factorizations.py + contractions.py + activations.py +
+  initialization.py — same upstream commit PanguWeather uses).
+- [`SfnoPlasim`](physicsnemo/experimental/models/sfno_plasim/sfno_plasim.py) wrapper — PLASIM channel
+  routing (surface + constants + varying + sigma+pressure upper-air + diagnostic concat) over the base
+  SFNO. Same 6/7-tuple forward contract as `PanguPlasim` so `train_step` is unchanged.
+- Trainer wired (`cfg.model.model_type='SfnoPlasim'`); model config `conf/model/sfno_plasim_5412.yaml`
+  mirrors PanguWeather v2.0 `SFNO_PLASIM_H5_DERECHO_5412_test.yaml`.
+- Checkpoint translator at
+  [`tools/checkpoint_translation/sfno_plasim.py`](tools/checkpoint_translation/sfno_plasim.py)
+  (strips `module.` prefix, prefers `ema_state`, prefixes with `sfno.`).
+- Unit + smoke tests at [`test/models/sfno_plasim/`](test/models/sfno_plasim/) and
+  [`test/recipes/ai_rossby/test_smoke_sfno_single_gpu.py`](test/recipes/ai_rossby/test_smoke_sfno_single_gpu.py).
+- **Benchmark**: end-to-end head-to-head against PanguWeather v2.0 on PLASIM sim52 year 12
+  (4× A100, fp32, batch=8/rank, 1 epoch) →
+  [`benchmarks/.../sfno_plasim/RESULTS.md`](benchmarks/physicsnemo/experimental/models/sfno_plasim/RESULTS.md):
+  median per-batch |Δ loss| 1.4%, max 12.6% (concentrated in last batches), steady-state throughput
+  identical (~194.7 samples/s on both stacks after the CUDA tuning).
+
+**Native variant** (PhysicsNeMo's built-in SFNO/Makani backbone) — deferred until a use case demands it.
 
 ### Phase 8+ — amip stochastic-interpolant model (second major effort)
 - `interpolant.py` NoiseScheduler + Solver reproducing `DynamicInterpolant`/`DriftScheduler`/`DataDependentInterpolant`
@@ -469,3 +491,15 @@ Remaining:
   Drafted when the translator lands.
 - **Per-cluster docs as we extend beyond Delta** — Derecho/Casper (PBS), Midway (SLURM) need their own
   `hpc/<cluster>.md` mirroring `hpc/delta.md`.
+- **SFNO + Pangu_Plasim performance optimizations beyond CUDA-lever parity** — the Phase 7 benchmark
+  closed a 17% throughput gap to PanguWeather via TF32 + cudnn.benchmark + DDP bucket-view + fused
+  AdamW (commit `094e72b2`). To go *beyond* parity, follow-up candidates (none in scope yet):
+  - `torch.compile` on the SfnoPlasim / PanguPlasim modules (Inductor or AOTI). Watch out for the
+    SHT custom ops that the vendored Modulus SFNO calls — they may need `dynamic=False` or compile-only-blocks.
+  - Channels-last memory format for the conv-heavy encoder/decoder paths.
+  - Per-rank batch size sweep — the benchmark used batch=8/rank (matching PanguWeather's reference);
+    on A100-40 the SFNO_PLASIM_5412 model has headroom for larger.
+  - bf16 AMP (`cfg.amp=bf16`) — already wired through `_resolve_amp_dtype`; we just haven't benched it
+    for SFNO. Would also need to re-validate loss parity since PanguWeather defaults to bf16.
+  - Optional FlashAttention / Mamba-style attention swaps inside the SFNO MLP blocks where applicable.
+  - ZeRO-1 optimizer sharding (already a config key, factory pending).
