@@ -61,6 +61,28 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+# Prefixes added by common wrapping patterns. Stripped iteratively
+# from the start of every key so stacked combinations decompose
+# correctly (e.g. ``module._orig_mod.encoder.0.weight`` →
+# ``encoder.0.weight``).
+_WRAP_PREFIXES = ("module.", "_orig_mod.")
+
+
+def _strip_wrap_prefixes(key: str) -> str:
+    """Strip leading DDP / torch.compile wrapper prefixes from a key.
+
+    Idempotent: ``_strip_wrap_prefixes(_strip_wrap_prefixes(k)) == _strip_wrap_prefixes(k)``.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for pref in _WRAP_PREFIXES:
+            if key.startswith(pref):
+                key = key[len(pref) :]
+                changed = True
+    return key
+
+
 def load_panguweather_state_dict(
     source: Path, prefer_ema: bool = True
 ) -> OrderedDict:
@@ -95,17 +117,22 @@ def load_panguweather_state_dict(
 
 
 def translate_state_dict(panguweather_sd: OrderedDict) -> OrderedDict:
-    """Strip ``module.`` and re-prefix with ``sfno.`` for the ai-rossby wrapper.
+    r"""Strip DDP / compile wrappers and re-prefix with ``sfno.`` for our wrapper.
 
     PanguWeather's SFNO_v2 inherits directly from the base SFNO, so its
-    ``state_dict`` keys are the base's keys. Our :class:`SfnoPlasim` holds the
-    base under ``self.sfno``, so we just prefix every key with ``sfno.``.
+    ``state_dict`` keys are the base's keys. Our :class:`SfnoPlasim`
+    holds the base under ``self.sfno``, so we strip any combination of
+    ``module.`` (DDP) and ``_orig_mod.`` (torch.compile) prefixes that
+    accumulated at save time, then re-prefix with ``sfno.``.
+
+    The strip is iterative — stacked prefixes like
+    ``module._orig_mod.encoder.0.weight`` collapse to
+    ``encoder.0.weight``, then become ``sfno.encoder.0.weight``.
     """
     out: OrderedDict = OrderedDict()
     for k, v in panguweather_sd.items():
-        if k.startswith("module."):
-            k = k[len("module.") :]
-        out[f"sfno.{k}"] = v
+        bare = _strip_wrap_prefixes(k)
+        out[f"sfno.{bare}"] = v
     return out
 
 

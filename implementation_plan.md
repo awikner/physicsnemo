@@ -549,12 +549,88 @@ those numbers.
 `tools/checkpoint_translation/pangu_plasim.py`: normalize `module.` prefix, prefer `ema_state`, remap keys →
 faithful module state_dict (handles both `PanguPlasim` and `PanguPlasimLegacy`), reconstruct `Integrator`
 buffers from norm `.nc`, emit `.mdlus`.
-**Tests**:
-- *Unit*: small synthetic source-format ckpt → translator → load into faithful model → forward shape OK.
-- *Smoke* (Delta interactive): same as unit but on CUDA; tolerance only on shape/dtype.
-- **Fidelity gate** (Delta non-interactive `gpuA40x4`): run the *original* PanguWeather inference to capture
-  reference outputs, load the translated checkpoint into the faithful model, assert rollout outputs match
-  within tolerance. This is the one Phase 5 task that doesn't fit the interactive queue's 1-hour cap.
+
+**Translator + tests delivered** *(commit pending)*:
+
+- [`tools/checkpoint_translation/sfno_plasim.py`](tools/checkpoint_translation/sfno_plasim.py) (Phase 7 work):
+  PanguWeather SFNO_v2 ``.pt`` → ``SfnoPlasim`` ``.mdlus``. Strips
+  ``module.`` (DDP) and ``_orig_mod.`` (torch.compile) prefixes
+  *iteratively* — stacked combinations like
+  ``module._orig_mod.encoder.0.weight`` collapse to
+  ``encoder.0.weight`` before the ``sfno.`` re-prefix. Prefers
+  ``ema_state`` over ``model_state`` by default (PanguWeather's
+  documented inference-time preference). Falls back to bare
+  ``OrderedDict`` blobs on older checkpoint formats.
+- [`tools/checkpoint_translation/pangu_plasim.py`](tools/checkpoint_translation/pangu_plasim.py)
+  (new this phase): PanguWeather Pangu_Plasim ``.pt`` →
+  ``PanguPlasim`` / ``PanguPlasimLegacy`` ``.mdlus``. ``--target-class``
+  CLI flag picks the class; auto-detected from the YAML's ``name:``
+  field. Same iterative prefix-strip helper as the SFNO version —
+  factored into ``_strip_wrap_prefixes`` and shared between both
+  modules.
+- **Unit tests** (CPU, 26 cases across `test_sfno_plasim.py` +
+  `test_pangu_plasim.py`):
+  * The pure prefix-stripper covers 6 cases (no-prefix, single
+    `module.`, single `_orig_mod.`, stacked
+    `module._orig_mod.`/`_orig_mod.module.`, repeated `module.module.`,
+    idempotence).
+  * ``translate_state_dict`` handles single + stacked prefixes for
+    both target families.
+  * ``load_panguweather_state_dict`` prefers ``ema_state``, falls back
+    to ``model_state`` / bare-OrderedDict.
+  * ``build_target_model_from_yaml`` resolves both
+    ``PanguPlasim`` / ``PanguPlasimLegacy``, accepts CLI override,
+    rejects unknown ``name:`` fields.
+  * **Round-trip prediction tests** — build a source model, save
+    state-dict three ways (raw / DDP-wrapped / DDP+compile stacked),
+    translate each, load into a fresh target, and verify the forward
+    output is **bit-equivalent** to the source on identical input.
+    Also asserts predictions are non-degenerate (finite, non-zero).
+    Covers both ``PanguPlasimLegacy`` (deterministic) and
+    ``PanguPlasim`` (VAE — re-seeds before each forward to compare
+    the deterministic mean-field paths). Same end-to-end test added
+    to the existing SFNO suite with DDP-wrapped checkpoints.
+- **GPU smoke test** at
+  [`test/recipes/ai_rossby/test_smoke_pangu_translator_single_gpu.py`](test/recipes/ai_rossby/test_smoke_pangu_translator_single_gpu.py)
+  — parameterized over 4 wrapper kinds (``raw`` /
+  ``ddp_only`` / ``ddp_then_compile`` / ``compile_then_ddp``); all 4
+  pass on Delta ``gpuA40x4-interactive`` in ~25 s. Verifies the
+  translated CUDA-resident model's forward output bit-matches the
+  source for every wrapper variation.
+
+**Fidelity gate harness delivered** *(commit pending)*:
+
+- [`tools/checkpoint_translation/fidelity_compare.py`](tools/checkpoint_translation/fidelity_compare.py)
+  — generic per-class comparison: loads a translated ``.mdlus``, runs
+  forward on the IC + boundary from a reference NetCDF, asserts
+  per-channel-group max-abs-diff against the saved reference is
+  under tolerance. Same harness covers all three target classes
+  (``PanguPlasim`` / ``PanguPlasimLegacy`` / ``SfnoPlasim``) via the
+  ``--target-class`` flag.
+- [`hpc/scripts/fidelity_pangu_plasim.sbatch`](hpc/scripts/fidelity_pangu_plasim.sbatch)
+  — non-interactive Delta ``gpuA40x4`` (4-hour cap) that runs the
+  3-step pipeline: (1) translate the PanguWeather ``.pt``, (2) call
+  PanguWeather's own inference utility on the source checkpoint to
+  produce a reference NetCDF, (3) run ``fidelity_compare.py``.
+  Step (2) is intentionally stubbed in the committed sbatch — the
+  exact PanguWeather inference invocation depends on the checkpoint
+  layout, which only the operator knows at submission time. Submit
+  with ``sbatch --export=ALL,PW_CHECKPOINT=…,PW_YAML=…,TARGET_YAML=…,TARGET_CLASS=…``.
+
+**Outstanding — needs live validation with the user's checkpoints**:
+The user will provide paths to real checkpoints + their corresponding
+configuration files for all three model types (``PanguPlasimLegacy``,
+``PanguPlasim``, ``SfnoPlasim``). For each:
+
+1. Run the translator end-to-end to produce a ``.mdlus``.
+2. Step 2 of the fidelity sbatch needs the actual PanguWeather
+   inference command edited in to match the checkpoint's data
+   pipeline (which year of ERA5 / PLASIM, which IC, what
+   normalization stats).
+3. Submit the fidelity sbatch; verify ``fidelity_compare.py``
+   reports PASS within the chosen tolerance (default ``1e-4`` — may
+   need loosening if the source used bf16 / non-deterministic CUDA
+   kernels).
 
 ### Phase 6 — Pangu_Plasim native variants
 Rebuild both architectures on native PhysicsNeMo blocks (`PanguPlasimNative`, `PanguPlasimLegacyNative`),

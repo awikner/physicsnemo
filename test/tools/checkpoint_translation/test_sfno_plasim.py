@@ -129,6 +129,27 @@ def test_translate_state_dict_strips_module_prefix_and_adds_sfno():
     assert "module." not in next(iter(out.keys()))
 
 
+def test_translate_state_dict_robust_to_stacked_wrapper_prefixes():
+    """Stacked DDP + torch.compile prefixes should be peeled iteratively."""
+    src = OrderedDict(
+        {
+            "module._orig_mod.encoder.weight": torch.zeros(2),
+            "_orig_mod.module.blocks.0.norm.bias": torch.zeros(2),
+            "module.module.deeply.wrapped": torch.zeros(2),
+            "naked.layer.weight": torch.zeros(2),
+        }
+    )
+    out = translate_state_dict(src)
+    assert "sfno.encoder.weight" in out
+    assert "sfno.blocks.0.norm.bias" in out
+    assert "sfno.deeply.wrapped" in out
+    assert "sfno.naked.layer.weight" in out
+    # No source key's "wrapper" prefix survives.
+    for k in out:
+        assert "module." not in k.removeprefix("sfno.")
+        assert "_orig_mod." not in k.removeprefix("sfno.")
+
+
 def test_load_panguweather_state_dict_prefers_ema(tmp_path):
     """When both `model_state` and `ema_state` are present, EMA wins by default."""
     blob = {
@@ -231,3 +252,56 @@ def test_end_to_end_translation_preserves_outputs(tmp_path):
     assert torch.allclose(out_target[1], expected_upper, atol=1e-6)
     if n_diag:
         assert torch.allclose(out_target[2], expected_diag, atol=1e-6)
+
+
+def test_end_to_end_translation_with_ddp_wrapped_checkpoint(tmp_path):
+    """Source checkpoint with DDP-style `module.` prefix on every key:
+    the translated SfnoPlasim's outputs must still match the source base SFNO's.
+
+    Catches the most-common production foot-gun: a checkpoint saved while
+    the model was wrapped in ``torch.nn.parallel.DistributedDataParallel``
+    has every parameter key prefixed with ``module.``. The translator
+    must strip that before re-prefixing with ``sfno.``.
+    """
+    torch.manual_seed(1)
+    base = _build_panguweather_shaped_base().eval()
+    # Synthesize a DDP-wrapped checkpoint: every key has `module.` prepended.
+    raw_sd = base.state_dict()
+    ddp_sd = OrderedDict((f"module.{k}", v) for k, v in raw_sd.items())
+    blob = {
+        "iters": 1,
+        "epoch": 1,
+        "model_state": ddp_sd,
+        "ema_state": ddp_sd,
+    }
+    ckpt = tmp_path / "panguweather_ddp.pt"
+    torch.save(blob, ckpt)
+    yaml_path = tmp_path / "model.yaml"
+    _write_yaml(yaml_path)
+
+    src_sd = load_panguweather_state_dict(ckpt)
+    tgt_sd = translate_state_dict(src_sd)
+    target_model = build_target_model_from_yaml(yaml_path)
+    incoming = target_model.load_state_dict(tgt_sd, strict=False)
+    assert incoming.missing_keys == []
+    assert incoming.unexpected_keys == []
+
+    # Same numerical equivalence as the non-DDP test.
+    target_model.eval()
+    B, H, W = 1, _TINY_CFG["horizontal_resolution"][0], _TINY_CFG["horizontal_resolution"][1]
+    n_surface = len(_TINY_CFG["surface_variables"])
+    n_const = len(_TINY_CFG["constant_boundary_variables"])
+    n_varying = len(_TINY_CFG["varying_boundary_variables"])
+    n_upper = len(_TINY_CFG["upper_air_variables"])
+    n_levels = len(_TINY_CFG["levels"])
+    surface = torch.randn(B, n_surface, H, W)
+    c_bound = torch.randn(B, n_const, H, W)
+    v_bound = torch.randn(B, n_varying, H, W)
+    upper = torch.randn(B, n_upper, n_levels, H, W)
+    with torch.no_grad():
+        out_target = target_model(surface, c_bound, v_bound, upper)
+        upper_flat = upper.view(B, n_upper * n_levels, H, W)
+        x = torch.cat((surface, c_bound, v_bound, upper_flat), dim=1)
+        out_base_flat = base(x)
+        expected_surface = out_base_flat[:, :n_surface]
+    assert torch.allclose(out_target[0], expected_surface, atol=1e-6)
