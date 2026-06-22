@@ -482,16 +482,68 @@ in O(C × H × W) memory regardless of how long the rollout runs.
   the ground-truth dataset. No bias correction is applied — we just
   measure the bias as a model-diagnostic.
 
-- **Tests** (CPU, 12 cases in `test/recipes/ai_rossby/test_climatology.py`):
-  * Streaming-mean closed-form match across mismatched chunk sizes
-  * Streaming-variance match to `np.var(unbiased=True)` over chunked input
-  * Welford stability: mean ~273, var ~10 (climate-data regime) — relative
-    error stays under 1e-9, naive E[X²]−E[X]² would lose ~1e-6 in f32
-  * Equivalence between one-batch and chunked updates
-  * Single-sample → variance 0 (not NaN)
-  * Binned mean matches numpy group-by reference
-  * Empty bins → zero (climatology convention for un-sampled days)
-  * End-to-end climatological-bias pattern (pred − truth means)
+- **Tests** (CPU, 19 cases in `test/recipes/ai_rossby/test_climatology.py`):
+  Aggregator-vs-numpy invariants, Welford stability under the
+  climate-data regime, single-sample / empty-bin conventions, end-to-end
+  climatological-bias pattern, `StreamingBinnedVariance` group-by match,
+  `lat_weighted_global_scalars` invariants + shape correctness.
+
+**Phase 4c follow-ups** *(complete; commits `a9184375`, `…`)*:
+
+- **Async forecast writer** at
+  [`examples/weather/ai_rossby/async_writer.py`](examples/weather/ai_rossby/async_writer.py).
+  Bounded-concurrency `ThreadPoolExecutor` wrapper (mirrors corrdiff /
+  regen's inline pattern but adds backpressure via a semaphore,
+  extension auto-dispatch, and exception surfacing in `wait_all()`).
+  15 CPU unit tests.
+- **Per-IC forecast files for short-term inference** — `inference.py`
+  now writes one zarr per IC containing the IC frame at index 0 and
+  the rollout predictions at frames 1..max_step. Filenames follow
+  `{model}__{run}__{ic_iso}_{final_iso}.zarr`. Disk I/O overlaps the
+  next IC's GPU rollout via the async writer's max_in_flight queue.
+- **Chunked forecast dumps for long-term climatology validation** —
+  `climatology_cli.py` gains `forecast_chunk_steps`,
+  `forecast_output_dir`, `include_ic_in_forecast`, and
+  `track_binned_variance` knobs. When chunking is on, forecasts are
+  streamed to disk in **non-overlapping** time-range files — each
+  step appears in exactly one chunk file (the user's "no repeated
+  dates" requirement is verified by an explicit set-membership
+  invariant in the CPU + GPU smoke tests).
+- **Lat-weighted global scalars** — `lat_weighted_global_scalars`
+  helper adds `global_*` variables to the climatology NetCDF
+  alongside the full-grid `(C, H, W)` fields. Tiny per-channel
+  summaries that downstream consumers can plot/tabulate without
+  re-loading the whole grid.
+- **Aggregator additions** — `StreamingBinnedVariance` (per-bin
+  Chan/Welford) and the `lat_weighted_global_scalars` helper.
+- **GPU smoke test** at
+  [`test/recipes/ai_rossby/test_smoke_climatology_single_gpu.py`](test/recipes/ai_rossby/test_smoke_climatology_single_gpu.py)
+  — passes on Delta `gpuA40x4-interactive` in ~27 s, exercises the
+  full path (tiny PanguPlasimLegacy → run_climatology with chunked
+  forecast dumping → aggregator-finite + no-duplicate-step + IC at
+  chunk-0 frame-0 assertions).
+
+**Phase 4c follow-up — needs in-practice testing with a trained model.**
+All the streaming aggregators + async writer + chunked-dump path are
+covered by unit + GPU smoke tests on tiny synthetic / fixture data.
+The performance characteristics on a real workload aren't yet
+measured:
+- Does the writer's `max_in_flight=4` default keep the queue full
+  enough on a 25M-param SfnoPlasim run? Or does the GPU stall waiting
+  on `submit()` when the disk falls behind?
+- For a 1-year (1460-step) PLASIM rollout writing ~70 MB chunks, what
+  fraction of wall-time is the rollout vs the disk drain?
+- Does the async writer overlap improve end-to-end wall vs the
+  baseline (synchronous `to_zarr` at the end)?
+- Memory: are the f64 aggregators + chunk buffer + GPU model state
+  comfortably under 40 GB at the SFNO_PLASIM_5412 scale?
+
+Action: once a real checkpoint is available (Phase 5 fidelity gate
+or a long training run), run `climatology_cli.py` and `inference.py`
+end-to-end and record (a) writer queue depth over time, (b) GPU
+utilization, (c) disk throughput, (d) total wall vs synchronous
+baseline. Tune `writer_max_in_flight` / `writer_num_workers` from
+those numbers.
 
 ### Phase 5 — Checkpoint translation + numerical fidelity
 `tools/checkpoint_translation/pangu_plasim.py`: normalize `module.` prefix, prefer `ema_state`, remap keys →
