@@ -79,21 +79,46 @@ aggregation: `(loss_pl × 50 + loss_sfc × 2 + loss_diag × 1) / 53`).
 ai-rossby's per-group MSEs are taken from the TSV `surface`,
 `upper_air`, `diagnostic` columns and re-aggregated to match.
 
-| Metric | ai-rossby (`SfnoPlasim`, job 19419679) | PanguWeather v2.0 (`SFNO_v2`, job 19418281) |
+| Metric | ai-rossby (`SfnoPlasim`, job 19520226) | PanguWeather v2.0 (`SFNO_v2`, job 19418281) |
 |---|---|---|
 | batches/epoch | 46 | 46 (1 batch from tqdm pre-set didn't dedupe; matches via index) |
 | final-batch loss | 0.9638 | 0.8674 |
 | median-batch loss | 0.9859 | 0.9721 |
-| **wall (training only, s)** | **15.2** | **719** (tqdm 100%) |
-| wall (full epoch incl. validation, s) | 15.2 (no val configured) | 1531.6 |
-| samples/s (training only) | 97.2 | ~2.0 |
-| samples/s (steady state, last 10 batches) | ~160 | ~190 |
+| **wall (training only, s)** | **23.3** | **719** (tqdm 100%) |
+| wall (full epoch incl. validation, s) | 23.3 (no val configured) | 1531.6 |
+| samples/s (training only, epoch-averaged) | 63.3 | ~2.0 |
+| **samples/s (steady state, batches 5-44)** | **194.6** | **194.9** |
 
 PanguWeather's 719-s training time is dominated by the **first batch**
 (~711 s of compilation / kernel-warmup on its custom CUDA paths);
-batches 1-44 then run at ~6 it/s. ai-rossby's first batch is 4.4 s,
-subsequent batches ~0.21 s each. At steady state the two codepaths
-have comparable throughput.
+batches 1-44 then run at ~6 it/s. ai-rossby's first batch is 10.6 s
+(cuDNN benchmark autotune), end-of-epoch sync is ~5 s, and intermediate
+batches run at ~0.16 s each. **At steady state the two codepaths have
+identical throughput** (within 0.2%) — the post-fix ai-rossby is fully
+on parity with PanguWeather.
+
+### Throughput history
+
+Three CUDA performance levers landed in commit 094e72b2 to close an
+initially-observed 17% steady-state gap:
+
+1. **TF32 globally** (`torch.backends.cuda.matmul.allow_tf32 = True`,
+   `torch.backends.cudnn.allow_tf32 = True`,
+   `torch.set_float32_matmul_precision("high")`). A100 fp32 matmul →
+   TF32 tensor cores. The single biggest contributor. Loss values
+   match the pre-TF32 v5.1 run to the 5th decimal — TF32 is
+   numerically safe here.
+2. **`torch.backends.cudnn.benchmark = True`** — cuDNN picks the
+   fastest conv kernel per input shape, cached after the first
+   batch. Adds ~6 s to batch 0 but pays back immediately.
+3. **DDP `gradient_as_bucket_view=True` + AdamW `fused=True`** —
+   small per-step wins on bucketed all-reduce and the optimizer
+   step.
+
+| Version | Steady-state samples/s | Speedup vs v5.1 | vs PanguWeather |
+|---|---|---|---|
+| v5.1 (no CUDA tuning) | 161 | — | -17% |
+| v6 (TF32 + cudnn.benchmark + bucket-view + fused) | **194.6** | **+21%** | **parity** |
 
 ## Divergence vs. decision rule
 
@@ -133,7 +158,7 @@ Likely sources of the residual divergence (not investigated further here):
 
 See [`compare.py`](compare.py) and the raw inputs:
 
-* ai-rossby TSV: `/work/hdd/bdiu/awikner/sfno_bench/ai_rossby_19419679.tsv`
+* ai-rossby TSV: `/work/hdd/bdiu/awikner/sfno_bench/ai_rossby_19520226.tsv`
 * PanguWeather stdout: [`hpc/scripts/logs/bench-sfno-panguweather-19418281.out`](../../../../../../hpc/scripts/logs/bench-sfno-panguweather-19418281.out)
 
 ## Conclusion
@@ -142,10 +167,10 @@ The ai-rossby `SfnoPlasim` + vendored Modulus SFNO + `PlasimNormalizer`
 trains the SFNO_PLASIM_5412 setup to **comparable loss trajectories**
 as PanguWeather v2.0's reference SFNO_v2 (median |Δ loss| ~1.4%, the
 two curves correlate positively at r=0.54), at **substantially better
-end-to-end wall-clock** (15 s vs 719 s for the training portion of one
-epoch on 4× A100, fp32, batch=8/rank). The steady-state throughput
-on the two stacks is essentially the same — the wall-clock win is
-entirely on the first-batch compilation/kernel-warmup path.
+end-to-end wall-clock** (23 s vs 719 s for the training portion of one
+epoch on 4× A100, fp32, batch=8/rank) and **identical steady-state
+throughput** (~194.7 samples/s on both stacks after the CUDA tuning
+in commit 094e72b2).
 
 The 12.6% max |Δ loss| at the end of the epoch exceeds the original
 5% decision threshold but is concentrated in the last few batches
