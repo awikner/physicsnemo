@@ -452,7 +452,46 @@ Two new Hydra-driven scripts under `examples/weather/ai_rossby/`:
 - **Tests** (CPU, 5 cases): `_build_xr_dataset` shape correctness; `run_inference` deterministic +
   ensemble shapes; persistence-model first-step bit-matches IC; NetCDF roundtrip.
 
-**Phase 4c — long-rollout bias correction**: deferred until needed.
+**Phase 4c — climatological-statistic validation** *(complete; commit pending)*:
+
+For multi-year autoregressive rollouts, holding every predicted state in memory
+is infeasible. The Phase 4c pieces accumulate the *time-aggregate* statistics
+we care about — climatological mean, variance, and per-(day-of-year) mean —
+in O(C × H × W) memory regardless of how long the rollout runs.
+
+- [`examples/weather/ai_rossby/climatology.py`](examples/weather/ai_rossby/climatology.py):
+  three streaming-time aggregators with DDP-safe finalize.
+  * `StreamingTimeMean`: running sum / count (f64 accumulator).
+  * `StreamingTimeVariance`: Chan / Welford parallel-update online variance.
+    Numerically stable for the large-mean / small-variance regime typical of
+    climate fields (raw temperatures ~273 K, variances ~10²); the naive
+    `E[X²] − E[X]²` formula cancels catastrophically there.
+  * `StreamingBinnedMean`: per-bin running mean keyed by a caller-supplied
+    bin index per sample. Drives daily / monthly / season-of-year climatology
+    by binning each frame into one of `n_bins` accumulators.
+
+- [`examples/weather/ai_rossby/climatology_cli.py`](examples/weather/ai_rossby/climatology_cli.py):
+  Hydra entry that loads a trained checkpoint, drives a long autoregressive
+  rollout from each IC, and feeds both predicted and reference frames into
+  paired aggregator sets. Writes a NetCDF with `pred_*_mean`, `truth_*_mean`,
+  `bias_*` (mean diff), `pred_*_var`, `truth_*_var`, `var_bias_*`,
+  `pred_*_daily_clim`, `truth_*_daily_clim`, `daily_bias_*` fields across the
+  three channel groups (surface / upper_air / diagnostic). The
+  `pred_*_daily_clim` series is the model's emergent climatology; the
+  `bias` and `var_bias` fields are the climatological-statistic deltas vs
+  the ground-truth dataset. No bias correction is applied — we just
+  measure the bias as a model-diagnostic.
+
+- **Tests** (CPU, 12 cases in `test/recipes/ai_rossby/test_climatology.py`):
+  * Streaming-mean closed-form match across mismatched chunk sizes
+  * Streaming-variance match to `np.var(unbiased=True)` over chunked input
+  * Welford stability: mean ~273, var ~10 (climate-data regime) — relative
+    error stays under 1e-9, naive E[X²]−E[X]² would lose ~1e-6 in f32
+  * Equivalence between one-batch and chunked updates
+  * Single-sample → variance 0 (not NaN)
+  * Binned mean matches numpy group-by reference
+  * Empty bins → zero (climatology convention for un-sampled days)
+  * End-to-end climatological-bias pattern (pred − truth means)
 
 ### Phase 5 — Checkpoint translation + numerical fidelity
 `tools/checkpoint_translation/pangu_plasim.py`: normalize `module.` prefix, prefer `ema_state`, remap keys →
