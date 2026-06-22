@@ -7,6 +7,7 @@
 #   AdamW(lr=1e-4, wd=3e-6), OneCycleLR(pct_start=0.1, div=1e5, fdiv=2.5e-4),
 #   no AMP, no grad clip, EMA on with 6-epoch warmup.
 
+use_static_capture: False             # opt-in StaticCaptureTraining + CUDA graphs (PhysicsNeMo decorator)
 amp: none                       # none/off | bf16 | fp16
 grad_clip_norm: 0.0             # 0 disables gradient clipping
 max_epochs: 100                 # sum of stage num_epochs; redundant guard

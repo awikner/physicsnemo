@@ -4,6 +4,7 @@
 #
 # PanguPlasim (VAE) single-stage training config — LinearWarmupCosineAnnealingLR.
 
+use_static_capture: False             # opt-in StaticCaptureTraining + CUDA graphs (PhysicsNeMo decorator)
 amp: none
 grad_clip_norm: 0.0
 max_epochs: 100

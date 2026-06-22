@@ -5,6 +5,7 @@
 # SfnoPlasim single-stage training config — matches PanguWeather v2.0
 # SFNO_PLASIM_H5_DERECHO_5412.yaml scheduler block.
 
+use_static_capture: False             # opt-in StaticCaptureTraining + CUDA graphs (PhysicsNeMo decorator)
 amp: none
 grad_clip_norm: 0.0
 max_epochs: 50

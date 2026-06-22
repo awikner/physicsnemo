@@ -106,6 +106,115 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> None:
     )
 
 
+def _build_captured_train_step(
+    *,
+    inner_model,
+    optimizer,
+    loss_fn,
+    has_diagnostic: bool,
+    unroll_steps: int,
+    amp_dtype,
+    grad_clip_norm: float,
+    label: str,
+):
+    """Return a :class:`StaticCaptureTraining`-wrapped train-step closure.
+
+    The captured closure handles forward + loss + backward + optimizer
+    step + optional gradient clipping + optional AMP autocast inside one
+    CUDA graph (after the warmup iterations). Caller is responsible for
+    stepping the scheduler and the EMA after each call.
+
+    Loss-component breakdowns are NOT exposed by this path — only the
+    total scalar loss is returned. The cost of recomputing per-component
+    losses outside the graph would defeat the throughput win, so when
+    static capture is on the trainer logs `loss` only and zero-fills the
+    other component slots.
+
+    Multi-step rollout: each stage builds its own captured function with
+    ``unroll_steps`` baked in. The graph topology depends on
+    ``unroll_steps`` and batch shape; changing either at runtime forces
+    a re-capture, which is why we bind these at stage start.
+    """
+    from physicsnemo.utils import StaticCaptureTraining
+
+    use_amp = amp_dtype is not None
+    amp_type = amp_dtype if amp_dtype is not None else torch.bfloat16
+    grad_clip = grad_clip_norm if grad_clip_norm > 0 else None
+
+    @StaticCaptureTraining(
+        model=inner_model,
+        optim=optimizer,
+        use_amp=use_amp,
+        amp_type=amp_type,
+        use_graphs=True,
+        gradient_clip_norm=grad_clip,
+        label=label,
+    )
+    def captured_step(model, batch):
+        if unroll_steps == 1:
+            out = model(
+                batch["surface_in"],
+                batch["constant_boundary"],
+                batch["varying_boundary"],
+                batch["upper_air_in"],
+            )
+            if has_diagnostic:
+                o_s, o_u, o_d = out[0], out[1], out[2]
+            else:
+                o_s, o_u = out[0], out[1]
+                o_d = None
+            losses = loss_fn(
+                o_s,
+                o_u,
+                batch["target_surface"],
+                batch["target_upper_air"],
+                out_diagnostic=o_d,
+                target_diagnostic=batch.get("diagnostic") if has_diagnostic else None,
+            )
+            return losses["loss"]
+        # Multi-step rollout — mirrors multistep_train_step but returns only the
+        # scalar so it composes with the static-capture graph.
+        surface_seq = batch["surface_in_seq"]
+        upper_seq = batch["upper_air_in_seq"]
+        varying_seq = batch["varying_boundary_seq"]
+        diag_seq = batch.get("diagnostic_seq") if has_diagnostic else None
+        const_boundary = batch.get("constant_boundary")
+        state_surface = surface_seq[:, 0]
+        state_upper = upper_seq[:, 0]
+        accum = torch.zeros(
+            (), device=state_surface.device, dtype=state_surface.dtype
+        )
+        for k in range(int(unroll_steps)):
+            out = model(
+                state_surface,
+                const_boundary,
+                varying_seq[:, k],
+                state_upper,
+            )
+            if has_diagnostic:
+                next_surface, next_upper, next_diag = out[0], out[1], out[2]
+            else:
+                next_surface, next_upper = out[0], out[1]
+                next_diag = None
+            target_surface_k = surface_seq[:, k + 1]
+            target_upper_k = upper_seq[:, k + 1]
+            target_diag_k = diag_seq[:, k + 1] if diag_seq is not None else None
+            losses_k = loss_fn(
+                next_surface,
+                next_upper,
+                target_surface_k,
+                target_upper_k,
+                out_diagnostic=next_diag,
+                target_diagnostic=target_diag_k,
+            )
+            accum = accum + losses_k["loss"]
+            state_surface = next_surface
+            state_upper = next_upper
+        return accum / float(unroll_steps)
+
+    return captured_step
+
+
 def _flatten_optimizer_cfg(opt_cfg: DictConfig) -> DictConfig:
     """Map ``cfg.training.optimizer.{type, lr, weight_decay, fused}`` → the
     flat keys ``make_optimizer`` expects (``optimizer_type``, ``lr``,
@@ -506,6 +615,13 @@ def main(cfg: DictConfig) -> None:
         rollout_validator.has_diagnostic = has_diagnostic
     grad_clip_norm = float(cfg_train.get("grad_clip_norm", 0.0))
     vae_kl_weight = float(cfg.loss.get("vae_kl_weight", 0.0))
+    use_static_capture = bool(cfg_train.get("use_static_capture", False))
+    if use_static_capture and vae_kl_weight > 0.0:
+        logger.warning(
+            "training.use_static_capture=True is incompatible with VAE-KL "
+            "training (loss.vae_kl_weight>0); falling back to eager path."
+        )
+        use_static_capture = False
 
     global_epoch = 1
     for stage_idx, stage in enumerate(stages):
@@ -570,6 +686,26 @@ def main(cfg: DictConfig) -> None:
                 f"unroll_steps={unroll_steps}, batch_size={int(stage_batch_override) if stage_batch_override else int(cfg.dataset.batch_size)}"
             )
 
+        # StaticCapture closure for this stage (graph topology depends on
+        # unroll_steps + batch shape so we re-bind per stage).
+        captured_train_fn = None
+        if use_static_capture:
+            captured_train_fn = _build_captured_train_step(
+                inner_model=inner_model,
+                optimizer=optimizer,
+                loss_fn=loss_fn,
+                has_diagnostic=has_diagnostic,
+                unroll_steps=unroll_steps,
+                amp_dtype=amp_dtype,
+                grad_clip_norm=grad_clip_norm,
+                label=f"stage{stage_idx}_unroll{unroll_steps}",
+            )
+            if dist.rank == 0:
+                logger.info(
+                    f"  static capture ENABLED (use_amp={amp_dtype is not None}, "
+                    f"amp_type={amp_dtype})"
+                )
+
         stage_iter = 0
         for _ in range(epochs_remaining):
             stage_datapipe.set_epoch(global_epoch)
@@ -583,7 +719,25 @@ def main(cfg: DictConfig) -> None:
                 for batch_idx, batch in enumerate(stage_datapipe):
                     if max_iterations is not None and stage_iter >= max_iterations:
                         break
-                    if unroll_steps > 1:
+                    if captured_train_fn is not None:
+                        # StaticCaptureTraining-wrapped path: returns scalar
+                        # loss only. The decorator handles backward + step +
+                        # grad clip + AMP internally. We still drive the
+                        # scheduler from out here.
+                        scalar = captured_train_fn(inner_model, batch)
+                        if scheduler is not None:
+                            scheduler.step()
+                        # Synthesize a losses dict that matches the eager
+                        # path's shape so downstream logging stays uniform.
+                        zero = torch.zeros((), device=scalar.device, dtype=scalar.dtype)
+                        losses = {
+                            "loss": scalar.detach(),
+                            "surface": zero,
+                            "upper_air": zero,
+                            "diagnostic": zero,
+                            "vae_kl": zero,
+                        }
+                    elif unroll_steps > 1:
                         losses = multistep_train_step(
                             model=model,
                             loss_fn=loss_fn,
@@ -608,7 +762,9 @@ def main(cfg: DictConfig) -> None:
                             amp_dtype=amp_dtype,
                             grad_scaler=grad_scaler,
                         )
-                    if grad_clip_norm > 0:
+                    # Gradient clipping: StaticCapture handles it inside the
+                    # graph; eager path applies it here after backward.
+                    if grad_clip_norm > 0 and captured_train_fn is None:
                         torch.nn.utils.clip_grad_norm_(
                             inner_model.parameters(), grad_clip_norm
                         )

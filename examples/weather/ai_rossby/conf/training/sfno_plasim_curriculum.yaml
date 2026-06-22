@@ -14,6 +14,7 @@
 # Each stage's scheduler runs over `len(datapipe) * num_epochs` total iters
 # from a fresh start (LR resets at each stage boundary).
 
+use_static_capture: False             # opt-in StaticCaptureTraining + CUDA graphs (PhysicsNeMo decorator)
 amp: none
 grad_clip_norm: 0.5             # multi-step rollouts need gradient clipping
 max_epochs: 80
