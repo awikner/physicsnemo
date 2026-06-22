@@ -358,6 +358,58 @@ OneCycle/cosine/warmup, bf16 AMP, EMA, loss combination + VAE-KL + `predict_delt
 - Long-validation rollout + bias correction (Phase 4 territory; rolls into the recipe via the validation
   hooks already stubbed in `train.py`).
 
+**Phase 3 v4 — unified-recipe patterns** *(complete; commits `7e15f4cd` → `842d2839`)*:
+After reviewing `examples/weather/unified_recipe/` we adopted four patterns and refactored ai_rossby
+to match the rest of the repo's training conventions.
+
+- **Config restructure** (commit `7e15f4cd`): split `conf/` into separate `dataset/`, `training/`,
+  and `validation/` groups (plus the existing `model/` and `loss/`). `conf/scheduler/` dissolved into
+  per-stage `training.stages[*].scheduler` blocks. New configs:
+  * `conf/dataset/{plasim_sim52_year12, plasim_sim52_train_val, era5_sfno_s2s_1981}.yaml`
+  * `conf/training/{pangu_plasim_legacy, pangu_plasim, sfno_plasim, sfno_plasim_curriculum}.yaml`
+  * `conf/validation/{off, rollout_short, rollout_5412, rollout_ensemble}.yaml`
+  Top-level config.yaml composes the five groups via `defaults:` exactly like unified_recipe.
+
+- **Multi-stage training with multi-step rollouts** (commit `15d72906`): training configs now declare
+  a list of `stages` with per-stage `(num_epochs, unroll_steps, batch_size, max_iterations, scheduler)`.
+  The trainer iterates stages, builds a fresh scheduler each stage, and rebuilds the datapipe in
+  sequence-emit mode when `unroll_steps > 1`. New
+  [`SequenceDataset`](physicsnemo/experimental/datapipes/plasim/sequence.py) wraps the base
+  ClimateZarrDataset to emit `(T+1, …)` rollout windows; `PlasimNormalizer` recognizes the matching
+  `*_seq` batch keys. The `multistep_train_step` accumulates per-step losses inside one
+  AMP-autocast region and divides by K so per-step LR scale matches the single-step recipe.
+  Smoke-validated: `unroll_steps=1` path bit-matches the original `train_step` on the first frame;
+  `unroll_steps>1` ramps loss across the rollout and decreases over 10 steps of training. The
+  example curriculum config `conf/training/sfno_plasim_curriculum.yaml` exercises a 3-stage 1→4→8
+  unroll progression.
+
+- **`Module.instantiate` model registry** (commit `9456f009`): replaces `build_model`'s hand-rolled
+  `if model_type == 'SfnoPlasim': …` switch with one
+  `Module.instantiate({"__name__", "__module__", "__args__"})` call. Model configs now declare
+  `name:` (class name) + `module:` (Python import path); the rest of the cfg.model dict flows through
+  as constructor kwargs. Adding a new model architecture just requires its config under
+  `conf/model/<name>.yaml`.
+
+- **StaticCaptureTraining (opt-in CUDA graphs)** (commit `842d2839`):
+  `training.use_static_capture: bool` (default False) enables a PhysicsNeMo
+  [`StaticCaptureTraining`](physicsnemo/utils/capture.py) wrapper around the per-step train function
+  for both single-step and multi-step rollout paths. The decorator folds forward + loss + backward +
+  optimizer.step + grad-clip + AMP autocast into one CUDA graph after the warmup iterations.
+  Per-stage build re-captures when `unroll_steps` or batch shape changes. Auto-disabled when
+  `loss.vae_kl_weight > 0` (the latent-tuple return is incompatible with scalar-loss capture);
+  per-component loss breakdowns are zero-filled in the LaunchLogger dict on the captured path.
+
+- **W&B integration** (commit `93543572`, retained): `cfg.wandb.enabled=True` triggers
+  `initialize_wandb` on rank 0 and `LaunchLogger` routes all `log_minibatch`/`log_epoch` dicts
+  through wandb under the `train/` and `valid/` namespaces. Academic account → run online; HPC
+  jobs use `WANDB_MODE=offline` + post-job `wandb sync`. Decision recorded in the project memory:
+  stay with wandb over MLflow.
+
+**Carried forward** (queued in §6 *Remaining items*):
+- `save_inference_model_package` from unified_recipe (write a self-contained NetCDF + config
+  artifact). Useful for Phase 5; not in scope yet.
+- The `cfg.training.use_static_capture=True` path is not exercised by GPU smoke tests yet.
+
 ### Phase 4 — Validation (mid-training + after-the-fact)
 Mid-training: autoregressive rollout → lat-weighted RMSE (mse+reductions) + ACC (`physicsnemo.metrics.climate.acc`
 with dayofyear climatology), long-rollout bias, ensemble validation, power spectra. After-the-fact:
@@ -383,8 +435,24 @@ RMSE/ACC/spectra/bias/CRPS + plots. Port the DDP all-reduce `MetricsAggregator` 
   ~0 for independent fields, accumulator-over-batches invariance, perfect-model rollout RMSE=0) plus
   2 Delta A40 smoke cases (deterministic + 3-member GaussianIC ensemble). All green.
 
-**Phase 4b — after-the-fact `inference.py` + `validate.py` CLI**, **Phase 4c — long-rollout bias
-correction**: deferred until needed.
+**Phase 4b — after-the-fact rollout + score CLIs** *(complete; commit `fe9db8f8`)*:
+Two new Hydra-driven scripts under `examples/weather/ai_rossby/`:
+
+- [`inference.py`](examples/weather/ai_rossby/inference.py): loads a trained checkpoint via
+  `Module.instantiate` + `load_checkpoint`, rolls each requested IC out `cfg.inference.max_step`
+  times (optionally with an ensemble via the Phase 4a perturber API), and writes per-channel-group
+  predictions to NetCDF/Zarr with dims `(ic, ensemble, step, [surface|upper_air|diag]_var, [level,]
+  lat, lon)`. Memory-conscious — at any moment GPU holds one rollout-window working set and
+  predictions are copied to CPU numpy after each step.
+- [`validate_cli.py`](examples/weather/ai_rossby/validate_cli.py): reads a predictions file +
+  reference Zarr + optional climatology, computes per-(step, channel) lat-weighted RMSE + ACC using
+  the same Phase 4a streaming aggregators, and emits a JSON summary + optional markdown table with
+  channel-mean rows. Ensemble-mean reduction before RMSE/ACC; CRPS / spread-skill / power-spectra
+  deferred.
+- **Tests** (CPU, 5 cases): `_build_xr_dataset` shape correctness; `run_inference` deterministic +
+  ensemble shapes; persistence-model first-step bit-matches IC; NetCDF roundtrip.
+
+**Phase 4c — long-rollout bias correction**: deferred until needed.
 
 ### Phase 5 — Checkpoint translation + numerical fidelity
 `tools/checkpoint_translation/pangu_plasim.py`: normalize `module.` prefix, prefer `ema_state`, remap keys →
