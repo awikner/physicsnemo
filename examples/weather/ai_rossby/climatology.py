@@ -290,8 +290,172 @@ class StreamingBinnedMean:
         return self.counts.clone()
 
 
+class StreamingBinnedVariance:
+    r"""Per-bin running mean + variance via Chan parallel update.
+
+    Same per-bin partition as :class:`StreamingBinnedMean` but each bin
+    also tracks ``M2`` so we can recover per-bin variance at finalize.
+    Drives the per-day-of-year (or per-month-of-year) climatological
+    variance bias = ``var(pred_per_bin) − var(truth_per_bin)``.
+
+    Memory: ``O(n_bins × C × H × W × 8 B)`` × 2 (mean + M2). For 53
+    channels × 64 × 128 × 365 daily bins that's ~1.3 GB at f64 per
+    aggregator. The CLI keeps separate pred/truth instances so plan
+    on ~2.6 GB of aggregator state when daily variance binning is on.
+
+    Parameters mirror :class:`StreamingBinnedMean`.
+    """
+
+    def __init__(
+        self,
+        n_bins: int,
+        shape: tuple[int, ...],
+        device: torch.device,
+        dtype: torch.dtype = torch.float64,
+    ):
+        self.n_bins = int(n_bins)
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self.mean = torch.zeros((n_bins, *shape), device=device, dtype=dtype)
+        self.M2 = torch.zeros((n_bins, *shape), device=device, dtype=dtype)
+        self.counts = torch.zeros(n_bins, device=device, dtype=torch.int64)
+
+    @torch.no_grad()
+    def update(self, x: torch.Tensor, bin_idx: torch.Tensor) -> None:
+        if x.shape[1:] != self.shape:
+            raise ValueError(
+                f"update expected (B, *{self.shape}), got {tuple(x.shape)}"
+            )
+        if bin_idx.shape != (x.shape[0],):
+            raise ValueError(
+                f"bin_idx must be shape ({x.shape[0]},), got {tuple(bin_idx.shape)}"
+            )
+        if (bin_idx < 0).any() or (bin_idx >= self.n_bins).any():
+            raise ValueError(f"bin_idx out of range [0, {self.n_bins})")
+        x = x.detach().to(self.dtype)
+        bin_idx_cpu = bin_idx.to("cpu").to(torch.long)
+        # We update per-bin separately so the Chan parallel formula's
+        # per-bin (n_a) factor stays correct. Batches with multiple
+        # samples landing in the same bin are merged in one Chan call.
+        for b in bin_idx_cpu.unique().tolist():
+            mask = (bin_idx_cpu == b)
+            x_b = x[mask]
+            n_b = int(x_b.shape[0])
+            if n_b == 0:
+                continue
+            mean_b = x_b.mean(dim=0)
+            if n_b > 1:
+                M2_b = ((x_b - mean_b) ** 2).sum(dim=0)
+            else:
+                M2_b = torch.zeros_like(mean_b)
+            n_old = int(self.counts[b].item())
+            n_total = n_old + n_b
+            delta = mean_b - self.mean[b]
+            self.mean[b].add_(delta * (float(n_b) / float(n_total)))
+            bridge = delta.pow(2) * (float(n_old) * float(n_b) / float(n_total))
+            self.M2[b].add_(M2_b + bridge)
+            self.counts[b] = n_total
+
+    @torch.no_grad()
+    def finalize(
+        self, *, out_dtype: torch.dtype = torch.float32
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """All-reduce + return ``(per_bin_mean, per_bin_var)``.
+
+        Per-bin merge under DDP uses the same Chan parallel formula as
+        :class:`StreamingTimeVariance`. Empty bins (count=0) → zero
+        mean + zero variance (climatology convention).
+        """
+        mean = self.mean.clone()
+        M2 = self.M2.clone()
+        counts = self.counts.clone().to(self.dtype)
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            n_local = self.counts.clone().to(self.dtype)
+            n_total = n_local.clone()
+            _all_reduce_sum(n_total)
+            weighted_mean = mean * n_local.view(-1, *([1] * len(self.shape)))
+            _all_reduce_sum(weighted_mean)
+            mean = weighted_mean / n_total.view(-1, *([1] * len(self.shape))).clamp(min=1)
+            bridge = (n_local.view(-1, *([1] * len(self.shape))) *
+                      (self.mean - mean).pow(2))
+            _all_reduce_sum(M2)
+            _all_reduce_sum(bridge)
+            M2 = M2 + bridge
+            counts = n_total
+        # Per-bin var = M2 / (n-1); zero for bins with n<2.
+        denom = (counts - 1).clamp(min=1).view(-1, *([1] * len(self.shape)))
+        var = M2 / denom.to(M2.dtype)
+        empty = (counts < 2).view(-1, *([1] * len(self.shape)))
+        mean = torch.where(empty, torch.zeros_like(mean), mean)
+        var = torch.where(empty, torch.zeros_like(var), var)
+        return mean.to(out_dtype), var.to(out_dtype)
+
+    @property
+    def counts_per_bin(self) -> torch.Tensor:
+        return self.counts.clone()
+
+
+# ---------------------------------------------------------------------------
+# Lat-weighted global-scalar reduction (post-aggregator)
+# ---------------------------------------------------------------------------
+
+
+def lat_weighted_global_scalars(
+    field: torch.Tensor,
+    *,
+    lat_axis: int = -2,
+    lat_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    r"""Reduce a per-pixel field to per-channel scalars via cos(lat) weighting.
+
+    The Phase 4c climatology fields ship as ``(C, [L,] H, W)``; this
+    helper collapses the trailing ``(H, W)`` into one per-channel
+    scalar, using cosine-of-latitude weighting along the H axis to
+    approximate the area-weighted global mean on a regular lat/lon
+    grid. The output dataset can carry these as a tiny ``global_*``
+    set of variables alongside the full ``(C, H, W)`` fields — useful
+    for quick plots and tabular comparison.
+
+    Parameters
+    ----------
+    field
+        Per-pixel field. Shape ``(C, H, W)`` or ``(C, L, H, W)``.
+    lat_axis
+        Axis along which latitude varies (default ``-2`` matching the
+        standard ``(..., lat, lon)`` order).
+    lat_weights
+        Pre-computed weights of length ``H``. If ``None``, computed
+        from ``cos(linspace(π/2, -π/2, H))`` and normalized to mean 1.
+
+    Returns
+    -------
+    torch.Tensor
+        Per-channel scalars. Shape is ``field.shape[:lat_axis]`` —
+        e.g. ``(C,)`` for surface, ``(C, L)`` for upper-air.
+    """
+    if field.dim() < 2:
+        raise ValueError(f"field must have at least 2 dims, got {field.shape}")
+    H = field.shape[lat_axis]
+    W = field.shape[-1]
+    if lat_weights is None:
+        import math
+        phi = torch.linspace(math.pi / 2, -math.pi / 2, H, device=field.device, dtype=field.dtype)
+        lat_weights = torch.cos(phi)
+        lat_weights = lat_weights / lat_weights.mean()
+    # Broadcast lat_weights to (..., H, 1) then reduce over (H, W).
+    weight_shape = [1] * field.dim()
+    weight_shape[lat_axis] = H
+    w = lat_weights.view(weight_shape)
+    # Weighted sum / total weight reduces (H, W) only.
+    numer = (field * w).sum(dim=(lat_axis, -1))
+    denom = w.expand_as(field).sum(dim=(lat_axis, -1))
+    return numer / denom.clamp(min=1e-12)
+
+
 __all__ = [
     "StreamingTimeMean",
     "StreamingTimeVariance",
     "StreamingBinnedMean",
+    "StreamingBinnedVariance",
+    "lat_weighted_global_scalars",
 ]

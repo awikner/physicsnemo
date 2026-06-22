@@ -25,7 +25,13 @@ import xarray as xr
 _AI_ROSSBY_DIR = Path(__file__).resolve().parents[2].parent / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_AI_ROSSBY_DIR))
 
-from inference import _build_xr_dataset, run_inference  # noqa: E402
+from async_writer import AsyncForecastWriter  # noqa: E402
+from inference import (  # noqa: E402
+    _build_per_ic_dataset,
+    _build_xr_dataset,
+    run_inference,
+    run_inference_streaming_per_ic,
+)
 from validate import GaussianIC  # noqa: E402
 
 
@@ -200,6 +206,133 @@ def test_run_inference_persistence_matches_initial_state():
     pred = out["pred_surface"].values[0, 0, 0]  # (Cs, H, W)
     expected = ds._surface[2].numpy()
     np.testing.assert_allclose(pred, expected, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Per-IC streaming runner (the path the CLI actually uses)
+# ---------------------------------------------------------------------------
+
+
+def test_build_per_ic_dataset_includes_ic_frame_axis():
+    ds = _build_per_ic_dataset(
+        ic_index=7,
+        n_frames=5,  # IC + 4 forecast steps
+        ensemble_size=2,
+        lat=np.linspace(-90, 90, 8, dtype=np.float32),
+        lon=np.linspace(0, 360, 16, endpoint=False, dtype=np.float32),
+        surface_variables=["pl", "tas"],
+        upper_air_variables=["ta", "ua"],
+        diagnostic_variables=["pr_6h"],
+        levels=[0.1, 0.5],
+        n_levels=2,
+        has_diagnostic=True,
+        time_values=None,
+    )
+    # (ensemble, frame, surface_var, lat, lon)
+    assert ds["pred_surface"].shape == (2, 5, 2, 8, 16)
+    assert ds["pred_upper_air"].shape == (2, 5, 2, 2, 8, 16)
+    assert ds["pred_diagnostic"].shape == (2, 5, 1, 8, 16)
+    assert int(ds.attrs["ic_index"]) == 7
+    assert int(ds.attrs["max_step"]) == 4
+    assert int(ds.attrs["frame_zero_is_ic"]) == 1
+
+
+def test_streaming_per_ic_writes_one_file_per_ic_with_ic_at_frame_zero(tmp_path):
+    ds = _StubDataset(n_time=10)
+    model = _StubModel(n_surface=2, n_upper=5, n_levels=4)
+    with AsyncForecastWriter(max_in_flight=2, num_workers=2) as writer:
+        paths = run_inference_streaming_per_ic(
+            model,
+            ds,
+            normalizer=None,
+            device=torch.device("cpu"),
+            ic_indices=[1, 5],
+            max_step=3,
+            writer=writer,
+            output_dir=str(tmp_path),
+            model_name="SfnoPlasim",
+            run_name="unit",
+            output_format="zarr",
+            ensemble_size=1,
+            perturber=None,
+            has_diagnostic=False,
+            seed=0,
+        )
+    assert len(paths) == 2
+    # Filenames must mention the model + run names.
+    for p in paths:
+        bn = Path(p).name
+        assert bn.startswith("SfnoPlasim__unit__")
+        assert bn.endswith(".zarr")
+    # Frame 0 of the written dataset = the IC's surface_in.
+    file_ic_1 = xr.open_zarr(paths[0])
+    expected_ic1 = ds._surface[1].numpy()
+    np.testing.assert_allclose(
+        file_ic_1["pred_surface"].values[0, 0], expected_ic1, atol=1e-6
+    )
+    # Frame 1 of the persistence model = same as frame 0 (model is identity).
+    np.testing.assert_allclose(
+        file_ic_1["pred_surface"].values[0, 1], expected_ic1, atol=1e-6
+    )
+
+
+def test_streaming_per_ic_filename_includes_ic_and_final_time(tmp_path):
+    """Filenames must encode both ends of the rollout time range.
+
+    With the stub dataset (no time coord on the synthetic xarray
+    proxy), the formatter falls back to integer-index marker
+    ``idx{n}`` — verify both ends appear in the basename.
+    """
+    ds = _StubDataset(n_time=10)
+    model = _StubModel(n_surface=2, n_upper=5, n_levels=4)
+    with AsyncForecastWriter(max_in_flight=2, num_workers=2) as writer:
+        paths = run_inference_streaming_per_ic(
+            model, ds, normalizer=None, device=torch.device("cpu"),
+            ic_indices=[2], max_step=4,
+            writer=writer, output_dir=str(tmp_path),
+            model_name="SfnoPlasim", run_name="testrun",
+            output_format="zarr", ensemble_size=1, perturber=None,
+            has_diagnostic=False, seed=0,
+        )
+    bn = Path(paths[0]).name
+    # Stub dataset lacks a `time` coord on its xarray proxy → falls
+    # back to idx-marker for both start (ic=2) and end (ic+max_step=6).
+    assert "idx2_idx6" in bn, bn
+
+
+def test_streaming_per_ic_ensemble_writes_correct_shape(tmp_path):
+    ds = _StubDataset(n_time=10)
+    model = _StubModel(n_surface=2, n_upper=5, n_levels=4)
+    with AsyncForecastWriter(max_in_flight=2, num_workers=2) as writer:
+        paths = run_inference_streaming_per_ic(
+            model, ds, normalizer=None, device=torch.device("cpu"),
+            ic_indices=[3], max_step=2,
+            writer=writer, output_dir=str(tmp_path),
+            model_name="SfnoPlasim", run_name="ens",
+            output_format="zarr", ensemble_size=4,
+            perturber=GaussianIC(scales={"surface_in": 0.01}),
+            has_diagnostic=False, seed=11,
+        )
+    out = xr.open_zarr(paths[0])
+    # (ensemble=4, frame=max_step+1=3, ...)
+    assert out["pred_surface"].shape == (4, 3, 2, 8, 8)
+
+
+def test_streaming_per_ic_with_diagnostic_writes_diag_var(tmp_path):
+    ds = _StubDataset(n_time=10)
+    model = _StubModel(n_surface=2, n_upper=5, n_levels=4, has_diagnostic=True)
+    with AsyncForecastWriter(max_in_flight=2, num_workers=2) as writer:
+        paths = run_inference_streaming_per_ic(
+            model, ds, normalizer=None, device=torch.device("cpu"),
+            ic_indices=[0], max_step=1,
+            writer=writer, output_dir=str(tmp_path),
+            model_name="SfnoPlasim", run_name="diag",
+            output_format="zarr", ensemble_size=1, perturber=None,
+            has_diagnostic=True, seed=0,
+        )
+    out = xr.open_zarr(paths[0])
+    assert "pred_diagnostic" in out
+    assert out["pred_diagnostic"].shape == (1, 2, 1, 8, 8)
 
 
 def test_run_inference_writes_netcdf_roundtrip(tmp_path):
