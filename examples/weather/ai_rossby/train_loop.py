@@ -248,6 +248,137 @@ def train_step(
     return losses
 
 
+def multistep_train_step(
+    *,
+    model: torch.nn.Module,
+    loss_fn: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
+    batch: dict[str, torch.Tensor],
+    has_diagnostic: bool,
+    unroll_steps: int,
+    vae_kl_weight: float = 0.0,
+    amp_dtype: Optional[torch.dtype] = None,
+    grad_scaler: Optional["torch.amp.GradScaler"] = None,
+) -> dict[str, torch.Tensor]:
+    r"""K-step rollout training with per-step loss accumulation.
+
+    Expects ``batch`` to carry sequence keys produced by
+    :class:`physicsnemo.experimental.datapipes.plasim.SequenceDataset`:
+
+    * ``surface_in_seq``:        ``(B, T+1, C_s, H, W)``
+    * ``upper_air_in_seq``:      ``(B, T+1, C_u, L, H, W)``
+    * ``varying_boundary_seq``:  ``(B, T+1, C_b, H, W)``
+    * ``diagnostic_seq``:        ``(B, T+1, C_d, H, W)`` (when has_diagnostic)
+    * ``constant_boundary``:     ``(C_b^c, H, W)`` or ``(B, C_b^c, H, W)``
+
+    The model is unrolled K times (K = ``unroll_steps``); the prediction
+    at step k is fed back as the input state for step k+1. Per-step
+    losses are summed then divided by K — the resulting scalar is in the
+    same scale as the single-step loss for direct LR/EMA comparability.
+
+    VAE-KL is not supported in this code path (the multi-step rollout
+    averages predictions away from the latent encoder semantics); pass
+    ``vae_kl_weight=0`` (default) or use single-step
+    :func:`train_step` for the VAE variant.
+    """
+    if "surface_in_seq" not in batch or "upper_air_in_seq" not in batch:
+        raise KeyError(
+            "multistep_train_step requires sequence batch keys "
+            "(`*_seq`). Use the datapipe in unroll_steps>1 mode."
+        )
+    if int(unroll_steps) < 1:
+        raise ValueError(f"unroll_steps must be ≥ 1, got {unroll_steps}")
+
+    optimizer.zero_grad(set_to_none=True)
+
+    if amp_dtype is None:
+        amp_ctx = contextlib.nullcontext()
+    else:
+        device_type = "cuda" if batch["surface_in_seq"].is_cuda else "cpu"
+        amp_ctx = torch.amp.autocast(device_type=device_type, dtype=amp_dtype)
+
+    surface_seq = batch["surface_in_seq"]               # (B, T+1, C_s, H, W)
+    upper_seq = batch["upper_air_in_seq"]               # (B, T+1, C_u, L, H, W)
+    varying_seq = batch["varying_boundary_seq"]         # (B, T+1, C_b, H, W)
+    diag_seq = batch.get("diagnostic_seq") if has_diagnostic else None
+    const_boundary = batch.get("constant_boundary")     # (C, H, W) or (B, C, H, W)
+
+    # Initial state = first frame.
+    state_surface = surface_seq[:, 0]
+    state_upper = upper_seq[:, 0]
+
+    accum_components = {
+        "surface": torch.zeros((), device=state_surface.device, dtype=state_surface.dtype),
+        "upper_air": torch.zeros((), device=state_surface.device, dtype=state_surface.dtype),
+        "diagnostic": torch.zeros((), device=state_surface.device, dtype=state_surface.dtype),
+    }
+    accum_loss = torch.zeros((), device=state_surface.device, dtype=state_surface.dtype)
+
+    with amp_ctx:
+        for k in range(int(unroll_steps)):
+            boundary_in = varying_seq[:, k]
+            out = model(
+                state_surface,
+                const_boundary,
+                boundary_in,
+                state_upper,
+            )
+            if has_diagnostic:
+                next_surface, next_upper, next_diag = out[0], out[1], out[2]
+            else:
+                next_surface, next_upper = out[0], out[1]
+                next_diag = None
+
+            target_surface_k = surface_seq[:, k + 1]
+            target_upper_k = upper_seq[:, k + 1]
+            target_diag_k = diag_seq[:, k + 1] if diag_seq is not None else None
+
+            losses_k = loss_fn(
+                next_surface,
+                next_upper,
+                target_surface_k,
+                target_upper_k,
+                out_diagnostic=next_diag,
+                target_diagnostic=target_diag_k,
+            )
+            accum_loss = accum_loss + losses_k["loss"]
+            for comp in ("surface", "upper_air", "diagnostic"):
+                if comp in losses_k:
+                    val = losses_k[comp]
+                    if not isinstance(val, torch.Tensor):
+                        val = torch.tensor(float(val), device=accum_loss.device, dtype=accum_loss.dtype)
+                    accum_components[comp] = accum_components[comp] + val
+
+            # Detach the boundary path (no grad through it) but keep the
+            # state path so per-step gradients flow back through the rollout.
+            state_surface = next_surface
+            state_upper = next_upper
+
+    total = accum_loss / float(unroll_steps)
+    avg_components = {
+        k: (v / float(unroll_steps)).detach() for k, v in accum_components.items()
+    }
+    losses_out: dict[str, torch.Tensor] = {
+        "loss": total,
+        "surface": avg_components["surface"],
+        "upper_air": avg_components["upper_air"],
+        "diagnostic": avg_components["diagnostic"],
+        "vae_kl": torch.zeros((), device=total.device, dtype=total.dtype),
+    }
+
+    if grad_scaler is not None:
+        grad_scaler.scale(total).backward()
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
+    else:
+        total.backward()
+        optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+    return losses_out
+
+
 def _model_accepts_train_kwarg(model: torch.nn.Module) -> bool:
     """Detect whether the model's forward signature accepts ``train=`` + targets.
 

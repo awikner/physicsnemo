@@ -50,6 +50,7 @@ from .dataset import (
 )
 from .multiyear import ClimateZarrMultiYearDataset, PlasimMultiYearDataset
 from .samplers import LeadTimePairSampler
+from .sequence import IntSampler, SequenceDataset
 from .transforms import ComposeTransform, NanFillTransform, PlasimNormalizer
 
 __all__ = [
@@ -64,8 +65,10 @@ __all__ = [
     "PlasimMultiYearDataset",
     # Other PLASIM datapipe pieces.
     "ComposeTransform",
+    "IntSampler",
     "LeadTimePairSampler",
     "NanFillTransform",
     "PlasimClimateDatapipe",
     "PlasimNormalizer",
+    "SequenceDataset",
 ]

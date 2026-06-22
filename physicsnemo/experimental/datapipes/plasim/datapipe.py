@@ -125,6 +125,7 @@ class PlasimClimateDatapipe(Datapipe):
         yearly_repeating_boundary: bool = False,
         leap_boundary_zarr_path: Optional[str | Path] = None,
         non_leap_boundary_zarr_path: Optional[str | Path] = None,
+        unroll_steps: int = 1,
     ) -> None:
         super().__init__(meta=DatapipeMetaData(name="plasim_climate"))
 
@@ -135,7 +136,7 @@ class PlasimClimateDatapipe(Datapipe):
 
         # Dataset stays IO-only (no transform); the normalizer + NaN-fill run
         # GPU-side after the H2D transfer to fuse into one batched op.
-        self.dataset = PlasimClimateDataset(
+        base_dataset = PlasimClimateDataset(
             zarr_path,
             boundary_zarr_path=boundary_zarr_path,
             yearly_repeating_boundary=yearly_repeating_boundary,
@@ -152,15 +153,34 @@ class PlasimClimateDatapipe(Datapipe):
         else:
             rank, world_size = 0, 1
 
-        self.sampler = LeadTimePairSampler(
-            dataset_length=len(self.dataset),
-            forecast_lead_times=list(forecast_lead_times),
-            num_samples=num_samples_per_epoch,
-            shuffle=shuffle,
-            seed=seed,
-            rank=rank,
-            world_size=world_size,
-        )
+        self.unroll_steps = int(unroll_steps)
+        if self.unroll_steps <= 1:
+            # Single-step mode — emit (init, target_at_t+lead) pairs.
+            self.dataset = base_dataset
+            self.sampler = LeadTimePairSampler(
+                dataset_length=len(self.dataset),
+                forecast_lead_times=list(forecast_lead_times),
+                num_samples=num_samples_per_epoch,
+                shuffle=shuffle,
+                seed=seed,
+                rank=rank,
+                world_size=world_size,
+            )
+        else:
+            # Multi-step rollout — wrap with SequenceDataset and use a plain
+            # int sampler. Each batch carries a leading time axis of size
+            # unroll_steps+1; the trainer consumes the ``_seq`` keys.
+            from .sequence import IntSampler, SequenceDataset
+
+            self.dataset = SequenceDataset(base_dataset, unroll_steps=self.unroll_steps)
+            self.sampler = IntSampler(
+                dataset_length=len(self.dataset),
+                num_samples=num_samples_per_epoch,
+                shuffle=shuffle,
+                seed=seed,
+                rank=rank,
+                world_size=world_size,
+            )
 
         if normalizer is not None:
             normalizer = normalizer.to(self.device)
@@ -197,7 +217,11 @@ class PlasimClimateDatapipe(Datapipe):
             for k, v in batch.items()
         }
         if self.nan_fill is not None:
-            for key in ("constant_boundary", "varying_boundary"):
+            for key in (
+                "constant_boundary",
+                "varying_boundary",
+                "varying_boundary_seq",
+            ):
                 if key in moved and torch.is_tensor(moved[key]):
                     moved[key] = torch.nan_to_num(moved[key], nan=float(self.nan_fill))
         if self.normalizer is not None:

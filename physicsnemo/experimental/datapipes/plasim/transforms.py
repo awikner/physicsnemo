@@ -361,6 +361,36 @@ class PlasimNormalizer:
             out["diagnostic"] = (
                 out["diagnostic"] - self.diagnostic_mean
             ) / self.diagnostic_std
+
+        # Sequence (multi-step rollout) keys carry an extra leading time dim:
+        # surface_in_seq:        (B, T+1, C_s, H, W)
+        # upper_air_in_seq:      (B, T+1, C_u, L, H, W)
+        # varying_boundary_seq:  (B, T+1, C_b, H, W)
+        # diagnostic_seq:        (B, T+1, C_d, H, W)
+        # Stats broadcast naturally — (C_s, 1, 1) right-aligns over the
+        # trailing (C_s, H, W) of every time step. No reshape needed; the
+        # predict_delta mode is intentionally not supported on `_seq` keys
+        # (delta semantics belong to the single-step training path).
+        if "surface_in_seq" in out and self.surface_mean is not None:
+            out["surface_in_seq"] = (
+                out["surface_in_seq"] - self.surface_mean
+            ) / self.surface_std
+        if "upper_air_in_seq" in out and self.upper_air_mean is not None:
+            out["upper_air_in_seq"] = (
+                out["upper_air_in_seq"] - self.upper_air_mean
+            ) / self.upper_air_std
+        if "varying_boundary_seq" in out and self.varying_mean is not None:
+            out["varying_boundary_seq"] = (
+                out["varying_boundary_seq"] - self.varying_mean
+            ) / self.varying_std
+        if (
+            self._normalize_diagnostic
+            and "diagnostic_seq" in out
+            and self.diagnostic_mean is not None
+        ):
+            out["diagnostic_seq"] = (
+                out["diagnostic_seq"] - self.diagnostic_mean
+            ) / self.diagnostic_std
         return out
 
     @classmethod

@@ -70,6 +70,7 @@ from train_loop import (
     _resolve_amp_dtype,
     make_optimizer,
     make_scheduler,
+    multistep_train_step,
     train_step,
 )
 from validate import (
@@ -271,6 +272,7 @@ def build_datapipe(
     shuffle: bool,
     seed: int,
     batch_size_override: Optional[int] = None,
+    unroll_steps: int = 1,
 ) -> PlasimClimateDatapipe:
     """Construct a PlasimClimateDatapipe wired with normalizer + NaN fill."""
     data = cfg.dataset
@@ -333,10 +335,13 @@ def build_datapipe(
         yearly_repeating_boundary=bool(data.yearly_repeating_boundary),
         leap_boundary_zarr_path=_resolve_path(data.leap_boundary_zarr_path),
         non_leap_boundary_zarr_path=_resolve_path(data.non_leap_boundary_zarr_path),
+        unroll_steps=int(unroll_steps),
     )
 
     # Attach the per-variable NaN fill as the dataset's transform so it runs
     # in worker processes (CPU) before pin_memory + device transfer.
+    # In sequence mode the datapipe wraps the dataset in SequenceDataset,
+    # whose `.transform` setter forwards to the base dataset.
     pipe.dataset.transform = nan_fill
     return pipe
 
@@ -552,21 +557,20 @@ def main(cfg: DictConfig) -> None:
             global_epoch = stage_end
             continue
         unroll_steps = int(stage.get("unroll_steps", 1))
-        if unroll_steps != 1:
-            raise NotImplementedError(
-                f"stage {stage_idx} ({stage.get('name', '?')!r}) has "
-                f"unroll_steps={unroll_steps}; multi-step rollout training "
-                "lands in the next commit. For now set unroll_steps: 1."
-            )
         max_iterations = stage.get("max_iterations", float("inf"))
         max_iterations = (
             int(max_iterations) if max_iterations != float("inf") else None
         )
         stage_batch_override = stage.get("batch_size", None)
 
-        # Rebuild the datapipe if the stage overrides batch_size.
-        stage_datapipe = datapipe
-        if stage_batch_override and int(stage_batch_override) != int(cfg.dataset.batch_size):
+        # Rebuild the datapipe when the stage overrides batch_size OR
+        # unroll_steps > 1 (the latter switches the underlying dataset to
+        # sequence emission via SequenceDataset).
+        needs_new_datapipe = (
+            unroll_steps > 1
+            or (stage_batch_override and int(stage_batch_override) != int(cfg.dataset.batch_size))
+        )
+        if needs_new_datapipe:
             stage_datapipe = build_datapipe(
                 cfg,
                 zarr_path=_resolve_path(cfg.dataset.zarr_path),
@@ -574,8 +578,13 @@ def main(cfg: DictConfig) -> None:
                 device=dist.device,
                 shuffle=bool(cfg.dataset.shuffle),
                 seed=int(cfg.seed) + stage_idx,
-                batch_size_override=int(stage_batch_override),
+                batch_size_override=(
+                    int(stage_batch_override) if stage_batch_override else None
+                ),
+                unroll_steps=unroll_steps,
             )
+        else:
+            stage_datapipe = datapipe
 
         steps_per_epoch_stage = len(stage_datapipe)
         scheduler = make_scheduler(
@@ -616,17 +625,31 @@ def main(cfg: DictConfig) -> None:
                 for batch_idx, batch in enumerate(stage_datapipe):
                     if max_iterations is not None and stage_iter >= max_iterations:
                         break
-                    losses = train_step(
-                        model=model,
-                        loss_fn=loss_fn,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        batch=batch,
-                        has_diagnostic=has_diagnostic,
-                        vae_kl_weight=vae_kl_weight,
-                        amp_dtype=amp_dtype,
-                        grad_scaler=grad_scaler,
-                    )
+                    if unroll_steps > 1:
+                        losses = multistep_train_step(
+                            model=model,
+                            loss_fn=loss_fn,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            batch=batch,
+                            has_diagnostic=has_diagnostic,
+                            unroll_steps=unroll_steps,
+                            vae_kl_weight=vae_kl_weight,
+                            amp_dtype=amp_dtype,
+                            grad_scaler=grad_scaler,
+                        )
+                    else:
+                        losses = train_step(
+                            model=model,
+                            loss_fn=loss_fn,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            batch=batch,
+                            has_diagnostic=has_diagnostic,
+                            vae_kl_weight=vae_kl_weight,
+                            amp_dtype=amp_dtype,
+                            grad_scaler=grad_scaler,
+                        )
                     if grad_clip_norm > 0:
                         torch.nn.utils.clip_grad_norm_(
                             inner_model.parameters(), grad_clip_norm
