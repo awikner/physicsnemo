@@ -34,7 +34,9 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
     * ``weight_decay`` — default 0.
     * ``fused`` — when True, requests the fused CUDA kernel for AdamW
       (``torch.optim.AdamW(..., fused=True)``). Requires CUDA; falls back to
-      the eager AdamW with a warning if the runtime can't honor it.
+      the eager AdamW with a warning if the runtime can't honor it. Defaults
+      to True on CUDA (matches PanguWeather's reference SFNO trainer), False
+      otherwise.
     """
     name = getattr(cfg, "optimizer_type", "AdamW")
     if name != "AdamW":
@@ -42,7 +44,7 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
             f"Phase 3 only supports optimizer_type='AdamW' (got {name!r}). "
             "Wire other optimizers (e.g. Muon) as the recipe matures."
         )
-    fused = bool(getattr(cfg, "fused", False))
+    fused = bool(getattr(cfg, "fused", torch.cuda.is_available()))
     kwargs = dict(
         lr=float(cfg.lr),
         weight_decay=float(getattr(cfg, "weight_decay", 0.0)),

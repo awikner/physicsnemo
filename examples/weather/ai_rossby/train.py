@@ -279,6 +279,17 @@ def build_loss(cfg: DictConfig) -> PanguPlasimLoss:
 
 @hydra.main(version_base="1.2", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
+    # A100 TF32 + cudnn autotune. PanguWeather's reference SFNO trainer flips
+    # these on by default; without them ai-rossby was running true fp32 matmul
+    # against PanguWeather's TF32 and losing ~15% throughput per benchmarks.
+    # TF32 changes mantissa precision (10 bits vs 23) but on A100 stays within
+    # ~3 decimals of fp32 — well below typical training noise.
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+
     DistributedManager.initialize()
     dist = DistributedManager()
     logger = PythonLogger("pangu_plasim_train")
@@ -327,6 +338,7 @@ def main(cfg: DictConfig) -> None:
             output_device=dist.device if dist.device.type == "cuda" else None,
             broadcast_buffers=dist.broadcast_buffers,
             find_unused_parameters=dist.find_unused_parameters,
+            gradient_as_bucket_view=True,
         )
     inner_model = model.module if hasattr(model, "module") else model
 
