@@ -369,6 +369,23 @@ RMSE/ACC/spectra/bias/CRPS + plots. Port the DDP all-reduce `MetricsAggregator` 
 - *Smoke* (Delta): same metrics run on real CUDA tensors; for the aggregator, a 2-GPU DDP smoke verifies the
   all-reduce produces the single-GPU value.
 
+**Phase 4a — mid-training rollout validator** *(complete; commits `93543572`, `a6cedddc`)*:
+- New [`examples/weather/ai_rossby/validate.py`](examples/weather/ai_rossby/validate.py) module with
+  `Perturber` API (`Deterministic` / `ReplicateOnly` / `GaussianIC`), streaming
+  lat-weighted `RMSE` + `ACC` aggregators (sufficient-statistic state + DDP all-reduce in `finalize`),
+  and the `RolloutValidator` orchestrator. Ensemble-aware (E replicas per IC live in the batch dim);
+  per-step state held in memory only — no rollout history kept.
+- Wired into [`train.py`](examples/weather/ai_rossby/train.py)'s validation block; metrics flow to
+  W&B via `LaunchLogger` under the `valid/` namespace when `cfg.wandb.enabled=True`.
+- Hydra knobs under `validation.rollout.*` and `wandb.*` in
+  [`conf/config.yaml`](examples/weather/ai_rossby/conf/config.yaml).
+- **Tests**: 15 CPU unit cases (perturbers, streaming-metric closed-form sanity, ACC=1 for identity /
+  ~0 for independent fields, accumulator-over-batches invariance, perfect-model rollout RMSE=0) plus
+  2 Delta A40 smoke cases (deterministic + 3-member GaussianIC ensemble). All green.
+
+**Phase 4b — after-the-fact `inference.py` + `validate.py` CLI**, **Phase 4c — long-rollout bias
+correction**: deferred until needed.
+
 ### Phase 5 — Checkpoint translation + numerical fidelity
 `tools/checkpoint_translation/pangu_plasim.py`: normalize `module.` prefix, prefer `ema_state`, remap keys →
 faithful module state_dict (handles both `PanguPlasim` and `PanguPlasimLegacy`), reconstruct `Integrator`
