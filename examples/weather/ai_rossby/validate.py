@@ -124,12 +124,17 @@ class GaussianIC(Perturber):
         out = _interleave_ensemble(sample, ensemble_size)
         for k, std in self.scales.items():
             if k in out and isinstance(out[k], torch.Tensor) and out[k].is_floating_point():
-                noise = torch.randn(
-                    out[k].shape,
-                    generator=generator,
-                    device=out[k].device,
-                    dtype=out[k].dtype,
-                )
+                # ``generator`` must live on the same device as the noise
+                # tensor. When the caller's generator lives elsewhere (e.g.
+                # CPU generator while the sample is already on CUDA), drop
+                # the explicit generator and use the device default — this
+                # gives up bit-reproducibility across runs but keeps the
+                # ensemble usable. Bit-reproducible call sites should pass
+                # a generator allocated on the right device.
+                kwargs = dict(device=out[k].device, dtype=out[k].dtype)
+                if generator is not None and generator.device == out[k].device:
+                    kwargs["generator"] = generator
+                noise = torch.randn(out[k].shape, **kwargs)
                 out[k] = out[k] + float(std) * noise
         return out
 
@@ -517,7 +522,16 @@ class RolloutValidator:
             rank, world_size = 0, 1
 
         ic_indices = self._select_ic_indices(rank, world_size)
-        gen = torch.Generator(device="cpu").manual_seed(self.seed + epoch * 100003)
+        # Generator on the validator's device — ensures
+        # GaussianIC can use it without a device mismatch.
+        try:
+            gen = torch.Generator(device=self.device).manual_seed(
+                self.seed + epoch * 100003
+            )
+        except (RuntimeError, TypeError):  # fallback for older torch
+            gen = torch.Generator(device="cpu").manual_seed(
+                self.seed + epoch * 100003
+            )
 
         log_step_to_metric_idx = {s: i for i, s in enumerate(self.log_steps)}
 
@@ -673,11 +687,19 @@ class RolloutValidator:
             # Advance: the next iteration's state is this step's prediction.
             # `varying_boundary` for the next step is the boundary AT time
             # t+k, which is the `varying_boundary` of the sample at start=t+k.
+            # In ensemble mode the boundary needs to march along with each
+            # member (E identical copies per IC, contiguous in the batch dim
+            # to match the perturber's repeat_interleave layout).
+            next_boundary = target_batch["varying_boundary"]
+            if self.ensemble_size > 1:
+                next_boundary = next_boundary.repeat_interleave(
+                    self.ensemble_size, dim=0
+                )
             state = {
                 "surface_in": next_surface,
                 "upper_air_in": next_upper_air,
                 "constant_boundary": const_boundary,
-                "varying_boundary": target_batch["varying_boundary"],
+                "varying_boundary": next_boundary,
             }
 
     # ---------------------------------------------------------------- #
