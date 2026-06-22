@@ -755,10 +755,20 @@ class PanguPlasim(Module):
                 raise ValueError(
                     f"Expected 4D surface_in (B, C_s, H, W), got shape {tuple(surface_in.shape)}"
                 )
-            if surface_in.shape[1] != self.num_surface_vars:
+            # Same fix as PanguPlasimLegacy: the patchembed2d packs
+            # surface + land + ocean together, so the validation must
+            # accept ``num_surface_vars + num_land_vars + num_ocean_vars``
+            # channels rather than just ``num_surface_vars``.
+            expected_surface_channels = (
+                self.num_surface_vars + self.num_land_vars + self.num_ocean_vars
+            )
+            if surface_in.shape[1] != expected_surface_channels:
                 raise ValueError(
-                    f"Expected surface_in with {self.num_surface_vars} channels, "
-                    f"got shape {tuple(surface_in.shape)}"
+                    f"Expected surface_in with {expected_surface_channels} "
+                    f"channels (= num_surface_vars={self.num_surface_vars} + "
+                    f"num_land_vars={self.num_land_vars} + "
+                    f"num_ocean_vars={self.num_ocean_vars}), got shape "
+                    f"{tuple(surface_in.shape)}"
                 )
             B = surface_in.shape[0]
             if surface_in.shape[-2:] != (n_lat, n_lon):

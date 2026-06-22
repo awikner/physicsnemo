@@ -157,8 +157,9 @@ def build_target_model_from_yaml(model_yaml: Path):
     with open(model_yaml) as fh:
         cfg = yaml.safe_load(fh)
 
-    # Strip Hydra-only metadata keys.
-    for k in ("name", "target", "model_type"):
+    # Strip Hydra-only metadata keys (Phase C added `module:` for
+    # Module.instantiate; it's not a SfnoPlasim constructor arg).
+    for k in ("name", "module", "target", "model_type"):
         cfg.pop(k, None)
     return SfnoPlasim(**cfg)
 

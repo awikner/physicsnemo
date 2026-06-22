@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mirrors PanguWeather v2.0 PANGU_S2S_infer_mar_aug_multigpu.yaml:
+# ERA5-based S2S forecasting, embed_dim=240, 17 pressure levels at
+# 180x360, separate land + ocean heads in the recovery layer.
+# Backbone defaults (num_heads=(6,12,12,6), depths=(2,6,6,2)) match
+# PanguWeather's PanguModel_Plasim ctor defaults.
+#
+# The S2S checkpoint at
+# /work/hdd/bdiu/awikner/PanguWeather-rajatm2/v2.0/results/S2S/2000/training_checkpoints/best_ckpt.tar
+# carries deterministic weights only (no layer_mu / layer_sigma / *_e2
+# tensors), so it loads cleanly into PanguPlasimLegacy. To load it
+# into the VAE PanguPlasim class instead, the VAE branches are left
+# at random init.
+
+name: PanguPlasimLegacy
+module: physicsnemo.experimental.models.pangu_plasim
+
+# Variable groups — ERA5 S2S channel set.
+surface_variables: ['2m_temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
+                    'mean_sea_level_pressure', 'surface_pressure']
+upper_air_variables: ['temperature', 'u_component_of_wind', 'v_component_of_wind',
+                      'specific_humidity', 'geopotential']
+constant_boundary_variables: ['land_sea_mask', 'geopotential_at_surface']
+varying_boundary_variables: ['toa_incident_solar_radiation']
+land_variables: ['volumetric_soil_water_layer_1', 'soil_temperature_level_1', 'skin_temperature']
+ocean_variables: ['sea_surface_temperature']
+diagnostic_variables: ['total_precipitation_24hr', 'mean_top_net_long_wave_radiation_flux']
+
+# Grid / level geometry.
+levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
+horizontal_resolution: [180, 360]
+patch_size: [2, 2, 2]
+window_size: [2, 6, 10]
+
+# Backbone capacity.
+depths: [2, 6, 6, 2]
+num_heads: [6, 12, 12, 6]
+embed_dim: 240
+updown_scale_factor: 2
+
+# Heads + behaviour switches (mirror S2S config).
+predict_delta: False
+mask_output: False
+upper_air_boundary: False
+vertical_windowing: True
+subpixel_deconv: True
+polar_pad: False
+grid_has_poles: False
+recovery_head: True
+diagnostic_head: False
+has_diagnostic: True
+
+drop_rate: 0.0
+checkpointing: 3
+use_reentrant: False
