@@ -185,6 +185,28 @@ def test_load_state_dict_bare_ordered_dict_round_trip(tmp_path):
     assert "layer.weight" in out
 
 
+def test_load_state_dict_handles_dot_tar_extension(tmp_path):
+    """PanguWeather writes ``ckpt_epoch_*.tar`` / ``best_ckpt.tar`` /
+    ``ckpt_latest.tar`` via ``torch.save`` (not actual tarballs).
+    ``torch.load`` reads them transparently regardless of suffix —
+    confirm the translator's load path accepts them.
+    """
+    blob = {
+        "iters": 1,
+        "epoch": 1,
+        "model_state": OrderedDict({"module.layer1.weight": torch.tensor([3.14])}),
+        "ema_state": OrderedDict({"module.layer1.weight": torch.tensor([2.71])}),
+    }
+    p = tmp_path / "ckpt_latest.tar"  # PanguWeather's actual filename pattern
+    torch.save(blob, p)
+    # Default prefers EMA.
+    sd = load_panguweather_state_dict(p)
+    translated = translate_state_dict(sd)
+    # Stripped `module.` prefix, retained the value.
+    assert "layer1.weight" in translated
+    assert float(translated["layer1.weight"].item()) == pytest.approx(2.71)
+
+
 # ---------------------------------------------------------------------------
 # build_target_model_from_yaml — class resolution
 # ---------------------------------------------------------------------------

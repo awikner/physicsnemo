@@ -3,9 +3,17 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-r"""Translate PanguWeather v2.0 PANGU_PLASIM ``.pt`` checkpoints to ``.mdlus``.
+r"""Translate PanguWeather v2.0 PANGU_PLASIM checkpoints to ``.mdlus``.
 
-PanguWeather's checkpoint format (per ``train.py:3573``):
+PanguWeather writes checkpoints with the ``.tar`` extension (e.g.
+``ckpt_epoch_42.tar``, ``best_ckpt.tar``, ``ckpt_latest.tar``) but the
+files are **NOT** actual tarballs — they're plain ``torch.save(dict,
+path)`` blobs with a ``.tar`` suffix (PanguWeather's convention to
+signal "bundle of state dicts"). ``torch.load`` reads them back
+transparently regardless of suffix; this translator accepts any
+extension via ``--source``.
+
+PanguWeather's checkpoint payload (per ``train.py:3570``):
 
 .. code-block:: python
 
