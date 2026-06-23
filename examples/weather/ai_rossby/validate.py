@@ -594,6 +594,25 @@ class RolloutValidator:
         x = x.view(n_ic, self.ensemble_size, *rest)
         return x.mean(dim=1)
 
+    def _denorm_pred_truth(
+        self,
+        kind: str,
+        pred: torch.Tensor,
+        truth: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(pred, truth)`` in physical units for the named channel group.
+
+        ``kind`` is one of ``"surface"``, ``"upper_air"``, ``"diagnostic"``.
+        When ``self.normalizer is None`` (or the normalizer has no stats
+        for ``kind``) the inputs pass through unchanged — the rollout was
+        already running in raw units in that case.
+        """
+        if self.normalizer is None:
+            return pred, truth
+        pred_phys = self.normalizer.denormalize_state(**{kind: pred})[kind]
+        truth_phys = self.normalizer.denormalize_state(**{kind: truth})[kind]
+        return pred_phys, truth_phys
+
     def _rollout_batch(
         self,
         model,
@@ -639,12 +658,23 @@ class RolloutValidator:
             # time t+k is that sample's `surface_in` / `upper_air_in` (the
             # state AT that time) — NOT `target_surface` (which is the
             # dataset's lead-1 prediction from t+k, i.e. the state at t+k+1).
+            #
+            # RMSE values are reported in PHYSICAL UNITS: both pred and truth
+            # tensors are de-normalized here before the aggregator update so
+            # the per-variable RMSE has the same units as the underlying field
+            # (K for temperature, Pa for pressure, …). Per the project
+            # convention, all per-variable metrics are in physical units;
+            # correlation metrics (ACC) are unit-invariant so we pass the
+            # tensors through as-is to the ACC aggregator.
             if k in log_step_to_metric_idx:
                 m_idx = log_step_to_metric_idx[k]
                 pred_surface = self._ensemble_mean(next_surface, n_ic)
                 truth_surface = target_batch["surface_in"]
+                pred_surface_phys, truth_surface_phys = self._denorm_pred_truth(
+                    "surface", pred_surface, truth_surface
+                )
                 self.rmse_surface.update(
-                    m_idx, pred_surface, truth_surface, self.register_lat
+                    m_idx, pred_surface_phys, truth_surface_phys, self.register_lat
                 )
                 if self.acc_surface is not None:
                     self.acc_surface.update(
@@ -653,8 +683,11 @@ class RolloutValidator:
                 if self.has_upper_air and "upper_air_in" in target_batch:
                     pred_upper = self._ensemble_mean(next_upper_air, n_ic)
                     truth_upper = target_batch["upper_air_in"]
+                    pred_upper_phys, truth_upper_phys = self._denorm_pred_truth(
+                        "upper_air", pred_upper, truth_upper
+                    )
                     self.rmse_upper_air.update(
-                        m_idx, pred_upper, truth_upper, self.register_lat
+                        m_idx, pred_upper_phys, truth_upper_phys, self.register_lat
                     )
                     if self.acc_upper_air is not None:
                         self.acc_upper_air.update(
@@ -676,8 +709,11 @@ class RolloutValidator:
                     if "diagnostic" in target_batch:
                         pred_diag = self._ensemble_mean(next_diag, n_ic)
                         truth_diag = target_batch["diagnostic"]
+                        pred_diag_phys, truth_diag_phys = self._denorm_pred_truth(
+                            "diagnostic", pred_diag, truth_diag
+                        )
                         self.rmse_diagnostic.update(
-                            m_idx, pred_diag, truth_diag, self.register_lat
+                            m_idx, pred_diag_phys, truth_diag_phys, self.register_lat
                         )
                         if self.acc_diagnostic is not None:
                             self.acc_diagnostic.update(

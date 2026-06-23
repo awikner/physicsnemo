@@ -415,6 +415,22 @@ Mid-training: autoregressive rollout → lat-weighted RMSE (mse+reductions) + AC
 with dayofyear climatology), long-rollout bias, ensemble validation, power spectra. After-the-fact:
 `inference.py` (shared stepper, IC-perturbation + MC-dropout ensembles) → NetCDF; `validate.py` →
 RMSE/ACC/spectra/bias/CRPS + plots. Port the DDP all-reduce `MetricsAggregator` behavior.
+
+> **Convention — units for validation metrics.** Unless a metric is explicitly
+> *correlation-shaped* (and therefore unit-invariant under affine z-scoring —
+> ACC, anomaly correlation, pattern correlation, rank correlations), every
+> per-variable validation metric this project adds **must be computed in
+> physical units**. The rollout itself runs in normalized space to match the
+> training-loss frame, so any new metric that consumes ``pred`` / ``truth``
+> tensors is responsible for calling ``PlasimNormalizer.denormalize_state``
+> (or its equivalent) before its aggregator update — same pattern
+> ``RolloutValidator`` (per-variable RMSE) and ``run_climatology``
+> (per-variable mean / variance / binned stats) follow today. Same rule for
+> on-disk forecast dumps (inference + climatology chunks) — those are in
+> physical units. ACC's climatology vector is the one place where matching
+> *spaces* across the three inputs (pred / truth / climatology) is what
+> matters, not the absolute unit; document the chosen space explicitly when
+> wiring a new ACC variant.
 **Tests**:
 - *Unit*: each new metric (dayofyear-clim ACC aggregator, bias, CRPS, QBO) against analytic/reference values
   on synthetic tensors.

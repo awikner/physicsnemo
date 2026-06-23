@@ -390,6 +390,76 @@ def test_rollout_validator_perfect_model_zero_rmse():
     assert out["rmse_step1_upper_air"] < 1e-5
 
 
+class _AffineNormalizer:
+    """Minimum normalizer: callable z-score forward + denormalize_state inverse."""
+
+    def __init__(self, mean: float = 0.0, std: float = 1.0):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, sample):
+        out = dict(sample)
+        for k in ("surface_in", "upper_air_in", "target_surface", "target_upper_air"):
+            if k in out:
+                out[k] = (out[k] - self.mean) / self.std
+        return out
+
+    def denormalize_state(self, *, surface=None, upper_air=None, diagnostic=None):
+        out = {}
+        if surface is not None:
+            out["surface"] = surface * self.std + self.mean
+        if upper_air is not None:
+            out["upper_air"] = upper_air * self.std + self.mean
+        if diagnostic is not None:
+            out["diagnostic"] = diagnostic
+        return out
+
+
+def test_rollout_validator_rmse_is_in_physical_units():
+    """RMSE reported by the validator must be invariant to the normalizer's
+    scale + shift — it's computed on de-normalized tensors. So passing a
+    normalizer with (std=5.0, mean=100.0) must produce the same RMSE as
+    passing no normalizer at all (the validator runs in raw units when
+    normalizer=None)."""
+    ds_raw = _StubDataset(n_time=8)
+    model = _StubModel()
+
+    # Reference run — no normalizer (everything stays in raw units).
+    rv_raw = RolloutValidator(
+        dataset=ds_raw,
+        log_steps=[1, 2],
+        device=torch.device("cpu"),
+        ensemble_size=1,
+        perturber=Deterministic(),
+        has_diagnostic=False,
+        batch_size=1,
+        max_initial_conditions=2,
+        ic_stride=1,
+    )
+    raw_out = rv_raw.run(model, epoch=0)
+
+    # Same run but with a normalizer that z-scores by (std=5.0, mean=100.0).
+    # The validator will normalize on the way in, but RMSE update is on the
+    # de-normalized tensors, so the per-step RMSE values must match.
+    rv_norm = RolloutValidator(
+        dataset=_StubDataset(n_time=8),
+        log_steps=[1, 2],
+        device=torch.device("cpu"),
+        ensemble_size=1,
+        perturber=Deterministic(),
+        has_diagnostic=False,
+        batch_size=1,
+        max_initial_conditions=2,
+        ic_stride=1,
+        normalizer=_AffineNormalizer(mean=100.0, std=5.0),
+    )
+    norm_out = rv_norm.run(model, epoch=0)
+    for k in raw_out:
+        assert math.isclose(raw_out[k], norm_out[k], rel_tol=1e-5, abs_tol=1e-6), (
+            f"{k} differs: raw={raw_out[k]} vs normalized={norm_out[k]}"
+        )
+
+
 def test_streaming_metric_state_shapes_match_expected_for_known_layout():
     """Internal buffer sanity for a typical SFNO_PLASIM_5412 layout."""
     metric = StreamingLatWeightedRMSE(

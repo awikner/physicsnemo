@@ -614,19 +614,51 @@ def run_climatology(
             )
             bin_idx = torch.full((1,), bin_value, dtype=torch.long, device=device)
 
+            # Aggregator stats are accumulated in PHYSICAL UNITS so the
+            # finalized climatology mean / variance / binned stats can be
+            # interpreted directly against ERA5 or PLASIM reference
+            # climatologies. When the normalizer is None the inputs are
+            # already physical and denormalize_state is a no-op.
+            if normalizer is not None:
+                pred_phys = normalizer.denormalize_state(
+                    surface=pred_surface_mean,
+                    upper_air=pred_upper_mean,
+                    diagnostic=pred_diag_mean,
+                )
+                truth_phys = normalizer.denormalize_state(
+                    surface=truth_t["surface_in"],
+                    upper_air=truth_t["upper_air_in"],
+                    diagnostic=truth_t.get("diagnostic"),
+                )
+                pred_surface_phys = pred_phys["surface"]
+                pred_upper_phys = pred_phys["upper_air"]
+                pred_diag_phys = pred_phys.get("diagnostic")
+                truth_surface_phys = truth_phys["surface"]
+                truth_upper_phys = truth_phys["upper_air"]
+                truth_diag_phys = truth_phys.get("diagnostic")
+            else:
+                pred_surface_phys = pred_surface_mean
+                pred_upper_phys = pred_upper_mean
+                pred_diag_phys = pred_diag_mean
+                truth_surface_phys = truth_t["surface_in"]
+                truth_upper_phys = truth_t["upper_air_in"]
+                truth_diag_phys = truth_t.get("diagnostic")
+
             _update_set(
                 pred_set["surface"], truth_set["surface"],
-                pred_surface_mean, truth_t["surface_in"], bin_idx,
+                pred_surface_phys, truth_surface_phys, bin_idx,
             )
             _update_set(
                 pred_set["upper_air"], truth_set["upper_air"],
-                pred_upper_mean, truth_t["upper_air_in"], bin_idx,
+                pred_upper_phys, truth_upper_phys, bin_idx,
             )
-            if pred_diag_mean is not None and "diagnostic" in pred_set:
+            if pred_diag_phys is not None and "diagnostic" in pred_set:
                 _update_set(
                     pred_set["diagnostic"], truth_set["diagnostic"],
-                    pred_diag_mean,
-                    truth_t.get("diagnostic", torch.zeros_like(pred_diag_mean)),
+                    pred_diag_phys,
+                    truth_diag_phys
+                    if truth_diag_phys is not None
+                    else torch.zeros_like(pred_diag_phys),
                     bin_idx,
                 )
 

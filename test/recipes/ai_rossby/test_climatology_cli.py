@@ -171,6 +171,75 @@ def test_run_climatology_filename_includes_chunk_idx_and_ic(tmp_path):
         assert bn.endswith(".zarr")
 
 
+class _AffineNormalizer:
+    """Identical to the one in test_validate.py — local copy keeps the
+    test file self-contained (test_validate is intentionally not imported)."""
+
+    def __init__(self, mean: float = 0.0, std: float = 1.0):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, sample):
+        out = dict(sample)
+        for k in ("surface_in", "upper_air_in", "target_surface", "target_upper_air"):
+            if k in out:
+                out[k] = (out[k] - self.mean) / self.std
+        return out
+
+    def denormalize_state(self, *, surface=None, upper_air=None, diagnostic=None):
+        out = {}
+        if surface is not None:
+            out["surface"] = surface * self.std + self.mean
+        if upper_air is not None:
+            out["upper_air"] = upper_air * self.std + self.mean
+        if diagnostic is not None:
+            out["diagnostic"] = diagnostic
+        return out
+
+
+def test_run_climatology_aggregator_stats_in_physical_units(tmp_path):
+    """With a normalizer in play, the finalized climatology aggregator's
+    pred mean must match the raw (un-normalized) IC's mean — proving the
+    aggregator accumulates in PHYSICAL units, not normalized space."""
+    ds = _StubDataset(n_time=8)
+    model = _StubModel(n_surface=2, n_upper=5, n_levels=4)
+    norm = _AffineNormalizer(mean=10.0, std=2.0)
+    with AsyncForecastWriter(max_in_flight=2, num_workers=2) as writer:
+        agg = run_climatology(
+            model, ds,
+            normalizer=norm,
+            device=torch.device("cpu"),
+            ic_indices=[0],
+            max_step=2,
+            n_bins=2,
+            steps_per_bin=1,
+            ensemble_size=1,
+            perturber=None,
+            has_diagnostic=False,
+            seed=0,
+            track_bins=True,
+            track_binned_variance=False,
+            forecast_chunk_steps=None,  # aggregator only
+            forecast_writer=writer,
+            forecast_output_dir=str(tmp_path),
+            model_name="SfnoPlasim",
+            run_name="phys",
+            forecast_extension="zarr",
+            include_ic_in_forecast=False,
+        )
+    # Persistence model returns the input each step → pred_surface at step k
+    # equals the (normalized) IC. After denormalize, the aggregator should
+    # have seen IC value=ds._surface[0] in raw units, repeated twice.
+    expected_raw = ds._surface[0]  # (2, 8, 8) raw units
+    pred_mean = agg["pred"]["surface"]["mean"].cpu()  # finalized = mean of inputs
+    # The persistence rollout produces the same IC at each of the two scored
+    # steps, so the mean equals the IC itself.
+    assert torch.allclose(pred_mean, expected_raw, atol=1e-4), (
+        f"pred mean {pred_mean.mean():.4f} != raw IC mean "
+        f"{expected_raw.mean():.4f}; aggregator likely accumulating in normalized space"
+    )
+
+
 def test_run_climatology_ensemble_chunk_shape(tmp_path):
     agg = _run_with_chunks(
         tmp_path, chunk_steps=2, max_step=4, include_ic=False, ensemble_size=3
