@@ -349,6 +349,68 @@ def test_normalizer_predict_delta_uses_delta_std():
 
 @_skip_no_fixture
 @_skip_no_stats
+def test_normalizer_denormalize_state_inverts_call():
+    """denormalize_state is the exact inverse of __call__ on the prognostic
+    state channels (predict_delta=False mode — the inference path)."""
+    ds = PlasimClimateDataset(_fixture_path())
+    norm = PlasimNormalizer.from_dataset(ds, mean_path=_MEAN_PATH, std_path=_STD_PATH)
+    sample = ds[0]
+    normalized = norm(sample)
+    physical = norm.denormalize_state(
+        surface=normalized["surface_in"],
+        upper_air=normalized["upper_air_in"],
+        diagnostic=normalized.get("diagnostic"),
+    )
+    assert torch.allclose(
+        physical["surface"], sample["surface_in"], rtol=1e-5, atol=1e-5
+    )
+    assert torch.allclose(
+        physical["upper_air"], sample["upper_air_in"], rtol=1e-5, atol=1e-5
+    )
+    # Diagnostic was not z-scored at call time → denormalize must be a no-op.
+    if "diagnostic" in sample:
+        assert torch.allclose(
+            physical["diagnostic"], sample["diagnostic"], rtol=1e-5, atol=1e-5
+        )
+
+
+@_skip_no_fixture
+@_skip_no_stats
+def test_normalizer_denormalize_state_passes_through_when_normalizer_off():
+    """When the matching mean/std isn't registered (or normalize_* is off),
+    denormalize_state returns the input unchanged for that channel group."""
+    ds = PlasimClimateDataset(_fixture_path())
+    norm = PlasimNormalizer.from_dataset(
+        ds,
+        mean_path=_MEAN_PATH,
+        std_path=_STD_PATH,
+        normalize_diagnostic=False,  # diagnostic was never normalized
+    )
+    diag_dummy = torch.randn(1, 8, 8)
+    out = norm.denormalize_state(diagnostic=diag_dummy)
+    assert torch.equal(out["diagnostic"], diag_dummy)
+
+
+@_skip_no_fixture
+@_skip_no_stats
+@_skip_no_delta
+def test_normalizer_denormalize_state_raises_in_predict_delta_mode():
+    """Tendency-mode predictions need the previous state to add back; the
+    denormalize helper can't invert them on its own, so it must raise loud."""
+    ds = PlasimClimateDataset(_fixture_path())
+    norm = PlasimNormalizer.from_dataset(
+        ds,
+        mean_path=_MEAN_PATH,
+        std_path=_STD_PATH,
+        predict_delta=True,
+        delta_std_path=_delta_std_path(),
+    )
+    with pytest.raises(RuntimeError, match=r"tendency-mode"):
+        norm.denormalize_state(surface=torch.randn(2, 8, 8))
+
+
+@_skip_no_fixture
+@_skip_no_stats
 def test_normalizer_predict_delta_requires_delta_std():
     ds = PlasimClimateDataset(_fixture_path())
     with pytest.raises(ValueError, match="predict_delta=True requires delta_std_path"):

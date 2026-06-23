@@ -393,6 +393,55 @@ class PlasimNormalizer:
             ) / self.diagnostic_std
         return out
 
+    def denormalize_state(
+        self,
+        *,
+        surface: Optional[torch.Tensor] = None,
+        upper_air: Optional[torch.Tensor] = None,
+        diagnostic: Optional[torch.Tensor] = None,
+    ) -> dict[str, torch.Tensor]:
+        r"""Map normalized state tensors back to physical units.
+
+        Inverse of :meth:`__call__` for the prognostic state channels.
+        Inputs may have any leading dims (batch, ensemble, frame, …) as
+        long as the trailing dims align with the registered stats
+        (``(C, H, W)`` for surface / diagnostic, ``(C, L, H, W)`` for
+        upper-air). ``None`` inputs are skipped.
+
+        Only the ``predict_delta=False`` semantics are inverted —
+        tendency-mode predictions would need the *previous* state to add
+        back, which is a different kind of operation than this helper
+        provides. The forecast path (this codepath's only caller)
+        always runs in non-delta mode at inference time.
+
+        Diagnostic: if ``normalize_diagnostic=False`` the diagnostic
+        channel was never z-scored at ``__call__`` time, so this method
+        returns it unchanged (an idempotent passthrough).
+        """
+        if self._predict_delta:
+            raise RuntimeError(
+                "denormalize_state cannot invert tendency-mode predictions; "
+                "predict_delta=True needs the previous physical-units state "
+                "to add back. Use predict_delta=False for inference."
+            )
+        out: dict[str, torch.Tensor] = {}
+        if surface is not None and self.surface_mean is not None:
+            out["surface"] = surface * self.surface_std + self.surface_mean
+        elif surface is not None:
+            out["surface"] = surface
+        if upper_air is not None and self.upper_air_mean is not None:
+            out["upper_air"] = upper_air * self.upper_air_std + self.upper_air_mean
+        elif upper_air is not None:
+            out["upper_air"] = upper_air
+        if diagnostic is not None:
+            if self._normalize_diagnostic and self.diagnostic_mean is not None:
+                out["diagnostic"] = (
+                    diagnostic * self.diagnostic_std + self.diagnostic_mean
+                )
+            else:
+                out["diagnostic"] = diagnostic
+        return out
+
     @classmethod
     def from_dataset(
         cls,

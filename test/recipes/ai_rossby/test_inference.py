@@ -335,6 +335,100 @@ def test_streaming_per_ic_with_diagnostic_writes_diag_var(tmp_path):
     assert out["pred_diagnostic"].shape == (1, 2, 1, 8, 8)
 
 
+def test_build_per_ic_dataset_attaches_ic_time_scalar_coord():
+    """A 0-d ic_time scalar coord is attached when the dataset has time."""
+    t0 = np.datetime64("1981-03-15T06:00", "ns")
+    ds = _build_per_ic_dataset(
+        ic_index=42,
+        n_frames=3,
+        ensemble_size=1,
+        lat=np.linspace(-90, 90, 4, dtype=np.float32),
+        lon=np.linspace(0, 360, 4, endpoint=False, dtype=np.float32),
+        surface_variables=["pl"],
+        upper_air_variables=["ta"],
+        diagnostic_variables=[],
+        levels=[0.5],
+        n_levels=1,
+        has_diagnostic=False,
+        time_values=[t0, t0 + np.timedelta64(6, "h"), t0 + np.timedelta64(12, "h")],
+        ic_time=t0,
+    )
+    assert "ic_time" in ds.coords
+    # 0-d scalar coord.
+    assert ds["ic_time"].ndim == 0
+    assert np.datetime64(ds["ic_time"].values, "ns") == t0
+    # ic_time string attr present too.
+    assert "ic_time" in ds.attrs
+    # And ds.time.isel(frame=0) agrees — the two are siblings.
+    assert np.datetime64(ds["time"].isel(frame=0).values, "ns") == t0
+
+
+class _AffineNormalizer:
+    """Minimum normalizer stub: applies / inverts scalar affine z-score.
+
+    Mirrors the API surface that inference + climatology rely on:
+    callable for the forward (sample-dict in / sample-dict out) and a
+    denormalize_state() inverse for the prediction tensors.
+    """
+
+    def __init__(self, mean: float = 1.5, std: float = 2.0):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, sample):
+        out = dict(sample)
+        for k in ("surface_in", "upper_air_in"):
+            if k in out:
+                out[k] = (out[k] - self.mean) / self.std
+        return out
+
+    def denormalize_state(self, *, surface=None, upper_air=None, diagnostic=None):
+        out = {}
+        if surface is not None:
+            out["surface"] = surface * self.std + self.mean
+        if upper_air is not None:
+            out["upper_air"] = upper_air * self.std + self.mean
+        if diagnostic is not None:
+            out["diagnostic"] = diagnostic
+        return out
+
+
+def test_streaming_per_ic_writes_in_physical_units(tmp_path):
+    """The on-disk values are denormalized — they match the raw IC, not
+    the (mean=1.5, std=2.0)-normalized version of it."""
+    ds = _StubDataset(n_time=10)
+    model = _StubModel(n_surface=2, n_upper=5, n_levels=4)
+    norm = _AffineNormalizer(mean=1.5, std=2.0)
+    with AsyncForecastWriter(max_in_flight=1, num_workers=1) as writer:
+        paths = run_inference_streaming_per_ic(
+            model,
+            ds,
+            normalizer=norm,
+            device=torch.device("cpu"),
+            ic_indices=[2],
+            max_step=2,
+            writer=writer,
+            output_dir=str(tmp_path),
+            model_name="SfnoPlasim",
+            run_name="phys",
+            output_format="zarr",
+            ensemble_size=1,
+            perturber=None,
+            has_diagnostic=False,
+            seed=0,
+        )
+    file = xr.open_zarr(paths[0])
+    raw_ic = ds._surface[2].numpy()
+    # Frame 0 written value matches the raw IC (denormalized → physical).
+    np.testing.assert_allclose(
+        file["pred_surface"].values[0, 0], raw_ic, atol=1e-5
+    )
+    # And NOT the normalized version (would have been (raw - 1.5)/2.0).
+    assert not np.allclose(
+        file["pred_surface"].values[0, 0], (raw_ic - 1.5) / 2.0, atol=1e-3
+    )
+
+
 def test_run_inference_writes_netcdf_roundtrip(tmp_path):
     """End-to-end: run inference, save NetCDF, reload, verify shape."""
     ds = _StubDataset(n_time=10)

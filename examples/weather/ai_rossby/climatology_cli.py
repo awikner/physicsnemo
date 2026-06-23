@@ -267,6 +267,7 @@ class _ForecastChunkBuffer:
         *,
         ic_index: int,
         run_id: str,
+        ic_time=None,
     ) -> xr.Dataset:
         """Stack the buffered frames into an xr.Dataset for the writer."""
         if self.is_empty:
@@ -314,6 +315,9 @@ class _ForecastChunkBuffer:
                 np.asarray([m["time_value"] for m in self._frame_meta]),
             )
 
+        if ic_time is not None:
+            # 0-d scalar coord — actual datetime the IC was drawn from.
+            coords["ic_time"] = np.asarray(ic_time)
         ds = xr.Dataset(data_vars=data_vars, coords=coords)
         ds.attrs["ic_index"] = int(ic_index)
         ds.attrs["chunk_index"] = int(self._chunk_idx)
@@ -321,6 +325,8 @@ class _ForecastChunkBuffer:
         ds.attrs["run_id"] = str(run_id)
         ds.attrs["step_start"] = int(self._frame_meta[0]["step"])
         ds.attrs["step_end"] = int(self._frame_meta[-1]["step"])
+        if ic_time is not None:
+            ds.attrs["ic_time"] = str(ic_time)
         return ds
 
     def flush(
@@ -333,6 +339,7 @@ class _ForecastChunkBuffer:
         run_name: str,
         extension: str,
         save_variables: Optional[dict] = None,
+        ic_time=None,
     ) -> Optional[str]:
         """If non-empty, build dataset, submit, advance chunk counter.
 
@@ -343,11 +350,15 @@ class _ForecastChunkBuffer:
         contract as the inference path (see
         :func:`async_writer.subset_forecast_dataset`). ``None`` keeps
         the chunk intact.
+
+        ``ic_time``, when provided, is attached as a scalar coord +
+        attribute so downstream consumers can recover the actual IC
+        datetime without indexing the (possibly subsetted) frame axis.
         """
         if self.is_empty:
             return None
         run_id = f"{model_name}__{run_name}__ic{ic_index}"
-        ds = self.to_dataset(ic_index=ic_index, run_id=run_id)
+        ds = self.to_dataset(ic_index=ic_index, run_id=run_id, ic_time=ic_time)
         if save_variables:
             ds = subset_forecast_dataset(
                 ds,
@@ -516,6 +527,13 @@ def run_climatology(
                 layout=layout,
                 has_diagnostic=has_diagnostic,
             )
+        # IC datetime (cftime-aware) when the dataset has a time coord —
+        # plumbed into every chunk written for this IC.
+        ic_time_value = (
+            layout["time"][int(ic)]
+            if layout["time"] is not None and int(ic) < len(layout["time"])
+            else None
+        )
 
         init = _fetch_input_at(dataset, int(ic), normalizer, device)
         state = perturber(init, ensemble_size, generator=rng)
@@ -615,6 +633,9 @@ def run_climatology(
             # Optional forecast chunk write — runs after aggregator update
             # so the aggregator state always reflects "all frames ever
             # observed", independent of whether the chunk has been flushed.
+            # Chunk dumps are written in PHYSICAL UNITS (the aggregator
+            # statistics above stay in normalized space — that's a separate
+            # axis from the on-disk chunk payload).
             if chunk_buf is not None:
                 t_k = (
                     layout["time"][int(ic) + int(k)]
@@ -622,13 +643,26 @@ def run_climatology(
                     and int(ic) + int(k) < len(layout["time"])
                     else None
                 )
+                phys = (
+                    normalizer.denormalize_state(
+                        surface=next_surface,
+                        upper_air=next_upper,
+                        diagnostic=next_diag,
+                    )
+                    if normalizer is not None
+                    else {
+                        "surface": next_surface,
+                        "upper_air": next_upper,
+                        "diagnostic": next_diag,
+                    }
+                )
                 # next_surface has leading dim (ensemble,) when ensemble_size>1,
                 # else (1, ...). Cast to (E, ...) numpy.
-                ns_np = next_surface.cpu().numpy().astype(np.float32)
-                nu_np = next_upper.cpu().numpy().astype(np.float32)
+                ns_np = phys["surface"].cpu().numpy().astype(np.float32)
+                nu_np = phys["upper_air"].cpu().numpy().astype(np.float32)
                 nd_np = (
-                    next_diag.cpu().numpy().astype(np.float32)
-                    if next_diag is not None
+                    phys["diagnostic"].cpu().numpy().astype(np.float32)
+                    if phys.get("diagnostic") is not None
                     else None
                 )
                 chunk_buf.append(
@@ -647,6 +681,7 @@ def run_climatology(
                         run_name=run_name,
                         extension=forecast_extension,
                         save_variables=forecast_save_variables,
+                        ic_time=ic_time_value,
                     )
                     if path is not None:
                         all_forecast_paths.append(path)
@@ -672,6 +707,7 @@ def run_climatology(
                 run_name=run_name,
                 extension=forecast_extension,
                 save_variables=forecast_save_variables,
+                ic_time=ic_time_value,
             )
             if path is not None:
                 all_forecast_paths.append(path)

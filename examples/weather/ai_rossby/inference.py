@@ -210,6 +210,7 @@ def _build_per_ic_dataset(
     n_levels: int,
     has_diagnostic: bool,
     time_values: Optional[Sequence] = None,
+    ic_time=None,
 ) -> xr.Dataset:
     r"""Allocate one xarray container per IC.
 
@@ -260,12 +261,21 @@ def _build_per_ic_dataset(
         coords["diag_var"] = ("diag_var", np.asarray(list(diagnostic_variables)))
     if time_values is not None:
         coords["time"] = ("frame", np.asarray(list(time_values)))
+    if ic_time is not None:
+        # 0-d scalar coord — gives users `ds.ic_time` for the actual
+        # datetime the IC was drawn from (in the dataset's cftime
+        # calendar). Duplicates ds.time.isel(frame=0) but is much
+        # cheaper to inspect and survives an upper_air-only subset
+        # that drops the frame axis.
+        coords["ic_time"] = np.asarray(ic_time)
 
     ds = xr.Dataset(data_vars=data_vars, coords=coords)
     ds.attrs["ic_index"] = int(ic_index)
     ds.attrs["ensemble_size"] = int(ensemble_size)
     ds.attrs["max_step"] = int(n_frames - 1)
     ds.attrs["frame_zero_is_ic"] = 1
+    if ic_time is not None:
+        ds.attrs["ic_time"] = str(ic_time)
     return ds
 
 
@@ -335,8 +345,17 @@ def run_inference_streaming_per_ic(
 
     Frame 0 of each per-IC dataset is the **initial condition** (the
     observed state at ``ic_index``); frames 1..max_step are the
-    autoregressive predictions. This makes each file self-contained
-    for downstream replay / plotting.
+    autoregressive predictions. The on-disk values are in **physical
+    units** — the rollout runs in normalized space (matching the
+    training-time loss frame) but predictions are de-normalized via the
+    ``normalizer`` immediately before being written into the per-IC
+    Dataset. When ``normalizer`` is ``None`` the rollout already runs
+    in raw units, so the saved values are also raw.
+
+    Each per-IC dataset carries a scalar ``ic_time`` coord (and matching
+    ``ic_time`` attr as an ISO string) when the source dataset has a
+    time coord. ``ds.ic_time`` equals ``ds.time.isel(frame=0)`` but
+    survives subsetting that drops the ``frame`` axis.
 
     Returns the list of paths submitted to the writer (the actual
     flush happens asynchronously — call ``writer.wait_all()`` to
@@ -384,28 +403,42 @@ def run_inference_streaming_per_ic(
             n_levels=layout["n_levels"],
             has_diagnostic=has_diagnostic,
             time_values=t_slice,
+            ic_time=(t_start if layout["time"] is not None else None),
         )
 
         # Initial state at ic — populate frame 0 of the output AND seed
-        # the rollout. Predictions stay in NORMALIZED space (matches the
-        # training-time loss frame). When normalizer is None, units are
-        # raw — same convention as RolloutValidator / Phase 4a.
+        # the rollout. The rollout itself runs in NORMALIZED space
+        # (matches the training-time loss frame), but the on-disk
+        # tensors are de-normalized back to physical units so users
+        # can interpret + plot the saved fields directly. When
+        # normalizer is None the rollout is already in raw units and
+        # denormalize_state is a no-op.
         init_batch = _maybe_normalize(
             normalizer, _stack_initial(dataset, [ic], device)
         )
-        # Write the IC into frame 0 (broadcast across ensemble axis).
-        ic_surface = init_batch["surface_in"]  # (1, C_s, H, W)
-        ic_upper = init_batch["upper_air_in"]
+        # IC → frame 0 (physical units).
+        ic_phys = (
+            normalizer.denormalize_state(
+                surface=init_batch["surface_in"],
+                upper_air=init_batch["upper_air_in"],
+                diagnostic=init_batch.get("diagnostic"),
+            )
+            if normalizer is not None
+            else {
+                "surface": init_batch["surface_in"],
+                "upper_air": init_batch["upper_air_in"],
+                "diagnostic": init_batch.get("diagnostic"),
+            }
+        )
         ds["pred_surface"][:, 0, :, :, :] = (
-            ic_surface.cpu().numpy().astype(np.float32)
+            ic_phys["surface"].cpu().numpy().astype(np.float32)
         )
         ds["pred_upper_air"][:, 0, :, :, :, :] = (
-            ic_upper.cpu().numpy().astype(np.float32)
+            ic_phys["upper_air"].cpu().numpy().astype(np.float32)
         )
-        if has_diagnostic and "pred_diagnostic" in ds and "diagnostic" in init_batch:
-            ic_diag = init_batch["diagnostic"]
+        if has_diagnostic and "pred_diagnostic" in ds and ic_phys.get("diagnostic") is not None:
             ds["pred_diagnostic"][:, 0, :, :, :] = (
-                ic_diag.cpu().numpy().astype(np.float32)
+                ic_phys["diagnostic"].cpu().numpy().astype(np.float32)
             )
 
         state = perturber(init_batch, ensemble_size, generator=rng)
@@ -424,16 +457,32 @@ def run_inference_streaming_per_ic(
                 next_surface, next_upper = out[0], out[1]
                 next_diag = None
 
-            ps = _ensemble_mean_or_passthrough(next_surface, 1, ensemble_size)
+            # Denormalize the rollout output once and write to disk;
+            # the rollout itself continues with the normalized tensors.
+            phys = (
+                normalizer.denormalize_state(
+                    surface=next_surface,
+                    upper_air=next_upper,
+                    diagnostic=next_diag,
+                )
+                if normalizer is not None
+                else {
+                    "surface": next_surface,
+                    "upper_air": next_upper,
+                    "diagnostic": next_diag,
+                }
+            )
+
+            ps = _ensemble_mean_or_passthrough(phys["surface"], 1, ensemble_size)
             ds["pred_surface"][:, k, :, :, :] = (
                 ps[0].cpu().numpy().astype(np.float32)
             )
-            pu = _ensemble_mean_or_passthrough(next_upper, 1, ensemble_size)
+            pu = _ensemble_mean_or_passthrough(phys["upper_air"], 1, ensemble_size)
             ds["pred_upper_air"][:, k, :, :, :, :] = (
                 pu[0].cpu().numpy().astype(np.float32)
             )
-            if next_diag is not None and "pred_diagnostic" in ds:
-                pd = _ensemble_mean_or_passthrough(next_diag, 1, ensemble_size)
+            if phys.get("diagnostic") is not None and "pred_diagnostic" in ds:
+                pd = _ensemble_mean_or_passthrough(phys["diagnostic"], 1, ensemble_size)
                 ds["pred_diagnostic"][:, k, :, :, :] = (
                     pd[0].cpu().numpy().astype(np.float32)
                 )
