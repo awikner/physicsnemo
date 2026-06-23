@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP channel-config for tools/data/amip/amip_h5_to_zarr.py.
+#
+# Source: /work/hdd/bdiu/awikner/AMIP/h5/{year}_{idx:04d}.h5
+#   - 1978–2024, 1460/1464 files per year (6h cadence)
+#   - 180×360 grid (1°)
+#   - 26 pressure levels (hPa)
+#   - 4 soil layers (flattened into surface_variables per Phase 8b decision)
+#
+# Channel routing decisions locked in for Phase 8b:
+#   Q1 — variable roles match the user's confirmed routing.
+#   Q2 — soil variables flattened into surface_variables (4 levels × 2 vars = 8).
+#   Q3 — all 8 soil vars treated as prognostic surface state.
+#   Q4 — global_mean_co2 routed as a varying_boundary_variable.
+#   Q5 — calendar: standard (Gregorian) for the 1978–2024 span.
+#   Q9 — vertical_velocity goes into the Zarr via `extra_variables`
+#        but is NOT in pressure_upper_air_variables so the default
+#        dataset reader skips it.
+
+AMIP:
+  # Source dir + grid geometry (overridable on the CLI).
+  data_dir: /work/hdd/bdiu/awikner/AMIP/h5
+  horizontal_resolution: [180, 360]
+  data_timedelta_hours: 6
+  calendar: standard
+
+  # Lat/lon — pixel-centered 1° grid (90 → -90 step -1, offset by 0.5).
+  # Latitudes descend north → south (ERA5 convention). If your AMIP archive
+  # uses corner-centered or step-1 nodes, override the lat/lon arrays here.
+  lat: [89.5, 88.5, 87.5, 86.5, 85.5, 84.5, 83.5, 82.5, 81.5, 80.5,
+        79.5, 78.5, 77.5, 76.5, 75.5, 74.5, 73.5, 72.5, 71.5, 70.5,
+        69.5, 68.5, 67.5, 66.5, 65.5, 64.5, 63.5, 62.5, 61.5, 60.5,
+        59.5, 58.5, 57.5, 56.5, 55.5, 54.5, 53.5, 52.5, 51.5, 50.5,
+        49.5, 48.5, 47.5, 46.5, 45.5, 44.5, 43.5, 42.5, 41.5, 40.5,
+        39.5, 38.5, 37.5, 36.5, 35.5, 34.5, 33.5, 32.5, 31.5, 30.5,
+        29.5, 28.5, 27.5, 26.5, 25.5, 24.5, 23.5, 22.5, 21.5, 20.5,
+        19.5, 18.5, 17.5, 16.5, 15.5, 14.5, 13.5, 12.5, 11.5, 10.5,
+        9.5, 8.5, 7.5, 6.5, 5.5, 4.5, 3.5, 2.5, 1.5, 0.5,
+        -0.5, -1.5, -2.5, -3.5, -4.5, -5.5, -6.5, -7.5, -8.5, -9.5,
+        -10.5, -11.5, -12.5, -13.5, -14.5, -15.5, -16.5, -17.5, -18.5, -19.5,
+        -20.5, -21.5, -22.5, -23.5, -24.5, -25.5, -26.5, -27.5, -28.5, -29.5,
+        -30.5, -31.5, -32.5, -33.5, -34.5, -35.5, -36.5, -37.5, -38.5, -39.5,
+        -40.5, -41.5, -42.5, -43.5, -44.5, -45.5, -46.5, -47.5, -48.5, -49.5,
+        -50.5, -51.5, -52.5, -53.5, -54.5, -55.5, -56.5, -57.5, -58.5, -59.5,
+        -60.5, -61.5, -62.5, -63.5, -64.5, -65.5, -66.5, -67.5, -68.5, -69.5,
+        -70.5, -71.5, -72.5, -73.5, -74.5, -75.5, -76.5, -77.5, -78.5, -79.5,
+        -80.5, -81.5, -82.5, -83.5, -84.5, -85.5, -86.5, -87.5, -88.5, -89.5]
+  # Pixel-centered longitudes 0.5 → 359.5 (1° step).
+  lon: [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5,
+        10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5,
+        20.5, 21.5, 22.5, 23.5, 24.5, 25.5, 26.5, 27.5, 28.5, 29.5,
+        30.5, 31.5, 32.5, 33.5, 34.5, 35.5, 36.5, 37.5, 38.5, 39.5,
+        40.5, 41.5, 42.5, 43.5, 44.5, 45.5, 46.5, 47.5, 48.5, 49.5,
+        50.5, 51.5, 52.5, 53.5, 54.5, 55.5, 56.5, 57.5, 58.5, 59.5,
+        60.5, 61.5, 62.5, 63.5, 64.5, 65.5, 66.5, 67.5, 68.5, 69.5,
+        70.5, 71.5, 72.5, 73.5, 74.5, 75.5, 76.5, 77.5, 78.5, 79.5,
+        80.5, 81.5, 82.5, 83.5, 84.5, 85.5, 86.5, 87.5, 88.5, 89.5,
+        90.5, 91.5, 92.5, 93.5, 94.5, 95.5, 96.5, 97.5, 98.5, 99.5,
+        100.5, 101.5, 102.5, 103.5, 104.5, 105.5, 106.5, 107.5, 108.5, 109.5,
+        110.5, 111.5, 112.5, 113.5, 114.5, 115.5, 116.5, 117.5, 118.5, 119.5,
+        120.5, 121.5, 122.5, 123.5, 124.5, 125.5, 126.5, 127.5, 128.5, 129.5,
+        130.5, 131.5, 132.5, 133.5, 134.5, 135.5, 136.5, 137.5, 138.5, 139.5,
+        140.5, 141.5, 142.5, 143.5, 144.5, 145.5, 146.5, 147.5, 148.5, 149.5,
+        150.5, 151.5, 152.5, 153.5, 154.5, 155.5, 156.5, 157.5, 158.5, 159.5,
+        160.5, 161.5, 162.5, 163.5, 164.5, 165.5, 166.5, 167.5, 168.5, 169.5,
+        170.5, 171.5, 172.5, 173.5, 174.5, 175.5, 176.5, 177.5, 178.5, 179.5,
+        180.5, 181.5, 182.5, 183.5, 184.5, 185.5, 186.5, 187.5, 188.5, 189.5,
+        190.5, 191.5, 192.5, 193.5, 194.5, 195.5, 196.5, 197.5, 198.5, 199.5,
+        200.5, 201.5, 202.5, 203.5, 204.5, 205.5, 206.5, 207.5, 208.5, 209.5,
+        210.5, 211.5, 212.5, 213.5, 214.5, 215.5, 216.5, 217.5, 218.5, 219.5,
+        220.5, 221.5, 222.5, 223.5, 224.5, 225.5, 226.5, 227.5, 228.5, 229.5,
+        230.5, 231.5, 232.5, 233.5, 234.5, 235.5, 236.5, 237.5, 238.5, 239.5,
+        240.5, 241.5, 242.5, 243.5, 244.5, 245.5, 246.5, 247.5, 248.5, 249.5,
+        250.5, 251.5, 252.5, 253.5, 254.5, 255.5, 256.5, 257.5, 258.5, 259.5,
+        260.5, 261.5, 262.5, 263.5, 264.5, 265.5, 266.5, 267.5, 268.5, 269.5,
+        270.5, 271.5, 272.5, 273.5, 274.5, 275.5, 276.5, 277.5, 278.5, 279.5,
+        280.5, 281.5, 282.5, 283.5, 284.5, 285.5, 286.5, 287.5, 288.5, 289.5,
+        290.5, 291.5, 292.5, 293.5, 294.5, 295.5, 296.5, 297.5, 298.5, 299.5,
+        300.5, 301.5, 302.5, 303.5, 304.5, 305.5, 306.5, 307.5, 308.5, 309.5,
+        310.5, 311.5, 312.5, 313.5, 314.5, 315.5, 316.5, 317.5, 318.5, 319.5,
+        320.5, 321.5, 322.5, 323.5, 324.5, 325.5, 326.5, 327.5, 328.5, 329.5,
+        330.5, 331.5, 332.5, 333.5, 334.5, 335.5, 336.5, 337.5, 338.5, 339.5,
+        340.5, 341.5, 342.5, 343.5, 344.5, 345.5, 346.5, 347.5, 348.5, 349.5,
+        350.5, 351.5, 352.5, 353.5, 354.5, 355.5, 356.5, 357.5, 358.5, 359.5]
+
+  # 26 pressure levels (hPa) — matches the AMIP H5 archive's level-stamped vars.
+  levels:
+    - 5
+    - 7
+    - 10
+    - 20
+    - 30
+    - 50
+    - 70
+    - 100
+    - 125
+    - 150
+    - 175
+    - 200
+    - 250
+    - 300
+    - 400
+    - 500
+    - 600
+    - 700
+    - 800
+    - 850
+    - 875
+    - 900
+    - 925
+    - 950
+    - 975
+    - 1000
+
+  # ------------------------------------------------------------------- #
+  # Channel-group role lists (consumed by ClimateZarrDataset at runtime).
+  # ------------------------------------------------------------------- #
+
+  # 5 prognostic upper-air variables on the 26 pressure levels.
+  # `vertical_velocity` is intentionally absent — it lives under
+  # `extra_variables` below so the Zarr keeps the data but the role list
+  # doesn't route it through the model by default.
+  pressure_upper_air_variables:
+    - temperature
+    - u_component_of_wind
+    - v_component_of_wind
+    - geopotential
+    - specific_total_water
+
+  # Prognostic 2D state — surface meteorology + the 8 soil layers
+  # (Phase 8b decision Q2/Q3: flattened into surface).
+  surface_variables:
+    - 2m_temperature
+    - 2m_specific_humidity
+    - 2m_dewpoint_temperature
+    - 10m_u_component_of_wind
+    - 10m_v_component_of_wind
+    - skin_temperature
+    - snow_depth
+    - surface_pressure
+    - soil_temperature_level_1
+    - soil_temperature_level_2
+    - soil_temperature_level_3
+    - soil_temperature_level_4
+    - volumetric_soil_water_layer_1
+    - volumetric_soil_water_layer_2
+    - volumetric_soil_water_layer_3
+    - volumetric_soil_water_layer_4
+
+  # Input-only constant 2D boundaries — read once + cached.
+  constant_boundary_variables:
+    - land_sea_mask
+    - geopotential_at_surface
+
+  # Input-only time-varying 2D forcings (incl. CO₂ broadcast to 2D per Q4).
+  varying_boundary_variables:
+    - sea_surface_temperature
+    - sea_ice_cover
+    - DSWRFtoa
+    - DSWRFtoa_24h_lead
+    - global_mean_co2
+
+  # Output-only 2D fields — predicted by the model but not autoregressed.
+  diagnostic_variables:
+    - DLWRFsfc_24h
+    - DSWRFsfc_24h
+    - ULWRFsfc_24h
+    - ULWRFtoa_24h
+    - USWRFsfc_24h
+    - USWRFtoa_24h
+    - LHTFLsfc_24h
+    - SHTFLsfc_24h
+    - PRATEsfc_24h
+    - hcc_24h
+    - lcc_24h
+    - mcc_24h
+    - mn2t_24h
+    - mx2t_24h
+    - mxtpr_24h
+
+  # `extra_variables` — written to the Zarr but NOT added to any role-list
+  # attr. The dataset reader skips them by default; downstream code can
+  # opt-in by adding them to a model YAML's variable lists.
+  extra_variables:
+    pressure_upper_air_variables:
+      - vertical_velocity
+    surface_variables: []

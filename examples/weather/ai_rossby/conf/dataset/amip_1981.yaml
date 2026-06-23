@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP 1981 single-year dataset config (Phase 8b test).
+#
+# Pairs with conf/model/amip_default.yaml. Channel groups come from the
+# Zarr store's `attrs` (the dataset class introspects them); the recipe
+# only needs the path + normalization stats here.
+
+zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981.zarr
+val_zarr_path: null
+
+# AMIP normalize_*.nc files were saved alongside the source HDF5 archive.
+# They use the same NetCDF-per-variable + level coord layout PlasimNormalizer
+# (now ClimateNormalizer) reads.
+mean_path: /work/hdd/bdiu/awikner/AMIP/h5/normalize_mean.nc
+std_path: /work/hdd/bdiu/awikner/AMIP/h5/normalize_std.nc
+delta_std_path: null
+
+# AMIP forcings (SST / sea-ice / TSI / CO₂) come from the prognostic store,
+# not a separate boundary file — no substitution.
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+forecast_lead_times: [1]
+num_samples_per_epoch: null
+batch_size: 1
+num_workers: 4
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+nan_fill_default: 0.0
+nan_fill_values: {}
+shuffle: True
+
+# AMIP's normalize_*.nc carries per-variable stats for surface + upper-air
+# + varying-boundary + diagnostic vars. land_sea_mask / geopotential_at_surface
+# (constant boundaries) are NOT normalized — they're already in a fixed
+# coordinate frame the model uses as-is. Off here matches the existing
+# convention from the ERA5/PLASIM recipes.
+normalize_constant_boundary: False
+# Diagnostic radiation/fluxes/precip have large dynamic ranges — flip this
+# on once the model wiring's verified.
+normalize_diagnostic: False
