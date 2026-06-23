@@ -14,37 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Phase C gate for the vendored cyclic-longitude
-:func:`get_shift_window_mask` (Issue
-`#1599 <https://github.com/NVIDIA/physicsnemo/issues/1599>`_ fix).
+"""Regression test for the upstream cyclic-longitude
+:func:`get_shift_window_mask` fix (Issue
+`#1599 <https://github.com/NVIDIA/physicsnemo/issues/1599>`_).
 
-Verifies that the fixed mask produces the 9-region (3D) / 3-region (2D)
-partition the Pangu-Weather paper specifies, and that it differs from the
-upstream physicsnemo mask (which produces 27 / 9 regions and suppresses
-cross-dateline attention). When this test starts failing because the upstream
-mask now agrees with the vendored one, that means the upstream PR for #1599
-has landed and the vendored sub-package can be deleted.
+Before Phase 6 Track A this test guarded a vendored copy of the fix that
+lived under ``pangu_plasim/_vendored_physicsnemo_nn/``. Now the fix has
+landed upstream behind ``cyclic_longitude=True`` (default ``False`` keeps
+historical behavior for non-Pangu callers), and the vendored copy has
+been deleted. This file pins the expected behavior of the upstream kwarg:
+9-region (3D) / 3-region (2D) partition with longitude treated as cyclic.
 """
 
-import warnings
-
-import pytest
 import torch
 
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
-    from physicsnemo.experimental.models.pangu_plasim._vendored_physicsnemo_nn.shift_window_mask import (
-        get_shift_window_mask as vendored_get_shift_window_mask,
-    )
-
 from physicsnemo.nn.module.utils.shift_window_mask import (
-    get_shift_window_mask as upstream_get_shift_window_mask,
+    get_shift_window_mask,
 )
 
 
 def _count_unique_regions_3d(input_resolution, window_size, shift_size):
     """Replicate the per-cell region-ID assignment loop and return the count
-    actually written into the ``img_mask``."""
+    actually written into the ``img_mask`` under the cyclic-longitude rule."""
     Pl, Lat, Lon = input_resolution
     win_pl, win_lat, win_lon = window_size
     shift_pl, shift_lat, _ = shift_size
@@ -69,55 +60,45 @@ def _count_unique_regions_3d(input_resolution, window_size, shift_size):
     return int(img_mask.unique().numel())
 
 
-def test_vendored_mask_uses_nine_regions_in_3d():
-    """The cyclic-longitude fix produces 9 distinct region IDs in 3D
-    (PanguWeather paper spec); the buggy upstream variant produces 27.
+def test_cyclic_longitude_uses_nine_regions_in_3d():
+    """``cyclic_longitude=True`` produces 9 distinct region IDs in 3D
+    (PanguWeather paper spec); the historical default produces 27.
     """
     input_resolution = (8, 24, 48)
     window_size = (2, 6, 12)
     shift_size = (1, 3, 6)
 
-    # Smoke-check that the local region-ID assignment matches the expected
-    # cyclic-longitude semantics.
     assert _count_unique_regions_3d(input_resolution, window_size, shift_size) == 9
 
 
-def test_vendored_mask_differs_from_upstream_until_1599_lands():
-    """Documents the intentional divergence: vendored mask (cyclic
-    longitude) is **not equal** to physicsnemo's pre-fix mask. When the
-    upstream PR lands and this assertion flips to ``torch.equal``, delete the
-    vendored sub-package.
-    """
+def test_cyclic_vs_default_masks_differ():
+    """``cyclic_longitude=True`` is not equal to the default mask — the
+    cyclic variant lets cross-dateline tokens attend to each other where
+    the default suppresses them with the partition's region IDs."""
     input_resolution = (8, 24, 48)
     window_size = (2, 6, 12)
     shift_size = (1, 3, 6)
 
-    vendored = vendored_get_shift_window_mask(
+    cyclic = get_shift_window_mask(
+        input_resolution, window_size, shift_size, ndim=3, cyclic_longitude=True
+    )
+    default = get_shift_window_mask(
         input_resolution, window_size, shift_size, ndim=3
     )
-    upstream = upstream_get_shift_window_mask(
-        input_resolution, window_size, shift_size, ndim=3
-    )
-
-    if torch.equal(vendored, upstream):
-        pytest.skip(
-            "Upstream physicsnemo.nn.module.utils.get_shift_window_mask now "
-            "matches the vendored fix — Issue #1599 must have been merged. "
-            "Delete the _vendored_physicsnemo_nn sub-package and import "
-            "get_shift_window_mask directly from physicsnemo.nn."
-        )
-    # Otherwise the divergence is expected and verifies the fix is active.
+    assert not torch.equal(
+        cyclic, default
+    ), "cyclic_longitude=True should produce a different mask than the default"
 
 
-def test_vendored_mask_shape_matches_paper_spec():
-    """Vendored mask's flattened region count matches the 9-region partition,
+def test_cyclic_mask_shape_matches_paper_spec():
+    """Cyclic mask's flattened region count matches the 9-region partition,
     independent of the partition pattern within."""
     input_resolution = (8, 24, 48)
     window_size = (2, 6, 12)
     shift_size = (1, 3, 6)
 
-    mask = vendored_get_shift_window_mask(
-        input_resolution, window_size, shift_size, ndim=3
+    mask = get_shift_window_mask(
+        input_resolution, window_size, shift_size, ndim=3, cyclic_longitude=True
     )
     # Mask shape: (n_lon, n_pl * n_lat, win_total, win_total).
     n_lon = input_resolution[2] // window_size[2]
@@ -127,3 +108,18 @@ def test_vendored_mask_shape_matches_paper_spec():
     )
     win_total = window_size[0] * window_size[1] * window_size[2]
     assert mask.shape == (n_lon, n_pl_lat, win_total, win_total)
+
+
+def test_cyclic_mask_2d_three_regions():
+    """The 2D variant: 3 region IDs under cyclic longitude (paper spec)."""
+    input_resolution = (24, 48)
+    window_size = (6, 12)
+    shift_size = (3, 6)
+
+    mask_cyclic = get_shift_window_mask(
+        input_resolution, window_size, shift_size, ndim=2, cyclic_longitude=True
+    )
+    mask_default = get_shift_window_mask(
+        input_resolution, window_size, shift_size, ndim=2
+    )
+    assert not torch.equal(mask_cyclic, mask_default)

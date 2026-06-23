@@ -945,9 +945,10 @@ class Interpolate(nn.Module):
 # window_partition, window_reverse moved to physicsnemo.nn.module.utils.
 # (window_partition_2 / window_reverse_2 were dead code and deleted.)
 #
-# Phase C swap: get_shift_window_mask moved to
-# ._vendored_physicsnemo_nn.shift_window_mask (with the Issue #1599 cyclic-
-# longitude fix). This file no longer carries any version of the mask.
+# Phase 6 Track A: get_shift_window_mask is now sourced from upstream
+# physicsnemo.nn.module.utils.shift_window_mask, which carries the Issue
+# #1599 cyclic-longitude fix behind the ``cyclic_longitude`` kwarg.
+# This file no longer carries any version of the mask.
 #
 # Phase A swap: crop2d, crop3d moved to physicsnemo.nn.module.utils.
 

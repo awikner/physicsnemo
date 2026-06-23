@@ -17,15 +17,25 @@
 r"""Faithful port of `PanguWeather v2.0
 <https://github.com/198808xc/Pangu-Weather>`_ building blocks.
 
-After Phases A–C of ``pangu_plasim_reuse_plan.md`` this module is a thin
-glue layer: ``Mask`` is the only class with no upstream analogue;
-``DownSample`` / ``UpSample`` are factor=2 dispatch factories over
-``physicsnemo.nn``; the transformer block / layer / attention / MLP /
-shift-window mask are re-exported from
-``_vendored_physicsnemo_nn`` (vendored copies of the corresponding
-``physicsnemo.nn.module`` classes patched with the Issue #1599 mask fix +
-``vertical_windowing`` kwarg + ``use_sdpa`` opt-in; to be deleted when the
-upstream PRs land).
+After Phase 6 Track A this module is a thin glue layer over upstream
+:mod:`physicsnemo.nn`:
+
+* ``Mask`` — the only class with no upstream analogue.
+* ``DownSample`` / ``UpSample`` — factor=2 dispatch factories that delegate
+  to :class:`physicsnemo.nn.DownSample3D` / :class:`physicsnemo.nn.UpSample3D`
+  for the common path (and a local generalized impl for non-factor-2 cases).
+* ``EarthSpecificLayer`` / ``EarthSpecificBlock`` — subclasses of upstream
+  :class:`physicsnemo.nn.module.transformer_layers.FuserLayer` /
+  :class:`physicsnemo.nn.module.transformer_layers.Transformer3DBlock` that
+  pin the Pangu-Weather defaults (``cyclic_longitude=True``,
+  ``use_sdpa=True``, ``mlp_layer=PanguMlp``).
+* ``PanguMlp`` — local timm-style two-layer MLP (``fc1`` / ``fc2`` names)
+  so PanguWeather ``.tar`` checkpoints translate cleanly.
+
+The ``_vendored_physicsnemo_nn`` sub-package that previously held patched
+copies of these blocks has been deleted — the patches (Issue #1599
+cyclic-longitude mask fix, ``vertical_windowing`` kwarg, ``use_sdpa``
+opt-in) all landed upstream as kwargs that default to historical behavior.
 """
 
 import torch
@@ -328,20 +338,105 @@ class UpSample:
 
 
 
-# Phase C swap: EarthSpecificLayer, EarthSpecificBlock, EarthAttention3D, Mlp
-# are now sourced from the vendored ``_vendored_physicsnemo_nn`` sub-package,
-# which mirrors physicsnemo.nn naming + applies three intentional patches
-# (Issue #1599 cyclic-longitude mask fix, ``vertical_windowing`` kwarg,
-# ``use_sdpa`` opt-in). Class names are aliased to the upstream names so the
-# eventual upstream-swap is a one-line import change in the model files.
-from ._vendored_physicsnemo_nn import (
-    EarthAttention3D,
-    FuserLayer,
-    Mlp,
-    Transformer3DBlock,
-    get_shift_window_mask,
+# Phase 6 Track A migration: source the Earth-Specific transformer blocks
+# directly from upstream physicsnemo.nn (the three patches that previously
+# lived in ``_vendored_physicsnemo_nn`` — Issue #1599 cyclic-longitude mask
+# fix, ``vertical_windowing`` kwarg, ``use_sdpa`` opt-in — have landed
+# upstream). The vendored sub-package is gone.
+#
+# Two callouts:
+# 1. ``PanguMlp`` is a local timm-style two-layer MLP (``fc1`` / ``fc2``)
+#    that PanguWeather checkpoints expect by name; upstream's
+#    :class:`physicsnemo.nn.module.mlp_layers.Mlp` uses a ``layers.0`` /
+#    ``layers.2`` sequential layout instead. We inject ``PanguMlp`` via
+#    upstream's new ``mlp_layer=`` kwarg so the translated state-dict
+#    keys still load cleanly.
+# 2. ``EarthSpecificLayer`` / ``EarthSpecificBlock`` are thin subclasses
+#    of upstream ``FuserLayer`` / ``Transformer3DBlock`` that pin
+#    Pangu-Weather's defaults (``cyclic_longitude=True``, ``use_sdpa=True``,
+#    ``mlp_layer=PanguMlp``). The model code keeps using these aliases —
+#    upstream's defaults stay the historical non-Pangu behavior.
+from physicsnemo.nn.module.attention_layers import EarthAttention3D
+from physicsnemo.nn.module.transformer_layers import (
+    FuserLayer as _UpstreamFuserLayer,
+    Transformer3DBlock as _UpstreamTransformer3DBlock,
 )
+from physicsnemo.nn.module.utils.shift_window_mask import get_shift_window_mask
 
-# Back-compat aliases used by the model code.
-EarthSpecificLayer = FuserLayer
-EarthSpecificBlock = Transformer3DBlock
+
+class PanguMlp(nn.Module):
+    r"""Two-layer MLP with PanguWeather's ``fc1`` / ``fc2`` parameter names.
+
+    Identical numerics to upstream :class:`physicsnemo.nn.module.mlp_layers.Mlp`
+    (linear → activation → dropout → linear → dropout). The parameter
+    names differ so PanguWeather ``.tar`` checkpoints translate cleanly.
+    """
+
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        drop=0.0,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.act = act_layer()
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x: torch.Tensor):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
+# Back-compat alias for callers that imported ``Mlp`` from this module.
+Mlp = PanguMlp
+
+
+class EarthSpecificBlock(_UpstreamTransformer3DBlock):
+    r"""Upstream :class:`Transformer3DBlock` with Pangu-Weather defaults pinned.
+
+    Pins ``cyclic_longitude=True``, ``use_sdpa=True``, and
+    ``mlp_layer=PanguMlp``. The model code constructs this class directly
+    by name so callers don't need to pass the kwargs every time.
+    """
+
+    def __init__(self, *args, mlp_layer=None, **kwargs):
+        kwargs.setdefault("cyclic_longitude", True)
+        kwargs.setdefault("use_sdpa", True)
+        super().__init__(
+            *args,
+            mlp_layer=mlp_layer if mlp_layer is not None else PanguMlp,
+            **kwargs,
+        )
+
+
+class EarthSpecificLayer(_UpstreamFuserLayer):
+    r"""Upstream :class:`FuserLayer` with Pangu-Weather defaults pinned.
+
+    Same defaults pinning as :class:`EarthSpecificBlock` — ``cyclic_longitude``,
+    ``use_sdpa``, and ``mlp_layer=PanguMlp``.
+    """
+
+    def __init__(self, *args, mlp_layer=None, **kwargs):
+        kwargs.setdefault("cyclic_longitude", True)
+        kwargs.setdefault("use_sdpa", True)
+        super().__init__(
+            *args,
+            mlp_layer=mlp_layer if mlp_layer is not None else PanguMlp,
+            **kwargs,
+        )
+
+
+# Back-compat aliases for callers that imported the upstream class names.
+FuserLayer = EarthSpecificLayer
+Transformer3DBlock = EarthSpecificBlock

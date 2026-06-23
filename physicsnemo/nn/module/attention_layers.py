@@ -19,6 +19,7 @@ from typing import Any, Dict
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from physicsnemo.nn.module.conv_layers import Conv2d
@@ -193,6 +194,10 @@ class EarthAttention3D(nn.Module):
         qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set
         attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
         proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+        use_sdpa (bool, optional): Route attention through
+            :func:`torch.nn.functional.scaled_dot_product_attention` for the
+            kernel-fused fast path. Default ``False`` (historical explicit
+            ``q @ k.T`` → softmax → ``attn @ v`` behavior).
     """
 
     def __init__(
@@ -205,11 +210,13 @@ class EarthAttention3D(nn.Module):
         qk_scale=None,
         attn_drop=0.0,
         proj_drop=0.0,
+        use_sdpa=False,
     ):
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wpl, Wlat, Wlon
         self.num_heads = num_heads
+        self.use_sdpa = use_sdpa
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
 
@@ -253,9 +260,7 @@ class EarthAttention3D(nn.Module):
             .permute(3, 0, 4, 1, 2, 5)
         )
         q, k, v = qkv[0], qkv[1], qkv[2]
-
-        q = q * self.scale
-        attn = q @ k.transpose(-2, -1)
+        L = q.shape[-1]
 
         earth_position_bias = self.earth_position_bias_table[
             self.earth_position_index.view(-1)
@@ -268,21 +273,46 @@ class EarthAttention3D(nn.Module):
         earth_position_bias = earth_position_bias.permute(
             3, 2, 0, 1
         ).contiguous()  # nH, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
-        attn = attn + earth_position_bias.unsqueeze(0)
 
-        if mask is not None:
-            nLon = mask.shape[0]
-            attn = attn.view(
-                B_ // nLon, nLon, self.num_heads, nW_, N, N
-            ) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, nW_, N, N)
-            attn = self.softmax(attn)
+        if self.use_sdpa:
+            # SDPA path — fused kernel via
+            # F.scaled_dot_product_attention. Bias and mask are passed as
+            # the attn_mask argument so the kernel can incorporate them
+            # without materializing the full attention matrix.
+            if mask is not None:
+                nLon = mask.shape[0]
+                x = F.scaled_dot_product_attention(
+                    q.view(B_ // nLon, nLon, self.num_heads, nW_, N, L),
+                    k.view(B_ // nLon, nLon, self.num_heads, nW_, N, L),
+                    v.view(B_ // nLon, nLon, self.num_heads, nW_, N, L),
+                    attn_mask=earth_position_bias.unsqueeze(0)
+                    + mask.unsqueeze(1).unsqueeze(0),
+                    scale=self.scale,
+                )
+                x = x.view(-1, self.num_heads, nW_, N, L)
+            else:
+                x = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=earth_position_bias, scale=self.scale
+                )
         else:
-            attn = self.softmax(attn)
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn + earth_position_bias.unsqueeze(0)
 
-        attn = self.attn_drop(attn)
+            if mask is not None:
+                nLon = mask.shape[0]
+                attn = attn.view(
+                    B_ // nLon, nLon, self.num_heads, nW_, N, N
+                ) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, nW_, N, N)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
 
-        x = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B_, nW_, N, C)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.permute(0, 2, 3, 1, 4).reshape(B_, nW_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x

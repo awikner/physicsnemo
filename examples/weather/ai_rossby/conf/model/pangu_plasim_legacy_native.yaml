@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PanguPlasimLegacyNative model config — Phase 6 native variant of
+# PanguPlasimLegacy. Same architecture, layer composition, and forward as
+# the faithful class; advertises cuda_graphs=True via _NativeMetaData so
+# StaticCaptureTraining can wrap it.
+#
+# Intended for fresh training runs (NOT for loading translated
+# PanguWeather .tar checkpoints — those target PanguPlasimLegacy).
+#
+# CUDA-graph caveat: set checkpointing=0 below if wrapping with CUDA
+# graphs. Activation checkpoints aren't graph-capturable. AMP without
+# CUDA graphs works at any checkpointing level.
+
+name: PanguPlasimLegacyNative
+module: physicsnemo.experimental.models.pangu_plasim
+
+# Variable groups — PanguWeather sim52 channel order.
+surface_variables: [pl, tas]
+upper_air_variables: [ta, ua, va, hus, zg]
+constant_boundary_variables: [lsm, sg, z0]
+varying_boundary_variables: [sst, rsdt, sic]
+diagnostic_variables: [pr_6h]
+land_variables: []
+ocean_variables: []
+
+# Grid / level geometry — PLASIM T42 at 13 pressure levels.
+levels: [5000, 10000, 15000, 20000, 25000, 30000, 40000, 50000, 60000, 70000, 85000, 92500, 100000]
+horizontal_resolution: [64, 128]
+patch_size: [2, 2, 2]
+window_size: [2, 2, 4]
+
+# Backbone capacity.
+depths: [2, 6, 6, 2]
+num_heads: [6, 12, 12, 6]
+embed_dim: 192
+updown_scale_factor: 2
+
+# Heads + behaviour switches (mirror Derecho-0514).
+predict_delta: False
+mask_output: False
+upper_air_boundary: False
+vertical_windowing: False
+subpixel_deconv: True
+polar_pad: False
+grid_has_poles: False
+recovery_head: True
+diagnostic_head: False
+has_diagnostic: True
+
+# Regularization / activation checkpointing. checkpointing=0 to keep the
+# CUDA-graph path viable; bump back to 2 if you need the memory headroom
+# but don't plan to wrap with cuda_graphs.
+drop_rate: 0.0
+checkpointing: 0
+use_reentrant: False

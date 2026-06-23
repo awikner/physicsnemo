@@ -87,15 +87,26 @@ def window_reverse(windows, window_size, Pl=1, Lat=1, Lon=1, ndim=3):
         return x
 
 
-def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
+def get_shift_window_mask(
+    input_resolution, window_size, shift_size, ndim=3, cyclic_longitude=False
+):
     """
     Along the longitude dimension, the leftmost and rightmost indices are actually close to each other.
     If half windows apper at both leftmost and rightmost positions, they are dircetly merged into one window.
+
     Args:
         input_resolution (tuple[int]): [pressure levels, latitude, longitude] or [latitude, longitude]
         window_size (tuple[int]): Window size [pressure levels, latitude, longitude] or [latitude, longitude]
         shift_size (tuple[int]): Shift size for SW-MSA [pressure levels, latitude, longitude] or [latitude, longitude]
         ndim (int): dimension of window (3 or 2)
+        cyclic_longitude (bool): When ``True``, leave the longitude axis with a
+            single region ID — tokens on either side of the dateline attend to
+            each other across the discontinuity. This matches the Pangu-Weather
+            paper's pseudocode (longitude is cyclic). Default ``False`` keeps
+            the historical behavior in which longitude is partitioned alongside
+            latitude / pressure-level (suppresses cross-dateline attention).
+            See `physicsnemo#1599
+            <https://github.com/NVIDIA/physicsnemo/issues/1599>`_.
 
     Returns:
         attn_mask: (n_lon, n_pl*n_lat, win_pl*win_lat*win_lon, win_pl*win_lat*win_lon) or (n_lon, n_lat, win_lat*win_lon, win_lat*win_lon)
@@ -105,13 +116,22 @@ def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
         win_pl, win_lat, win_lon = window_size
         shift_pl, shift_lat, shift_lon = shift_size
 
-        img_mask = torch.zeros((1, Pl, Lat, Lon + shift_lon, 1))
+        # When the longitude axis is partitioned we allocate Lon+shift_lon
+        # cells and slice back afterwards; the cyclic-longitude path doesn't
+        # need the extra cells since lon is treated as a single region.
+        if cyclic_longitude:
+            img_mask = torch.zeros((1, Pl, Lat, Lon, 1))
+        else:
+            img_mask = torch.zeros((1, Pl, Lat, Lon + shift_lon, 1))
     elif ndim == 2:
         Lat, Lon = input_resolution
         win_lat, win_lon = window_size
         shift_lat, shift_lon = shift_size
 
-        img_mask = torch.zeros((1, Lat, Lon + shift_lon, 1))
+        if cyclic_longitude:
+            img_mask = torch.zeros((1, Lat, Lon, 1))
+        else:
+            img_mask = torch.zeros((1, Lat, Lon + shift_lon, 1))
 
     if ndim == 3:
         pl_slices = (
@@ -124,26 +144,38 @@ def get_shift_window_mask(input_resolution, window_size, shift_size, ndim=3):
         slice(-win_lat, -shift_lat),
         slice(-shift_lat, None),
     )
-    lon_slices = (
-        slice(0, -win_lon),
-        slice(-win_lon, -shift_lon),
-        slice(-shift_lon, None),
-    )
+    if not cyclic_longitude:
+        lon_slices = (
+            slice(0, -win_lon),
+            slice(-win_lon, -shift_lon),
+            slice(-shift_lon, None),
+        )
 
     cnt = 0
     if ndim == 3:
-        for pl in pl_slices:
+        if cyclic_longitude:
+            for pl in pl_slices:
+                for lat in lat_slices:
+                    img_mask[:, pl, lat, :, :] = cnt
+                    cnt += 1
+        else:
+            for pl in pl_slices:
+                for lat in lat_slices:
+                    for lon in lon_slices:
+                        img_mask[:, pl, lat, lon, :] = cnt
+                        cnt += 1
+            img_mask = img_mask[:, :, :, :Lon, :]
+    elif ndim == 2:
+        if cyclic_longitude:
+            for lat in lat_slices:
+                img_mask[:, lat, :, :] = cnt
+                cnt += 1
+        else:
             for lat in lat_slices:
                 for lon in lon_slices:
-                    img_mask[:, pl, lat, lon, :] = cnt
+                    img_mask[:, lat, lon, :] = cnt
                     cnt += 1
-        img_mask = img_mask[:, :, :, :Lon, :]
-    elif ndim == 2:
-        for lat in lat_slices:
-            for lon in lon_slices:
-                img_mask[:, lat, lon, :] = cnt
-                cnt += 1
-        img_mask = img_mask[:, :, :Lon, :]
+            img_mask = img_mask[:, :, :Lon, :]
 
     mask_windows = window_partition(
         img_mask, window_size, ndim=ndim

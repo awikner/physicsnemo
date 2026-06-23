@@ -648,12 +648,60 @@ configuration files for all three model types (``PanguPlasimLegacy``,
    need loosening if the source used bf16 / non-deterministic CUDA
    kernels).
 
-### Phase 6 — Pangu_Plasim native variants
+### Phase 6 — Pangu_Plasim native variants ← *Track A landed*
 Rebuild both architectures on native PhysicsNeMo blocks (`PanguPlasimNative`, `PanguPlasimLegacyNative`),
 reusing the shipped Pangu's Earth-Specific attention/patch ops where compatible; StaticCapture-friendly, richer
 `ModelMetaData`. Same I/O contract, own configs; trained via the Phase-3 recipe. (New training runs; not
 checkpoint-compatible with the faithful variants — that's the faithful variants' role.)
 **Tests**: same unit + smoke contract as Phase 1, both variants.
+
+**Track A delivered** (upstream-first migration):
+
+- Three additive kwargs landed on the upstream PhysicsNeMo nn blocks (all
+  defaults preserve historical behavior):
+  - [`physicsnemo/nn/module/utils/shift_window_mask.py`](physicsnemo/nn/module/utils/shift_window_mask.py)
+    gains `cyclic_longitude: bool = False` — the Issue
+    [#1599](https://github.com/NVIDIA/physicsnemo/issues/1599) fix
+    treating longitude as cyclic.
+  - [`physicsnemo/nn/module/transformer_layers.py`](physicsnemo/nn/module/transformer_layers.py):
+    `Transformer3DBlock` + `FuserLayer` gain `vertical_windowing`,
+    `cyclic_longitude`, `use_sdpa`, and `mlp_layer` kwargs. The
+    `mlp_layer` slot lets callers inject a custom Mlp class — Pangu_Plasim
+    uses it to preserve PanguWeather's `fc1`/`fc2` parameter names.
+  - [`physicsnemo/nn/module/attention_layers.py`](physicsnemo/nn/module/attention_layers.py):
+    `EarthAttention3D` gains `use_sdpa: bool = False`. Under
+    `use_sdpa=True` the attention routes through
+    `F.scaled_dot_product_attention` for the fused fast path.
+- [`physicsnemo/experimental/models/pangu_plasim/_vendored_physicsnemo_nn/`](physicsnemo/experimental/models/pangu_plasim/)
+  **deleted**. `pangu_plasim/layers.py` now defines `PanguMlp` locally
+  (timm-style `fc1`/`fc2` names for PanguWeather state-dict compatibility),
+  and `EarthSpecificLayer` / `EarthSpecificBlock` are thin subclasses of
+  upstream `FuserLayer` / `Transformer3DBlock` that pin
+  `cyclic_longitude=True`, `use_sdpa=True`, `mlp_layer=PanguMlp`.
+- New native classes at
+  [`physicsnemo/experimental/models/pangu_plasim/pangu_plasim_native.py`](physicsnemo/experimental/models/pangu_plasim/pangu_plasim_native.py):
+  `PanguPlasimLegacyNative` + `PanguPlasimNative` are subclasses of the
+  faithful pair with a CUDA-graph-friendly `_NativeMetaData`
+  (`cuda_graphs=True`, `amp=True`, `bf16=True`, `auto_grad=True`). Same
+  layer composition, same forward, same state-dict layout as the
+  faithful classes — only metadata differs. CUDA-graph caveat: set
+  `checkpointing=0` (the new YAMLs default this).
+- New configs:
+  [`conf/model/pangu_plasim_native.yaml`](examples/weather/ai_rossby/conf/model/pangu_plasim_native.yaml) +
+  [`conf/model/pangu_plasim_legacy_native.yaml`](examples/weather/ai_rossby/conf/model/pangu_plasim_legacy_native.yaml).
+  The trainer's `build_model` reads `cfg.model.name`/`module` and routes
+  via `Module.instantiate` — no other trainer code changed.
+- Tests:
+  - [`test/models/pangu_plasim/test_pangu_plasim_native.py`](test/models/pangu_plasim/test_pangu_plasim_native.py)
+    — 6 cases covering MetaData advertisement, forward parity with
+    faithful (bit-identical under matched RNG + matched state dict),
+    and `.mdlus` round-trip preserving the native MetaData.
+  - [`test/models/pangu_plasim/test_shift_window_mask.py`](test/models/pangu_plasim/test_shift_window_mask.py)
+    — rewritten to pin upstream's new `cyclic_longitude=True` behavior
+    (was a regression guard for the vendored copy).
+- A Delta `gpuA100x4-interactive` smoke run verified the new pipeline
+  trains under StaticCapture + AMP for one mini-epoch on PLASIM sim52
+  year 12.
 
 ### Phase 7 — SFNO (rest of v2.0) — *faithful substantively complete; native deferred*
 Map the vendored SFNO to PhysicsNeMo's SFNO (makani plugin) or port the vendored copy as `sfno_plasim`

@@ -16,14 +16,23 @@
 
 """Pangu_Plasim weather emulators ported from PanguWeather v2.0.
 
-Two architectures, each (eventually) in a faithful (weight-compatible) and a
-native (rebuilt-on-PhysicsNeMo) flavor:
+Two architectures, each in a faithful (weight-compatible) and a
+native (PhysicsNeMo upstream + StaticCapture-friendly) flavor:
 
-* :class:`PanguPlasim` — the current model with the training-only VAE dual-encoder.
-* ``PanguPlasimLegacy`` — the predecessor model without the VAE (added next).
+* :class:`PanguPlasim` — current model with the training-only VAE dual-encoder.
+* :class:`PanguPlasimLegacy` — predecessor model without the VAE.
+* :class:`PanguPlasimNative` / :class:`PanguPlasimLegacyNative` — same
+  architectures, registered with CUDA-graph-friendly :class:`ModelMetaData`
+  for fresh training runs.
 """
 
 from .pangu_plasim import PanguPlasim
 from .pangu_plasim_legacy import PanguPlasimLegacy
+from .pangu_plasim_native import PanguPlasimLegacyNative, PanguPlasimNative
 
-__all__ = ["PanguPlasim", "PanguPlasimLegacy"]
+__all__ = [
+    "PanguPlasim",
+    "PanguPlasimLegacy",
+    "PanguPlasimLegacyNative",
+    "PanguPlasimNative",
+]

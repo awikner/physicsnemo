@@ -57,6 +57,18 @@ class Transformer3DBlock(nn.Module):
         drop_path (float, optional): Stochastic depth rate. Default: 0.0
         act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+        vertical_windowing (bool, optional): When ``False`` the pressure-level
+            axis does not participate in the window shift (``shift_pl`` is
+            forced to 0). Matches the PanguWeather v2.0 Pangu_Plasim mode.
+            Default ``True`` (historical behavior — shift along all three axes).
+        cyclic_longitude (bool, optional): Forwarded to
+            :func:`get_shift_window_mask`; treats the longitude axis as cyclic
+            so cross-dateline tokens attend across the discontinuity. Default
+            ``False`` (historical behavior). See `physicsnemo#1599
+            <https://github.com/NVIDIA/physicsnemo/issues/1599>`_.
+        use_sdpa (bool, optional): Forwarded to :class:`EarthAttention3D`;
+            routes attention through :func:`F.scaled_dot_product_attention`.
+            Default ``False`` (historical explicit-matmul behavior).
     """
 
     def __init__(
@@ -74,10 +86,22 @@ class Transformer3DBlock(nn.Module):
         drop_path=0.0,
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
+        vertical_windowing=True,
+        cyclic_longitude=False,
+        use_sdpa=False,
+        mlp_layer=None,
     ):
         super().__init__()
         window_size = (2, 6, 12) if window_size is None else window_size
-        shift_size = (1, 3, 6) if shift_size is None else shift_size
+        if shift_size is None:
+            if vertical_windowing:
+                shift_size = (
+                    window_size[0] // 2,
+                    window_size[1] // 2,
+                    window_size[2] // 2,
+                )
+            else:
+                shift_size = (0, window_size[1] // 2, window_size[2] // 2)
         self.dim = dim
         self.input_resolution = input_resolution
         self.num_heads = num_heads
@@ -103,12 +127,14 @@ class Transformer3DBlock(nn.Module):
             qk_scale=qk_scale,
             attn_drop=attn_drop,
             proj_drop=drop,
+            use_sdpa=use_sdpa,
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(
+        mlp_cls = Mlp if mlp_layer is None else mlp_layer
+        self.mlp = mlp_cls(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
             act_layer=act_layer,
@@ -116,10 +142,19 @@ class Transformer3DBlock(nn.Module):
         )
 
         shift_pl, shift_lat, shift_lon = self.shift_size
-        self.roll = shift_pl and shift_lon and shift_lat
+        if vertical_windowing:
+            self.roll = bool(shift_pl and shift_lon and shift_lat)
+        else:
+            # Pressure-level shift is intentionally 0; only require lat/lon.
+            self.roll = bool(shift_lon and shift_lat)
 
         if self.roll:
-            attn_mask = get_shift_window_mask(pad_resolution, window_size, shift_size)
+            attn_mask = get_shift_window_mask(
+                pad_resolution,
+                window_size,
+                shift_size,
+                cyclic_longitude=cyclic_longitude,
+            )
         else:
             attn_mask = None
 
@@ -354,6 +389,9 @@ class FuserLayer(nn.Module):
         attn_drop (float, optional): Attention dropout rate. Default: 0.0
         drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
         norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
+        vertical_windowing (bool, optional): Forwarded to each block. Default ``True``.
+        cyclic_longitude (bool, optional): Forwarded to each block. Default ``False``.
+        use_sdpa (bool, optional): Forwarded to each block. Default ``False``.
     """
 
     def __init__(
@@ -370,6 +408,10 @@ class FuserLayer(nn.Module):
         attn_drop=0.0,
         drop_path=0.0,
         norm_layer=nn.LayerNorm,
+        vertical_windowing=True,
+        cyclic_longitude=False,
+        use_sdpa=False,
+        mlp_layer=None,
     ):
         super().__init__()
         self.dim = dim
@@ -393,6 +435,10 @@ class FuserLayer(nn.Module):
                     if isinstance(drop_path, Sequence)
                     else drop_path,
                     norm_layer=norm_layer,
+                    vertical_windowing=vertical_windowing,
+                    cyclic_longitude=cyclic_longitude,
+                    use_sdpa=use_sdpa,
+                    mlp_layer=mlp_layer,
                 )
                 for i in range(depth)
             ]
