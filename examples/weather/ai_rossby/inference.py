@@ -74,6 +74,7 @@ from async_writer import (
     AsyncForecastWriter,
     format_time_for_filename,
     make_forecast_filename,
+    subset_forecast_dataset,
 )
 
 
@@ -327,6 +328,7 @@ def run_inference_streaming_per_ic(
     perturber: Optional[Perturber] = None,
     has_diagnostic: bool = False,
     seed: int = 0,
+    save_variables: Optional[dict] = None,
     logger=None,
 ) -> list[str]:
     r"""Roll each IC out and hand one xr.Dataset per IC to the writer.
@@ -339,6 +341,15 @@ def run_inference_streaming_per_ic(
     Returns the list of paths submitted to the writer (the actual
     flush happens asynchronously — call ``writer.wait_all()`` to
     block).
+
+    ``save_variables``, when not ``None``, is a dict with optional keys
+    ``surface``, ``upper_air``, ``upper_air_levels``, ``diagnostic`` —
+    each a list of names / levels to keep on disk. Filter happens
+    *after* the rollout populates the full Dataset, *before* the writer
+    submits it, so the GPU work is unaffected but the on-disk payload
+    shrinks. ``None`` (or absent key) keeps that group whole; ``[]``
+    drops the group entirely. See
+    :func:`async_writer.subset_forecast_dataset` for full semantics.
     """
     if perturber is None:
         perturber = Deterministic() if ensemble_size == 1 else ReplicateOnly()
@@ -440,6 +451,16 @@ def run_inference_streaming_per_ic(
                 "constant_boundary": const_boundary,
                 "varying_boundary": next_boundary,
             }
+
+        # Apply on-disk subset before handing to the writer.
+        if save_variables:
+            ds = subset_forecast_dataset(
+                ds,
+                surface=save_variables.get("surface"),
+                upper_air=save_variables.get("upper_air"),
+                upper_air_levels=save_variables.get("upper_air_levels"),
+                diagnostic=save_variables.get("diagnostic"),
+            )
 
         # Hand the populated dataset to the async writer.
         fname = make_forecast_filename(
@@ -670,6 +691,11 @@ def main(cfg: DictConfig) -> None:
     output_format = str(inf_cfg.get("output_format", "zarr"))
     max_in_flight = int(inf_cfg.get("writer_max_in_flight", 4))
     num_writers = int(inf_cfg.get("writer_num_workers", 2))
+    save_variables = (
+        OmegaConf.to_container(inf_cfg.save_variables, resolve=True)
+        if "save_variables" in inf_cfg
+        else None
+    )
 
     if dist.rank == 0:
         logger.info(
@@ -700,6 +726,7 @@ def main(cfg: DictConfig) -> None:
             perturber=perturber,
             has_diagnostic=getattr(model, "has_diagnostic", False),
             seed=int(cfg.seed) + 1009,
+            save_variables=save_variables,
             logger=logger,
         )
         # __exit__ calls wait_all(): final flush + raise on any worker error.

@@ -38,9 +38,112 @@ from __future__ import annotations
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
+import numpy as np
 import xarray as xr
+
+
+def subset_forecast_dataset(
+    ds: xr.Dataset,
+    *,
+    surface: Optional[Sequence[str]] = None,
+    upper_air: Optional[Sequence[str]] = None,
+    diagnostic: Optional[Sequence[str]] = None,
+    upper_air_levels: Optional[Sequence[float]] = None,
+) -> xr.Dataset:
+    r"""Subset a per-IC / per-chunk forecast Dataset's channel groups + levels.
+
+    Returns a *new* Dataset (xarray's ``isel`` / ``sel`` views) where each
+    ``pred_*`` data variable is filtered along its variable axis to only
+    the names in the matching keyword. ``None`` (the default) keeps all
+    of that group — meaning the no-arg call is the identity.
+
+    Schema expected (matches the per-IC builder in inference.py and the
+    chunked buffer in climatology_cli.py):
+
+    - ``pred_surface``   — dims ``(.., surface_var, lat, lon)``
+      with coord ``surface_var`` carrying the variable names.
+    - ``pred_upper_air`` — dims ``(.., upper_air_var, level, lat, lon)``
+      with coords ``upper_air_var`` and ``level``.
+    - ``pred_diagnostic`` (optional) — dims ``(.., diag_var, lat, lon)``
+      with coord ``diag_var``.
+
+    Unknown names in any list raise ``KeyError`` so a typo in the config
+    is loud, not silent. Passing an empty list ``[]`` is treated the same
+    as ``None`` (keep all) — use the explicit ``[]`` form to *drop* the
+    whole group via dropping its data variable instead (see notes below).
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Per-IC / per-chunk forecast dataset.
+    surface : Sequence[str], optional
+        Surface variable names to keep. ``None`` keeps all.
+    upper_air : Sequence[str], optional
+        Upper-air variable names to keep. ``None`` keeps all.
+    diagnostic : Sequence[str], optional
+        Diagnostic variable names to keep. ``None`` keeps all. If the
+        dataset has no ``pred_diagnostic``, this argument is ignored.
+    upper_air_levels : Sequence[float], optional
+        Pressure / sigma levels to keep on ``pred_upper_air``. Compared
+        against the ``level`` coord by approximate equality (numpy
+        ``isclose`` at default tolerance). ``None`` keeps all.
+
+    Notes
+    -----
+    To *drop* an entire group (e.g. skip diagnostics entirely), pass an
+    empty ``Sequence``: ``diagnostic=[]`` will drop ``pred_diagnostic``
+    from the returned dataset. The same applies to the other groups —
+    this lets a config say "I only want surface fields on disk".
+    """
+    out = ds
+    if surface is not None and "pred_surface" in out:
+        if len(surface) == 0:
+            out = out.drop_vars("pred_surface")
+        else:
+            _check_known(surface, list(out["surface_var"].values), "surface")
+            out = out.sel(surface_var=list(surface))
+    if upper_air is not None and "pred_upper_air" in out:
+        if len(upper_air) == 0:
+            out = out.drop_vars("pred_upper_air")
+        else:
+            _check_known(upper_air, list(out["upper_air_var"].values), "upper_air")
+            out = out.sel(upper_air_var=list(upper_air))
+    if upper_air_levels is not None and "pred_upper_air" in out:
+        if len(upper_air_levels) == 0:
+            raise ValueError(
+                "upper_air_levels=[] would empty pred_upper_air; pass "
+                "upper_air=[] to drop the group entirely instead."
+            )
+        avail = np.asarray(out["level"].values, dtype=float)
+        want = np.asarray(list(upper_air_levels), dtype=float)
+        idx = []
+        for w in want:
+            matches = np.where(np.isclose(avail, w))[0]
+            if matches.size == 0:
+                raise KeyError(
+                    f"upper_air_levels: requested level {w!r} not found in "
+                    f"dataset's level coord {avail.tolist()}"
+                )
+            idx.append(int(matches[0]))
+        out = out.isel(level=idx)
+    if diagnostic is not None and "pred_diagnostic" in out:
+        if len(diagnostic) == 0:
+            out = out.drop_vars("pred_diagnostic")
+        else:
+            _check_known(diagnostic, list(out["diag_var"].values), "diagnostic")
+            out = out.sel(diag_var=list(diagnostic))
+    return out
+
+
+def _check_known(requested: Sequence[str], available: Sequence[str], group: str) -> None:
+    missing = [v for v in requested if v not in available]
+    if missing:
+        raise KeyError(
+            f"save_variables.{group}: requested {missing!r} not in dataset's "
+            f"{group}_var coord {list(available)!r}"
+        )
 
 
 def _write_one(path: str, dataset: xr.Dataset, *, mode: str = "w") -> None:
@@ -242,4 +345,5 @@ __all__ = [
     "AsyncForecastWriter",
     "make_forecast_filename",
     "format_time_for_filename",
+    "subset_forecast_dataset",
 ]

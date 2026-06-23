@@ -72,6 +72,7 @@ from async_writer import (
     AsyncForecastWriter,
     format_time_for_filename,
     make_forecast_filename,
+    subset_forecast_dataset,
 )
 from climatology import (
     StreamingBinnedMean,
@@ -331,15 +332,30 @@ class _ForecastChunkBuffer:
         model_name: str,
         run_name: str,
         extension: str,
+        save_variables: Optional[dict] = None,
     ) -> Optional[str]:
         """If non-empty, build dataset, submit, advance chunk counter.
 
         Returns the path that was submitted (or None when empty).
+
+        When ``save_variables`` is non-empty it filters the on-disk
+        payload down to a subset of channels / levels — same dict
+        contract as the inference path (see
+        :func:`async_writer.subset_forecast_dataset`). ``None`` keeps
+        the chunk intact.
         """
         if self.is_empty:
             return None
         run_id = f"{model_name}__{run_name}__ic{ic_index}"
         ds = self.to_dataset(ic_index=ic_index, run_id=run_id)
+        if save_variables:
+            ds = subset_forecast_dataset(
+                ds,
+                surface=save_variables.get("surface"),
+                upper_air=save_variables.get("upper_air"),
+                upper_air_levels=save_variables.get("upper_air_levels"),
+                diagnostic=save_variables.get("diagnostic"),
+            )
         t_start = self._frame_meta[0]["time_value"]
         t_end = self._frame_meta[-1]["time_value"]
         # Fall back to step indices when there's no time coord.
@@ -429,6 +445,7 @@ def run_climatology(
     run_name: str = "run",
     forecast_extension: str = "zarr",
     include_ic_in_forecast: bool = True,
+    forecast_save_variables: Optional[dict] = None,
     logger=None,
 ) -> dict:
     """Drive a long rollout and accumulate climatological statistics.
@@ -629,6 +646,7 @@ def run_climatology(
                         model_name=model_name,
                         run_name=run_name,
                         extension=forecast_extension,
+                        save_variables=forecast_save_variables,
                     )
                     if path is not None:
                         all_forecast_paths.append(path)
@@ -653,6 +671,7 @@ def run_climatology(
                 model_name=model_name,
                 run_name=run_name,
                 extension=forecast_extension,
+                save_variables=forecast_save_variables,
             )
             if path is not None:
                 all_forecast_paths.append(path)
@@ -952,6 +971,11 @@ def main(cfg: DictConfig) -> None:
     writer_max_in_flight = int(ccfg.get("writer_max_in_flight", 4))
     writer_num_workers = int(ccfg.get("writer_num_workers", 2))
     include_ic_in_forecast = bool(ccfg.get("include_ic_in_forecast", True))
+    forecast_save_variables = (
+        OmegaConf.to_container(ccfg.forecast_save_variables, resolve=True)
+        if "forecast_save_variables" in ccfg
+        else None
+    )
     dump_forecast = (
         forecast_chunk_steps is not None
         and int(forecast_chunk_steps) > 0
@@ -994,6 +1018,7 @@ def main(cfg: DictConfig) -> None:
             run_name=str(cfg.run_name),
             forecast_extension=forecast_extension,
             include_ic_in_forecast=include_ic_in_forecast,
+            forecast_save_variables=forecast_save_variables,
             logger=logger,
         )
 
