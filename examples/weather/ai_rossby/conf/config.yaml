@@ -24,7 +24,7 @@ defaults:
   - loss: mae
   - dataset: plasim_sim52_year12
   - training: pangu_plasim_legacy
-  - validation: off
+  - validation: "off"  # quoted — YAML otherwise parses bare `off` as bool False
 
 hydra:
   job:

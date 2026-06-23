@@ -730,17 +730,421 @@ Map the vendored SFNO to PhysicsNeMo's SFNO (makani plugin) or port the vendored
 
 **Native variant** (PhysicsNeMo's built-in SFNO/Makani backbone) — deferred until a use case demands it.
 
-### Phase 8+ — amip stochastic-interpolant model (second major effort)
-- `interpolant.py` NoiseScheduler + Solver reproducing `DynamicInterpolant`/`DriftScheduler`/`DataDependentInterpolant`
-  (+ `ERDMScheduler` later); spherical-harmonic noise; per-channel `noise_scales` buffer.
-- DiT model (faithful w/ `old/` deps carried over + native on `physicsnemo.models.dit`); fixed bilinear-×4
-  latent as deterministic pre/post-processing; three-way conditioning (state/`c_grid`/`c_scalar` w/ calendar+CO₂).
-- Muon optimizer + EMA into the shared recipe; rollout/ensemble inference (RNG-checkpointed resume; S2S hindcasts);
-  evals (climatology/bias, QBO, global-mean timeseries, ensemble envelopes); Lightning-`.ckpt` translation script.
-**Tests**:
-- *Unit*: solver step + 5-step rollout on synthetic state, finite output, shapes preserved.
-- *Smoke* (Delta): same on CUDA; one DiT forward + backward + AdamW step; checkpoint roundtrip.
-  Datapipe smoke for amip's reader (real fixture, per `hpc/delta.md`). Lightning-ckpt translator smoke.
+### Phase 8+ — amip diffusion / stochastic-interpolant models (second major effort)
+
+> **Plan rebaselined 2026-06-23** after surveying upstream amip
+> [commit `497827e` "BIG changes" on 2026-06-17](file:///work/nvme/bdiu/awikner/amip).
+> The original Phase 8 sketch (single-step DiT + DynamicInterpolant +
+> bilinear-×4 latent) is now one *baseline* model among five upstream
+> variants. Updated structure below.
+
+#### Upstream snapshot (2026-06-17, commit `497827e`)
+
+| Class | Diffusion family | Backbone | Status in amip | YAML(s) |
+|---|---|---|---|---|
+| `SI` | DriftScheduler (stochastic interpolant) | DiT | baseline | `configs/SI_*` |
+| `SI_X` | DynamicInterpolant (x-prediction) | DiT | baseline | `configs/SI_NCAR*.yaml` |
+| `EDM` | Elucidated diffusion (Karras et al.) | DiT | baseline | `configs/EDM.yaml` |
+| `ERDM` | Elucidated *rolling* diffusion (Jun 2025) | `RollingDiT` *or* `ERDMUnet` | **active** | `configs/ERDM*.yaml` |
+| `RFM` | Rolling Flow Matching (new in BIG changes) | `RollingDiT` *or* UNet | **active** | `configs/RFM.yaml` |
+| `x_DDC` | Data-Dependent Cascade (super-res autoencoder) | `DiTAE` + UNet decoder | **active** | `configs/DDC*.yaml` |
+| `CombinedModule` | two-stage SI-forecast → x_DDC-downscale ensemble | n/a (composite) | **active** | `configs/combined.yaml` |
+
+The active models (ERDM, RFM, x_DDC, CombinedModule) all involve
+*temporal rolling-window* training (window length W=6 frames at 24 h
+cadence per the typical config). The single-step models (SI, SI_X, EDM)
+predate this and are kept as baselines.
+
+#### Key upstream pieces to reproduce
+
+- **Schedulers / solvers**
+  - `DriftScheduler` + `DynamicInterpolant` (the original stochastic-interpolant pair).
+  - `ERDMScheduler` — rolling-window EDM-style schedule with `rho`, `P_mean`, `P_std` per-frame.
+  - `RFMScheduler` — rolling-window flow matching with weighting modes (`midrange` / `uniform` /
+    `lognormal_logit`) and init modes (`oracle` / `fanout`).
+  - `EDMScheduler` (Karras) — baseline.
+  - `x_DDCScheduler` — data-dependent-cascade variant of EDM for the super-resolution path.
+
+- **Backbones**
+  - `DiT` (denoising transformer; ~20 kB) — used by SI / SI_X / EDM.
+  - `RollingDiT` (causal temporal attention; new in BIG changes) — used by ERDM / RFM.
+  - `ERDMUnet` (UNet variant for ERDM, drop-in for `RollingDiT`).
+  - `DiTAE` (DiT-based autoencoder) — used by `x_DDC` for super-resolution.
+  - `AE` / `Decoder` / `Unet` (smaller helpers used by the cascade + baselines).
+
+- **Data pipeline**
+  - `data/amip_new.py` (1723 LOC) — per-timestep HDF5 reader with cftime-aware calendar
+    (no-leap / 360-day), rolling-window batching, delta-boundary fields, NaN-smoothing,
+    epsilon-noise augmentation, predict-delta mode.
+  - `data/amip_fast.py` (920 LOC, new in BIG changes) — pre-assembled `(T, C, H, W)` memmap
+    stores built once by `scripts/reassemble.py`. Drop-in API replacement for the slow loader.
+  - Channel groups (per typical NCAR-AMIP config):
+    - **Upper-air** (5 vars × 26 hPa levels = 130 channels): T, U, V, Z, Q.
+    - **Surface** (6 channels): t_skin, p_s, 2m T, 2m q, 10m U, 10m V.
+    - **Diagnostic** (15 channels — output only, in supervised loss): TOA + surface SW/LW radiation,
+      latent + sensible heat fluxes, PRATE, hcc/mcc/lcc cloud cover, mn2t / mx2t / mxtpr.
+    - **Varying boundary** (input only): SST, sea-ice, TOA solar (TSI), optional CO₂.
+    - **Constant boundary** (one-shot): LSM, surface geopotential.
+
+- **Training infrastructure**
+  - PyTorch Lightning end-to-end (`L.LightningModule` + `L.Trainer`); DDP / FSDP via strategy config.
+  - Custom `EMAWeightAveraging` callback wrapping PyTorch `get_ema_avg_fn`.
+  - Muon optimizer (configured as `optimizer: muon` in YAML; separate pip install).
+  - Mixed precision (32-true default; bf16 path exists), grad accumulation, sanity-check steps.
+
+- **Inference + evals**
+  - `rollout_single.py` (329 LOC) — per-IC autoregressive rollout, loads Lightning `.ckpt` directly,
+    writes NetCDF inline (no async writer yet).
+  - `bias.py` (344 LOC) — validation-set sweep computing latitude-weighted RMSE per (variable,
+    lead time).
+
+#### Re-use surface (what plugs into existing ai-rossby plumbing)
+
+| ai-rossby asset | Re-use plan |
+|---|---|
+| `PlasimClimateDataset` / `ClimateZarrDataset` | **New `AMIPClimateDataset` needed.** AMIP variables (radiation, fluxes, precipitation diagnostics, sea ice + TSI forcings) don't exist in PLASIM; pressure levels (26 hPa) differ from PLASIM's 13. Build a new dataset class with the same Plasim-shaped API (`surface_in`, `upper_air_in`, `constant_boundary`, `varying_boundary`, `diagnostic`, `target_*`) wrapping the upstream `amip_new.py` / `amip_fast.py` readers. |
+| `PlasimNormalizer` | **Generalize.** The normalizer's z-score logic + denormalize-state helper already match AMIP's per-channel-NetCDF stat format; only the channel-group ordering needs the AMIP variable list. |
+| `PanguPlasimLoss` (lat-weighted RMSE per group) | **Reuse as the *training* loss target shape.** The amip loss lives inside each scheduler (`scheduler.compute_loss`); we lift the lat-weighted lat-weighted RMSE out and feed scheduler outputs through it for symmetry with Pangu / SFNO. |
+| `AsyncForecastWriter` + `subset_forecast_dataset` + `make_forecast_filename` | **Reuse as-is.** Disk I/O is model-agnostic; amip rollout adopts the per-IC streaming pattern (3.7s / IC savings already measured). |
+| `run_inference_streaming_per_ic` / `_build_per_ic_dataset` | **Reuse.** Forward signature differs (scheduler.sample takes a noise sample + conditioning), but the IC-loop / `ic_time` coord / denormalize-before-write pattern slots in. |
+| RolloutValidator + Streaming{RMSE,ACC} | **Reuse.** Lat-weighted RMSE is computed in physical units already (Phase 4 convention) — the diffusion model's *ensemble-mean* prediction plugs in unchanged. |
+| Train loop (`train_loop.py` + `StaticCaptureTraining`) | **Open question** — see "Decisions needed" below. Lightning has different ergonomics. |
+| EMA (Phase 3 `ema.py`) | **Reuse with adapter.** Pangu uses our own EMA wrapper; amip uses Lightning's `EMAWeightAveraging`. Either we extend our EMA wrapper to support callback-style hooks (cheap), or call our existing `ema.py` directly inside the LightningModule. |
+| Muon optimizer | **New dependency.** Pip-install (single repo) or vendor — same call as a normal optimizer once installed. |
+
+#### Locked-in decisions (2026-06-23)
+
+| Topic | Decision |
+|---|---|
+| **Training stack** | Port amip off Lightning onto our existing `examples/weather/ai_rossby/train_loop.py`. |
+| **Model scope** | All five diffusion variants ported (SI, SI_X, EDM, ERDM, RFM). `x_DDC` super-res cascade + `CombinedModule` deferred to Phase 8f follow-ups (after single-model recipes stable). |
+| **Data loader** | **Single `ClimateZarrDataset` class** parameterized by YAML channel groups (no PLASIM/AMIP/ERA5/E3SM split). YAML drives which variables are forcings vs. prognostic. |
+| **Data format** | AMIP HDF5 → Zarr via a one-shot conversion tool (mirroring `tools/data/era5/pangu_h5_to_zarr.py`). No memmap "fast store" layer — Zarr V3 chunked delivers equivalent throughput, and unification is more valuable than a parallel path. |
+| **Scheduler location** | `physicsnemo/experimental/diffusion/` (parallel to `physicsnemo/experimental/models/`). |
+| **Loss-as-Hydra-group** | Each scheduler is callable via `loss=` group entry. `loss.compute_loss(model, …)` drives the training step. |
+| **Inference scheduler** | Option (i) — scheduler owns both methods. Each scheduler exposes `compute_loss(model, …)` and `sample(model, …)`; recipes wire a *training* scheduler under `loss=` and an *inference* scheduler under `inference.sampler=`. Same scheduler at both ends is one common case; different schedulers (e.g., train ERDM, sample EDM) is one yaml-line change. |
+| **EMA** | **Switch all EMA usage to `torch.optim.swa_utils.AveragedModel`** with a custom `avg_fn`. This replaces the current bespoke `examples/weather/ai_rossby/ema.py` (`ModelEMA` class). Scope is broader than Phase 8 — touches the existing Pangu/SFNO recipes too — and is treated as a Phase 8 pre-requisite (task **8-pre-1** below). |
+| **Multi-stage curriculum** | Reuse our existing `training.stages` list to express rolling-window curricula (e.g., short window pretrain → long window finetune). |
+| **Mixed precision** | fp32 default for first commits (matches upstream + our existing recipes). bf16 path benchmarked + advertised in `_NativeMetaData` as a Phase 8f follow-up. |
+| **Validation cadence** | Skip `RolloutValidator` for the first commits — diffusion rollout is 10–20× more expensive per IC than deterministic. Training loss is itself a sufficient signal. **Escalation point**: once training is converging, add `DiffusionRolloutValidator` with per-step sample limits + ensemble spread (Phase 8f). |
+| **Optimizer** | Muon via pip install (`uv pip install muon`). |
+| **Recipe layout** | Single recipe at `examples/weather/ai_rossby/`. New Hydra groups (`model=si`, `model=erdm`, …) reuse the existing trainer + `Module.instantiate` machinery. |
+| **Lightning `.ckpt` translator** | End-of-Phase 8e. Converts amip's `.ckpt` blobs into PhysicsNeMo `.mdlus` so user-trained weights load via our recipe. Live-validated against your existing checkpoints. |
+| **Eval suite** | Climatology / bias / QBO / global-mean / ensemble envelopes — deferred to Phase 8f after translator. |
+
+#### File / directory plan (locked)
+
+```
+physicsnemo/experimental/
+├── diffusion/                              [NEW — Phase 8a]
+│   ├── __init__.py
+│   ├── dynamic_interpolant.py              # SI + SI_X (DriftScheduler + DynamicInterpolant)
+│   ├── erdm.py                             # Elucidated Rolling Diffusion scheduler
+│   ├── rfm.py                              # Rolling Flow Matching scheduler
+│   ├── edm.py                              # Elucidated Diffusion (Karras) — single-step baseline
+│   └── x_DDC.py                            # Data-Dependent Cascade — deferred to 8f
+└── models/
+    └── amip_si/                            [NEW — Phase 8a]
+        ├── __init__.py
+        ├── dit.py                          # DiT (denoising transformer)
+        ├── rolling_dit.py                  # RollingDiT (causal temporal attention)
+        ├── erdm_unet.py                    # UNet variant for ERDM
+        ├── dit_ae.py                       # DiTAE for x_DDC — deferred to 8f
+        └── layers.py                       # Local building blocks (attention, mlp, embeddings)
+
+physicsnemo/experimental/datapipes/
+├── plasim/                                  [EXISTING — to be REFACTORED in 8b]
+│   ├── dataset.py                          # PlasimClimateDataset → renamed to ClimateZarrDataset
+│   ├── multiyear.py                        # MultiYearPlasimClimateDataset → ClimateZarrMultiYearDataset
+│   ├── transforms.py                       # PlasimNormalizer → ClimateNormalizer (channel-group-agnostic)
+│   ├── datapipe.py                         # PlasimClimateDatapipe → ClimateDatapipe
+│   └── sequence.py                         # unchanged (used by rolling-window training in Phase 8c)
+└── climate/                                 [NEW — Phase 8b, new package home]
+    ├── __init__.py                          # Re-exports ClimateZarrDataset etc. under new name
+    └── (above modules relocated)
+
+examples/weather/ai_rossby/conf/
+├── model/
+│   ├── si.yaml                              [NEW — Phase 8c]
+│   ├── si_x.yaml                            [NEW — Phase 8c]
+│   ├── edm.yaml                             [NEW — Phase 8c]
+│   ├── erdm.yaml                            [NEW — Phase 8c]
+│   └── rfm.yaml                             [NEW — Phase 8c]
+├── loss/                                    [EXISTING — extended]
+│   ├── erdm_loss.yaml                       [NEW — wraps ERDMScheduler]
+│   ├── rfm_loss.yaml                        [NEW — wraps RFMScheduler]
+│   ├── si_loss.yaml                         [NEW — wraps DriftScheduler]
+│   ├── si_x_loss.yaml                       [NEW — wraps DynamicInterpolant]
+│   └── edm_loss.yaml                        [NEW — wraps EDMScheduler]
+├── training/                                [EXISTING — extended]
+│   ├── erdm.yaml                            [NEW — Muon + EMA + 2-stage curriculum]
+│   ├── rfm.yaml                             [NEW]
+│   ├── si.yaml                              [NEW]
+│   ├── si_x.yaml                            [NEW]
+│   └── edm.yaml                             [NEW]
+├── dataset/                                 [EXISTING — extended]
+│   ├── amip_ncar_test.yaml                  [NEW — single-year AMIP smoke fixture]
+│   └── amip_ncar_full.yaml                  [NEW — full multi-year]
+└── inference/                               [NEW group]
+    ├── sampler_erdm.yaml                    # default: same scheduler as training
+    ├── sampler_edm_fast.yaml                # shorter sampling schedule
+    └── ...
+
+tools/
+├── data/amip/                                [NEW — Phase 8b]
+│   ├── amip_h5_to_zarr.py                   # HDF5 (per-timestep, /input groups) → multi-year Zarr
+│   └── channel_configs/
+│       └── amip_ncar_v1.json                # default channel set (130 upper + 6 surf + 15 diag + 4 fc + 2 cst)
+└── checkpoint_translation/
+    └── amip_si.py                            [NEW — Phase 8e]   # Lightning .ckpt → .mdlus
+
+examples/weather/ai_rossby/
+├── train_loop.py                            [EDITED — Phase 8c]   # Loss group invocation already supports scheduler.compute_loss
+├── inference.py                             [EDITED — Phase 8d]   # Adds inference.sampler dispatch + ensemble loop
+└── train.py                                 [EDITED — Phase 8c]   # New Muon optimizer branch in build_optimizer
+```
+
+#### Phase 8 sub-phases
+
+##### Phase 8-pre-1 — Migrate EMA off `ModelEMA` onto `torch.optim.swa_utils`
+
+This is a prerequisite touching the existing Pangu_Plasim + SFNO_Plasim
+recipes, so it lands cleanly before Phase 8a (and is fully test-covered
+before any diffusion code shows up).
+
+**Why now**: keeps a single EMA implementation across the codebase — both
+the deterministic and diffusion recipes share one well-tested path that
+mirrors what upstream amip (and most of the PyTorch ecosystem) uses.
+
+**Concretely**:
+
+1. Replace the body of [`examples/weather/ai_rossby/ema.py`](examples/weather/ai_rossby/ema.py)
+   (`ModelEMA` class). The public API stays unchanged so the four call
+   sites in [`train.py`](examples/weather/ai_rossby/train.py) (lines
+   568, 772, 805/849, 865) don't need to move:
+   - `__init__(model, *, decay, warmup_epochs, steps_per_epoch)` constructs
+     an `AveragedModel` with a custom `avg_fn` that mirrors our existing
+     `_effective_decay = min(decay, (1 + step) / (warmup_steps + 1))`
+     schedule. (Note: swa_utils's `num_averaged` counter is per-step,
+     so we translate `warmup_epochs → warmup_steps = warmup_epochs ×
+     steps_per_epoch` at construction time.)
+   - `update(model, epoch)` → `self.avg_model.update_parameters(model)`.
+     The `epoch` arg is kept on the signature for back-compat but ignored
+     (warmup is now step-counted; `epoch` was only used by the old
+     `_effective_decay`).
+   - `apply_to(model)` + `restore(model)` preserve their existing
+     swap-then-forward-then-restore semantics. Implementation: copy
+     `avg_model.module.state_dict()` into `model.state_dict()`, back up
+     the original, restore on `restore()`. (Trainer call sites at
+     train.py:805/849 keep working unchanged.)
+   - `state_dict()` / `load_state_dict()` wraps `avg_model.state_dict()`.
+2. **Tests**:
+   - Unit (CPU): parity test — for a tiny model + synthetic optimizer
+     loop, the new wrapper produces parameter values within 1e-6 of the
+     old `ModelEMA` after 10 steps × 3 epochs at decay=0.999,
+     warmup_epochs=2, steps_per_epoch=4. Guards the schedule.
+   - Unit: `state_dict` round-trip; `apply_to` / `restore` correctness
+     (model params equal EMA after apply, equal original after restore).
+3. **Regression**: run the existing Pangu_Plasim + SFNO_Plasim test
+   suites (already 133+ tests) to confirm no behavior change for the
+   deterministic recipes. The Phase 6 Track A native smoke test
+   (job 19567762 from this conversation) gets re-run with the new EMA
+   wrapper as a live cross-check.
+4. **No new Hydra config knobs** — `cfg.training.ema.{enabled,decay,warmup_epochs}`
+   stay the same.
+
+Done before Phase 8a starts.
+
+##### Phase 8a — Backbones + schedulers (no training yet)
+
+1. Vendor `DiT`, `RollingDiT`, `ERDMUnet` into `physicsnemo/experimental/models/amip_si/`.
+   Each subclasses `physicsnemo.Module` with a `MetaData` (fp32-only at first;
+   `_NativeMetaData` with bf16 + cuda_graphs follows in 8f).
+2. Vendor schedulers into `physicsnemo/experimental/diffusion/`. Each scheduler
+   exposes **both halves of the train/inference asymmetry on one class**:
+   - `compute_loss(model, c_grid, c_scalar, y, **kwargs) → loss_dict` (training)
+   - `sample(model, c_grid, c_scalar, init_x=None, generator=None, **kwargs) → x_pred` (inference)
+   - `to(device)` for buffer placement
+   - `state_dict()` / `load_state_dict()` for any registered buffers
+     (noise schedules, σ tables, position embeddings used by the sampler)
+
+   Training and inference can pick *different* scheduler instances. Concretely:
+   the training config picks one via `loss=` (driving `train_loop.py`'s
+   `scheduler.compute_loss(model, …)`), while the inference config picks
+   another via `inference.sampler=` (driving `inference.py`'s
+   `sampler.sample(model, …)`). Same scheduler at both ends is the common
+   case; e.g. training with ERDM and sampling with the EDM solver for
+   faster wall time at inference is a one-yaml-line change. The scheduler
+   classes themselves are stateless about which mode the recipe is in —
+   each method is callable independently of the other.
+3. **Unit tests** (CPU): per-scheduler `compute_loss` + `sample` on synthetic tiny
+   inputs; per-backbone forward-shape match; state-dict round-trip via
+   `Module.from_checkpoint`.
+4. **GPU smoke** (Delta A40, `delta-smoke-test` skill): one forward+backward on
+   each scheduler × each compatible backbone (e.g., ERDM × RollingDiT, ERDM ×
+   ERDMUnet, SI × DiT, etc.). One sample step on the same setup to verify
+   gradients flow + numerics finite.
+
+##### Phase 8b — Data refactor + AMIP HDF5→Zarr converter
+
+5. **Refactor `PlasimClimateDataset` → `ClimateZarrDataset`** in
+   `physicsnemo/experimental/datapipes/climate/` (new package home; the
+   `datapipes/plasim/` re-exports for back-compat during the transition,
+   then deprecated when no callers remain).
+   - All channel-group semantics (which variables are surface vs. upper-air
+     vs. constant boundary vs. varying boundary vs. land vs. ocean vs.
+     diagnostic) are driven **entirely by the YAML config**. The dataset
+     class itself has no model-family-specific defaults.
+   - Same for `PlasimClimateDatapipe`, `PlasimNormalizer`, and
+     `MultiYearPlasimClimateDataset` — renamed to `ClimateDatapipe`,
+     `ClimateNormalizer`, `ClimateZarrMultiYearDataset`. Each becomes
+     channel-group-agnostic.
+   - Update all in-tree callers: `train.py`, `train_loop.py`, `inference.py`,
+     `validate.py`, `climatology_cli.py`, tests, recipes.
+6. **New tool** `tools/data/amip/amip_h5_to_zarr.py`:
+   - Reads upstream amip's per-timestep HDF5 files (one file per 6h step,
+     with `/input` groups per variable).
+   - Writes per-year multi-variable Zarr matching the existing per-year
+     layout we use for ERA5 / PLASIM / E3SM (one Zarr per year, channels
+     as data_vars, time/lat/lon/pressure_level coords).
+   - Channel config JSON identical in structure to
+     `tools/data/era5/pangu_h5_to_zarr.py`'s `--channel-config`.
+   - Cftime-aware (non-standard calendars supported).
+   - Default channel set: 130 upper-air (5 vars × 26 levels) + 6 surface +
+     15 diagnostics + 4 varying boundary (SST, sea ice, TSI, CO₂) + 2
+     constant boundary (LSM, geopotential).
+7. **New tests** (CPU + Delta CPU):
+   - Unit: `ClimateZarrDataset` returns correct channel-group shapes on the
+     existing PLASIM fixture, *and* on a tiny AMIP fixture (1-day, 4-var).
+   - Unit: `ClimateNormalizer` denormalize round-trips on AMIP stats.
+   - Conversion: `amip_h5_to_zarr.py` on a 1-day fixture, schema sanity.
+8. **AMIP dataset YAMLs**:
+   - `conf/dataset/amip_ncar_test.yaml` — single-year test fixture
+   - `conf/dataset/amip_ncar_full.yaml` — full multi-year run
+9. **AMIP data conversion** (Delta CPU, batch job): convert your existing
+   amip HDF5 archive to the new Zarr layout under
+   `/work/hdd/bdiu/awikner/physicsnemo-zarr/amip_ncar/` once you confirm
+   the channel-config JSON.
+
+##### Phase 8c — Training recipe (single-model, five variants)
+
+10. Install Muon: `uv pip install muon`; new branch in
+    `examples/weather/ai_rossby/train.py:build_optimizer` for
+    `cfg.training.optimizer.kind == "muon"`.
+11. New Hydra `loss=` group entries (`erdm_loss.yaml`, `rfm_loss.yaml`,
+    `si_loss.yaml`, `si_x_loss.yaml`, `edm_loss.yaml`). Each instantiates
+    the corresponding scheduler from Phase 8a.
+12. **`train_loop.py` minimal edit**: the current `train_step` calls
+    `loss(pred, target, ...)`. Add a branch: when `loss.is_scheduler`
+    (attribute on the new diffusion loss objects), invoke
+    `loss.compute_loss(model, c_grid, c_scalar, y)` directly — no
+    pre-forward through the model needed.
+13. **New model configs** (`conf/model/{si,si_x,edm,erdm,rfm}.yaml`):
+    each declares `name:` + `module:` for `Module.instantiate`. Backbones
+    are paired with their default scheduler in 8c.11 but easily swappable.
+14. **New training configs** (`conf/training/{si,si_x,edm,erdm,rfm}.yaml`):
+    - Muon optimizer + cosine warmup
+    - EMA enabled, decay=0.999
+    - Multi-stage curriculum for rolling-window models (ERDM, RFM):
+      stage 0 = short window (W=3, 50% of epochs), stage 1 = full window
+      (W=6, remaining 50%).
+    - Mixed precision: fp32 default.
+15. **Skip `RolloutValidator` for diffusion** — explicit `validation=off`
+    in each new training config. Add a `# TODO Phase 8f` comment noting
+    the escalation point to add a `DiffusionRolloutValidator`.
+16. **Tests**:
+    - Unit: train_loop dispatches to `loss.compute_loss` when the loss
+      object is a scheduler (mock model + scheduler).
+    - Delta A40 smoke (`delta-smoke-test` skill): one full mini-epoch on
+      the AMIP test fixture for each of the 5 models. Verify final loss
+      finite + checkpoint produced + EMA shadow weights present.
+
+##### Phase 8d — Inference + per-IC streaming
+
+17. **Extend `inference.py`** with a diffusion-aware branch:
+    - When the model has a `sample(...)` method (set during 8a's vendoring),
+      the rollout loop calls `sampler.sample(model, c_grid, c_scalar, …)`
+      instead of `model.forward(…)`.
+    - New `inference.sampler=` Hydra group selects the inference scheduler
+      (defaults to the training scheduler from the matching `loss=` group).
+    - Ensemble support: replicate the IC's noise seed N times, run N
+      independent samples per IC, write each as an ensemble axis in the
+      per-IC Dataset.
+18. **Reuse**: `AsyncForecastWriter`, `subset_forecast_dataset`,
+    `make_forecast_filename`, `ic_time` scalar coord, denormalize-before-write
+    — all stay in place.
+19. **Tests**:
+    - Unit: synthetic model + scheduler stub, verify per-IC streaming writes
+      ensemble axis correctly.
+    - Delta A40 smoke: full rollout (max_step=4, ensemble_size=2) on the
+      AMIP test fixture for ERDM model. Verify outputs finite, on-disk Zarr
+      has expected shape + `ic_time` coord.
+
+##### Phase 8e — Lightning `.ckpt` translator
+
+20. New `tools/checkpoint_translation/amip_si.py` (mirrors
+    `pangu_plasim.py` structure):
+    - Loads amip's Lightning `.ckpt` blob.
+    - Strips Lightning's wrapping keys (`pl_state_dict["model.*"]` →
+      bare `state_dict`).
+    - Optional `_orig_mod.` / `module.` prefix stripping (DDP / torch.compile
+      robustness — same shared helper as `pangu_plasim.py`).
+    - Detects scheduler type from saved hyperparameters; instantiates the
+      matching ai-rossby Module + loads state.
+    - Saves as `.mdlus`.
+21. **Live-validate** against the three checkpoint families you've trained
+    upstream (SI, ERDM, RFM at minimum). Mirror of Phase 5's live-validation
+    pattern: assert 0 missing / 0 unexpected keys, finite + non-degenerate
+    predictions, matching channel layout.
+22. **Tests**:
+    - Unit: synthetic Lightning-style ckpt → translator → load into
+      ai-rossby `Module` → forward → assert finite.
+    - Live A40 GPU smoke against the user-provided real checkpoints.
+
+##### Phase 8f — Follow-ups (post-translator)
+
+23. `x_DDC` super-res cascade + `CombinedModule` two-stage
+    forecaster+downscaler.
+24. `DiffusionRolloutValidator` (per-step sample limits + ensemble spread)
+    — escalation point from 8c.15.
+25. bf16-default native variants of the diffusion models (advertise
+    `cuda_graphs=False` because of the iterative sampling loop, but `amp=True`
+    + `bf16=True`).
+26. Eval suite: climatology, bias, QBO, global-mean timeseries, ensemble
+    envelopes. Reuse Phase 4c `StreamingTimeMean` / `StreamingBinned*`
+    aggregators in physical units (Phase 4 convention).
+
+#### Risk + open items
+
+- **Refactor blast radius (Phase 8b).** Renaming `PlasimClimateDataset`
+  touches every existing recipe + test that imports it (~30 call sites).
+  Mitigation: keep the `physicsnemo/experimental/datapipes/plasim/`
+  package as a thin re-export shim for one release, then deprecate.
+  Run the full test suite after the rename to flush out missed import sites.
+- **Muon × DDP interaction.** Muon has a recent reputation for working
+  cleanly with DDP but some optimizers don't with FSDP. We don't use FSDP
+  yet, so deferred until needed.
+- **Rolling-window batching with our existing `PlasimClimateDatapipe`.**
+  The upstream amip `multistep_rollout` / `window_train` flags pull a
+  `(T+W, ...)` slice per sample. Our existing `sequence.py` already
+  supports multi-step rollouts (Phase 4 / Phase 3 v3); Phase 8c will
+  thread a `window_train=True` flag through to use it for rolling diffusion
+  training.
+- **The user's existing `.ckpt` files may have non-standard hyperparameter
+  storage** (some have `partial_checkpoint` keys, see the iteration commits
+  before BIG changes). The translator (Phase 8e) needs to handle that
+  variation. Plan to discover the variants live during 8e step 21.
+
+**Tests** (carry the Phase 1 contract):
+- *Unit*: per-scheduler `compute_loss` + `sample` on synthetic tiny inputs;
+  per-backbone forward-shape match; `ClimateZarrDataset` shapes on AMIP
+  fixture; `ClimateNormalizer` denormalize round-trip; `amip_h5_to_zarr.py`
+  schema sanity on a 1-day fixture; train_loop dispatch to
+  `loss.compute_loss` on a scheduler-shaped object.
+- *Smoke* (Delta A40, `delta-smoke-test` skill): one full mini-epoch on
+  AMIP test fixture for each of the 5 models; one diffusion rollout
+  (max_step=4, ensemble_size=2) for ERDM; Lightning `.ckpt` translator
+  on real checkpoints.
 
 ### Cross-cutting (throughout)
 - **Claude skills** (`skills/`) for model dev, test scaffolding, and optimization (per outline objective).
