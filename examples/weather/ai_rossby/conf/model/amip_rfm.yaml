@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP RFM (Rolling Flow Matching) — :class:`RollingDiTWrapper` around a
+# :class:`RollingDiT` backbone with causal temporal attention.
+
+name: RollingDiTWrapper
+module: physicsnemo.experimental.models.amip_si
+
+surface_variables:
+  - 2m_temperature
+  - 2m_specific_humidity
+  - 2m_dewpoint_temperature
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+  - skin_temperature
+  - snow_depth
+  - surface_pressure
+  - soil_temperature_level_1
+  - soil_temperature_level_2
+  - soil_temperature_level_3
+  - soil_temperature_level_4
+  - volumetric_soil_water_layer_1
+  - volumetric_soil_water_layer_2
+  - volumetric_soil_water_layer_3
+  - volumetric_soil_water_layer_4
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - geopotential
+  - specific_total_water
+diagnostic_variables:
+  - DLWRFsfc_24h
+  - DSWRFsfc_24h
+  - ULWRFsfc_24h
+  - ULWRFtoa_24h
+  - USWRFsfc_24h
+  - USWRFtoa_24h
+  - LHTFLsfc_24h
+  - SHTFLsfc_24h
+  - PRATEsfc_24h
+  - hcc_24h
+  - lcc_24h
+  - mcc_24h
+  - mn2t_24h
+  - mx2t_24h
+  - mxtpr_24h
+constant_boundary_variables:
+  - land_sea_mask
+  - geopotential_at_surface
+varying_boundary_variables:
+  - sea_surface_temperature
+  - sea_ice_cover
+  - DSWRFtoa
+  - DSWRFtoa_24h_lead
+  - global_mean_co2
+
+levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
+         500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
+horizontal_resolution: [180, 360]
+scalar_dim: 2
+
+rolling_dit_kwargs:
+  dim: 384
+  num_heads: 8
+  temporal_num_heads: 8
+  num_blocks: 6
+  c_grid_embed_dim: 32
+  c_scalar_embed_dim: 16
+  c_grid_downsample: 1
+  dropout: 0.0

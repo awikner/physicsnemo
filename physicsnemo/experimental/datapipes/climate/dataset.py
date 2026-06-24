@@ -203,10 +203,17 @@ class ClimateZarrDataset(Dataset):
         yearly_repeating_boundary: bool = False,
         leap_boundary_zarr_path: Optional[str | Path] = None,
         non_leap_boundary_zarr_path: Optional[str | Path] = None,
+        emit_calendar: bool = False,
     ) -> None:
         self.zarr_path = str(zarr_path)
         self.dtype = pin_memory_dtype
         self.transform = transform
+        # Whether ``__getitem__`` emits a per-sample ``calendar`` tensor with
+        # shape ``(2,)`` containing ``(second_of_day, day_of_year)``.
+        # Diffusion recipes (Phase 8c) flip this on so the model wrappers
+        # have a c_scalar input; deterministic recipes (Pangu/SFNO) leave it
+        # off — same default behavior as pre-Phase-8b.
+        self._emit_calendar = bool(emit_calendar)
         # Boundary-substitution configuration (Phase-2 follow-up; see
         # implementation_plan.md). When set, varying boundary variables are
         # read from a SEPARATE Zarr store (single-year, time-indexed) instead
@@ -306,10 +313,14 @@ class ClimateZarrDataset(Dataset):
             self._open_boundary_store("non_leap", self._non_leap_boundary_zarr_path)
         elif self._boundary_zarr_path:
             self._open_boundary_store("single", self._boundary_zarr_path)
-        # Cache the prognostic time coord for boundary-time-index lookup.
-        # Only needed when actually using a separate boundary store.
+        # Cache the prognostic time coord for boundary-time-index lookup
+        # and for calendar emission. Needed when actually using a separate
+        # boundary store OR when ``emit_calendar=True`` (Phase 8c — diffusion
+        # recipes pull (second_of_day, day_of_year) per sample).
         self._prog_times = (
-            self._ds["time"].values if self._boundary_async_groups else None
+            self._ds["time"].values
+            if (self._boundary_async_groups or self._emit_calendar)
+            else None
         )
         self._steps_per_day = (
             24 // self.layout.data_timedelta_hours
@@ -578,9 +589,28 @@ class ClimateZarrDataset(Dataset):
             sample["target_upper_air_pressure"] = target["upper_air_pressure_in"]
         sample["lead_time"] = torch.tensor(lead, dtype=torch.long)
         sample["time_idx"] = torch.tensor(start_idx, dtype=torch.long)
+        if self._emit_calendar:
+            sample["calendar"] = self._calendar_vector(start_idx)
         if self.transform is not None:
             sample = self.transform(sample)
         return sample
+
+    def _calendar_vector(self, time_idx: int) -> torch.Tensor:
+        r"""Return a 2-vector ``(second_of_day, day_of_year)`` for the IC's
+        time stamp, used as a non-spatial conditioning input by the
+        diffusion models' :class:`CalendarEmbedding`.
+
+        Both fields are emitted in their natural units (seconds /
+        day-of-year-1) — the embedding layer in the model is responsible
+        for any normalization. CO₂, when needed, comes through the
+        ``varying_boundary`` group as a broadcast field (see the AMIP
+        channel-config).
+        """
+        _, doy, hour = self._decompose_time(time_idx)
+        second_of_day = float(hour) * 3600.0
+        return torch.tensor(
+            [second_of_day, float(doy)], dtype=self.dtype
+        )
 
 
 # Backward-compat alias from the original Phase 2 schema. Canonical name

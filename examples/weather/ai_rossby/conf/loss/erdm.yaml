@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ERDM (Elucidated Rolling Diffusion Model) training loss.
+#
+# ``window_size`` (W) must match the dataset's window stacking — see
+# the matching training config for the SequenceDataset wrap.
+
+_target_: physicsnemo.experimental.diffusion.ERDMScheduler
+window_size: 6
+num_steps: 2
+sigma_min: 0.002
+sigma_max: 500.0
+rho: -10.0
+sigma_data: 0.5
+P_mean: 2.0
+P_std: 1.2
+solver: heun
+S_churn: 0.0
+S_tmin: 0.0
+S_tmax: .inf
+S_noise: 1.0
+noise: gaussian
+l_max: 90
+noise_scale_path: null
+alpha: 1.0

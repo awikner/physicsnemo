@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP SI_X wrapper — same :class:`AmipDiTWrapper` as ``amip_si.yaml`` but
+# paired with the x-prediction :class:`DynamicInterpolant` scheduler via
+# ``loss=si_x``.
+# Backbone hyperparams are identical to ``amip_si.yaml`` — the difference
+# between SI and SI_X is the scheduler, not the network.
+
+defaults:
+  - amip_si
+
+name: AmipDiTWrapper
