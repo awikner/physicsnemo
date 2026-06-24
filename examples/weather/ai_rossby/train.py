@@ -570,6 +570,7 @@ def main(cfg: DictConfig) -> None:
             inner_model,
             decay=float(cfg_train.ema.decay),
             warmup_epochs=int(cfg_train.ema.warmup_epochs),
+            steps_per_epoch=steps_per_epoch,
         )
 
     # --- Checkpoint resume ------------------------------------------------
