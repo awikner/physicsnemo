@@ -9,6 +9,7 @@ Sourced from /work/nvme/bdiu/awikner/amip @ commit 497827e
 imports (``modules.layers.old.*``) and adopt local relative imports.
 """
 
+from .bilinear import BilinearDecoder, BilinearDownsample, BilinearEncoder
 from .conv import (
     DCDownsample,
     DCUpsample,
@@ -30,6 +31,9 @@ from .positional_encoding import (
 from .unpatchify import FinalLayer, Unpatchify, modulate_fused, sphere_pad
 
 __all__ = [
+    "BilinearDecoder",
+    "BilinearDownsample",
+    "BilinearEncoder",
     "CalendarEmbedding",
     "CrossAttention",
     "DCDownsample",

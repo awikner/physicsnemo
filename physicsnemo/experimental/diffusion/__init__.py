@@ -13,6 +13,11 @@ Five schedulers vendored from /work/nvme/bdiu/awikner/amip @ commit
 * :class:`RFMScheduler` — Rolling Flow Matching.
 * :class:`EDMScheduler` — Elucidated Diffusion (Karras et al.) — single-step
   baseline.
+* :class:`DataDependentInterpolant` — the x_DDC super-resolution cascade's
+  scheduler (Phase 8f, F6). Interpolates between a data-dependent
+  low-res coupling and the high-res target; conditions the denoiser on
+  the low-res field directly (``model(y, x_lowres, t)``) rather than a
+  ``c_grid`` / ``c_scalar`` split.
 
 Each scheduler exposes both the train and inference halves of the
 diffusion contract on the same class:
@@ -46,6 +51,7 @@ from .dynamic_interpolant import DriftScheduler
 from .edm import EDMScheduler
 from .erdm import ERDMScheduler
 from .rfm import RFMScheduler
+from .x_ddc_interpolant import DataDependentInterpolant
 from .x_interpolant import DynamicInterpolant
 
 
@@ -76,6 +82,7 @@ class EDMSchedulerModule(nn.Module):
 
 
 __all__ = [
+    "DataDependentInterpolant",
     "DriftScheduler",
     "DynamicInterpolant",
     "EDMScheduler",

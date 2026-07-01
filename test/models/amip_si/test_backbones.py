@@ -25,7 +25,7 @@ import torch
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
     import physicsnemo
-    from physicsnemo.experimental.models.amip_si import AmipDiT, ERDM, RollingDiT
+    from physicsnemo.experimental.models.amip_si import AmipDiT, ERDM, RollingDiT, XDDCUNet
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ def test_dit_from_checkpoint_roundtrip(tmp_path):
     model.save(str(p))
     loaded = physicsnemo.Module.from_checkpoint(str(p))
     assert isinstance(loaded, AmipDiT)
-    assert loaded.meta.cuda_graphs is False  # Phase 8a default; flips in 8f
+    assert loaded.meta.cuda_graphs is False  # permanent: iterative sample() isn't graph-friendly
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +156,45 @@ def test_erdm_from_checkpoint_roundtrip(tmp_path):
     model.save(str(p))
     loaded = physicsnemo.Module.from_checkpoint(str(p))
     assert isinstance(loaded, ERDM)
+
+
+# ---------------------------------------------------------------------------
+# XDDCUNet (x_DDC super-resolution cascade denoiser, [B, C, H, W] forward,
+# no c_grid/c_scalar conditioning — Phase 8f)
+# ---------------------------------------------------------------------------
+
+
+def _xddc_unet_kwargs() -> dict:
+    return dict(
+        in_channels=8,
+        out_channels=4,
+        model_channels=16,
+        channel_mult=(1, 2),
+        num_res_blocks=1,
+        attn_levels=(1,),
+        num_heads=4,
+        num_groups=4,
+    )
+
+
+def test_xddc_unet_forward_shape_finite():
+    torch.manual_seed(0)
+    model = XDDCUNet(**_xddc_unet_kwargs()).eval()
+    b, c, h, w = 2, 4, 16, 32
+    x_noised = torch.randn(b, c, h, w)
+    cond = torch.randn(b, c, h, w)
+    t = torch.rand(b, 1)
+    with torch.no_grad():
+        out = model(x_noised, cond, t)
+    assert out.shape == (b, c, h, w), out.shape
+    assert torch.isfinite(out).all()
+
+
+def test_xddc_unet_from_checkpoint_roundtrip(tmp_path):
+    torch.manual_seed(0)
+    model = XDDCUNet(**_xddc_unet_kwargs())
+    p = tmp_path / "xddc_unet.mdlus"
+    model.save(str(p))
+    loaded = physicsnemo.Module.from_checkpoint(str(p))
+    assert isinstance(loaded, XDDCUNet)
+    assert loaded.meta.cuda_graphs is False

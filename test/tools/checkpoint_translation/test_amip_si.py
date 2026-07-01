@@ -36,6 +36,7 @@ from amip_si import (  # noqa: E402
     _MODEL_NAME_TO_WRAPPER,
     _UNSUPPORTED_MODEL_NAMES,
     _strip_wrap_prefixes,
+    _xddc_wrapper_kwargs_from_hparams,
     build_target_wrapper,
     cross_check_compatibility,
     detect_model_name,
@@ -287,17 +288,150 @@ def test_wrapper_kwargs_from_hparams_rolling_uses_rolling_dit_kwargs():
 
 
 # ---------------------------------------------------------------------------
+# F2: wCO2 name-aware varying_boundary_variables trim heuristic.
+# ---------------------------------------------------------------------------
+
+
+def test_wrapper_kwargs_from_hparams_trims_co2_by_name_not_position():
+    """CO2-named entries are dropped by name even when not trailing."""
+    blob = _make_blob("SI_X")
+    data = blob["hyper_parameters"]["config"]["data"]
+    # constant_boundary_variables has 1 entry ("lsm"); c_grid_dim=3 means
+    # only 2 varying_boundary entries are wanted, so 1 must be dropped.
+    # global_mean_co2 sits *first*, not last — the old trailing-entry
+    # heuristic would have wrongly dropped "sea_ice_cover" instead.
+    data["varying_boundary_variables"] = [
+        "global_mean_co2",
+        "sst",
+        "sea_ice_cover",
+    ]
+    blob["hyper_parameters"]["config"]["model"]["SI_X"]["model"]["c_grid_dim"] = 3
+
+    kwargs = wrapper_kwargs_from_hparams(blob, "AmipDiTWrapper")
+    assert kwargs["varying_boundary_variables"] == ["sst", "sea_ice_cover"]
+
+
+def test_wrapper_kwargs_from_hparams_trims_co2_variant_name_prefix():
+    """Names like ``co2_anomaly`` match the scalar-routed prefix too."""
+    blob = _make_blob("SI_X")
+    data = blob["hyper_parameters"]["config"]["data"]
+    data["varying_boundary_variables"] = ["sst", "co2_anomaly", "sea_ice_cover"]
+    blob["hyper_parameters"]["config"]["model"]["SI_X"]["model"]["c_grid_dim"] = 3
+
+    kwargs = wrapper_kwargs_from_hparams(blob, "AmipDiTWrapper")
+    assert kwargs["varying_boundary_variables"] == ["sst", "sea_ice_cover"]
+
+
+def test_wrapper_kwargs_from_hparams_trim_falls_back_to_trailing_without_co2():
+    """No name match — preserves the prior trailing-entry behavior."""
+    blob = _make_blob("SI_X")
+    data = blob["hyper_parameters"]["config"]["data"]
+    data["varying_boundary_variables"] = ["sst", "sea_ice_cover", "dswrftoa"]
+    blob["hyper_parameters"]["config"]["model"]["SI_X"]["model"]["c_grid_dim"] = 3
+
+    kwargs = wrapper_kwargs_from_hparams(blob, "AmipDiTWrapper")
+    assert kwargs["varying_boundary_variables"] == ["sst", "sea_ice_cover"]
+
+
+# ---------------------------------------------------------------------------
 # Class mapping completeness
 # ---------------------------------------------------------------------------
 
 
 def test_model_name_to_wrapper_mapping_covers_all_supported():
-    assert set(_MODEL_NAME_TO_WRAPPER) == {"SI", "SI_X", "ERDM", "RFM", "EDM"}
+    assert set(_MODEL_NAME_TO_WRAPPER) == {"SI", "SI_X", "ERDM", "RFM", "EDM", "x_DDC"}
     assert set(_MODEL_NAME_TO_WRAPPER.values()) == {
         "AmipDiTWrapper",
         "ERDMWrapper",
         "RollingDiTWrapper",
+        "XDDCWrapper",
     }
+
+
+def test_unsupported_model_names_is_combined_only():
+    assert _UNSUPPORTED_MODEL_NAMES == ("Combined",)
+
+
+# ---------------------------------------------------------------------------
+# F6: x_DDC hparams extraction (Phase 8f).
+# ---------------------------------------------------------------------------
+
+
+def _make_xddc_hparams(decoder_type: str = "unet") -> dict:
+    xddc_model_cfg = {
+        "decoder_type": decoder_type,
+        "encoder": {"downsample_factor": 4},
+        "decoder": {
+            "model_channels": 32,
+            "channel_mult": [1, 2],
+            "num_res_blocks": 1,
+            "attn_levels": [],
+            "num_heads": 4,
+            "t_emb_dim": 64,
+            # Backbone-derived keys the translator should drop.
+            "in_channels": 12,
+            "out_channels": 6,
+        },
+        "scheduler": {"num_steps": 5, "sigma_coef": 1.0},
+    }
+    if decoder_type == "dit":
+        xddc_model_cfg["dit"] = {"dim": 128, "num_heads": 4, "num_blocks": 2}
+    return {
+        "config": {
+            "data": {
+                "surface_variables": ["t2m", "msl"],
+                "upper_air_variables": ["ta"],
+                "diagnostic_variables": ["rsds"],
+                "levels": [1000.0, 850.0, 500.0],
+                "horizontal_resolution": [16, 32],
+            },
+            "model": {
+                "model_name": "x_DDC",
+                "lr": 5.0e-5,
+                "x_DDC": xddc_model_cfg,
+            },
+        }
+    }
+
+
+def _make_xddc_blob(decoder_type: str = "unet") -> dict:
+    return {
+        "epoch": 5,
+        "global_step": 1000,
+        "state_dict": OrderedDict(),
+        "hyper_parameters": _make_xddc_hparams(decoder_type),
+    }
+
+
+def test_xddc_wrapper_kwargs_from_hparams_drops_derived_keys():
+    blob = _make_xddc_blob()
+    kwargs = _xddc_wrapper_kwargs_from_hparams(blob)
+    assert kwargs["surface_variables"] == ["t2m", "msl"]
+    assert kwargs["upper_air_variables"] == ["ta"]
+    assert kwargs["diagnostic_variables"] == ["rsds"]
+    assert kwargs["levels"] == [1000.0, 850.0, 500.0]
+    assert kwargs["horizontal_resolution"] == [16, 32]
+    assert kwargs["downsample_factor"] == 4
+    unet_kwargs = kwargs["unet_kwargs"]
+    assert "in_channels" not in unet_kwargs
+    assert "out_channels" not in unet_kwargs
+    assert unet_kwargs["model_channels"] == 32
+    assert unet_kwargs["channel_mult"] == [1, 2]
+
+
+def test_xddc_wrapper_kwargs_from_hparams_rejects_dit_decoder():
+    blob = _make_xddc_blob(decoder_type="dit")
+    with pytest.raises(NotImplementedError, match="decoder_type"):
+        _xddc_wrapper_kwargs_from_hparams(blob)
+
+
+def test_wrapper_kwargs_from_hparams_dispatches_to_xddc():
+    """The generic entry point routes XDDCWrapper to the dedicated helper."""
+    blob = _make_xddc_blob()
+    kwargs = wrapper_kwargs_from_hparams(blob, "XDDCWrapper")
+    assert kwargs["surface_variables"] == ["t2m", "msl"]
+    assert "unet_kwargs" in kwargs
+    assert "dit_kwargs" not in kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -326,8 +460,10 @@ _KNOWN_ARCHITECTURE_MISMATCHES = {
 def _collect_midway_ckpts() -> list[Path]:
     if not _MIDWAY_CKPT_ROOT.exists():
         return []
-    # Translator MVP supports the SI / SI_X families; x_DDC is deferred
-    # to Phase 8f and intentionally errors out in detect_model_name.
+    # SI / SI_X / ERDM / RFM / EDM family — x_DDC has its own forward
+    # contract (no c_grid/c_scalar, single resolution) and its own
+    # collector + live test below (test_live_translation_round_trips_xddc).
+    # "Combined" has no standalone checkpoint to translate at all.
     candidates: list[Path] = []
     for d in sorted(_MIDWAY_CKPT_ROOT.iterdir()):
         if not d.is_dir():
@@ -338,6 +474,24 @@ def _collect_midway_ckpts() -> list[Path]:
         last = d / "last.ckpt"
         if last.exists():
             candidates.append(last)
+    return candidates
+
+
+def _collect_midway_xddc_ckpts() -> list[Path]:
+    if not _MIDWAY_CKPT_ROOT.exists():
+        return []
+    candidates: list[Path] = []
+    for d in sorted(_MIDWAY_CKPT_ROOT.iterdir()):
+        if not d.is_dir() or not d.name.startswith("x_DDC"):
+            continue
+        last = d / "last.ckpt"
+        if last.exists():
+            candidates.append(last)
+            continue
+        # Some x_DDC runs only kept a best-epoch checkpoint, no last.ckpt.
+        best_ckpts = sorted(d.glob("model_epoch=*best.ckpt"))
+        if best_ckpts:
+            candidates.append(best_ckpts[-1])
     return candidates
 
 
@@ -408,6 +562,60 @@ def test_live_translation_round_trips(ckpt_path, tmp_path, request):
     with torch.no_grad():
         out = loaded(xn, cond, t, c_grid=c_grid, c_scalar=c_scalar)
     assert out.shape == (B, loaded.in_channels, nlat_b, nlon_b)
+    assert torch.isfinite(out).all(), (
+        f"non-finite output for {ckpt_path.parent.name}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "ckpt_path",
+    _collect_midway_xddc_ckpts(),
+    ids=_ckpt_id,
+)
+def test_live_translation_round_trips_xddc(ckpt_path, tmp_path):
+    """x_DDC translate → load → forward (Phase 8f).
+
+    Separate from :func:`test_live_translation_round_trips` — x_DDC's
+    forward contract has no c_grid/c_scalar and a single resolution
+    (no backbone-vs-data two-resolution split), unlike the SI/RFM
+    family. Skips (no tests collected) when the Midway3 checkpoint
+    tree isn't mounted.
+    """
+    import physicsnemo
+    from amip_si import (
+        build_target_wrapper,
+        detect_model_name,
+        load_lightning_ckpt,
+        pick_source_state_dict,
+        translate_state_dict,
+    )
+
+    blob = load_lightning_ckpt(ckpt_path)
+    src_model_name = detect_model_name(blob)
+    assert src_model_name == "x_DDC"
+    model = build_target_wrapper(blob=blob, source_model_name=src_model_name)
+    src_sd = pick_source_state_dict(blob)
+    tgt_sd, stats = translate_state_dict(src_sd)
+    incoming = model.load_state_dict(tgt_sd, strict=False)
+    assert not incoming.unexpected_keys, (
+        f"unexpected keys for {ckpt_path.parent.name}: "
+        f"{incoming.unexpected_keys[:5]}"
+    )
+
+    out_path = tmp_path / f"{ckpt_path.parent.name}.mdlus"
+    model.save(str(out_path))
+    loaded = physicsnemo.Module.from_checkpoint(str(out_path))
+    loaded.eval()
+
+    B = 1
+    nlat, nlon = loaded.horizontal_resolution
+    x_noised = torch.randn(B, loaded.in_channels, nlat, nlon)
+    cond = torch.randn(B, loaded.in_channels, nlat, nlon)
+    t = torch.rand(B, 1)
+    with torch.no_grad():
+        out = loaded(x_noised, cond, t)
+    assert out.shape == (B, loaded.in_channels, nlat, nlon)
     assert torch.isfinite(out).all(), (
         f"non-finite output for {ckpt_path.parent.name}"
     )

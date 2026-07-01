@@ -33,8 +33,13 @@ from .layers.unpatchify import Unpatchify, sphere_pad
 class MetaData(ModelMetaData):
     """Phase 8a default ModelMetaData for :class:`DiT`.
 
-    fp32-only at first commit. ``_NativeMetaData`` advertising
-    ``cuda_graphs=True`` + ``bf16=True`` follows in Phase 8f.
+    fp32-only at first commit. ``cuda_graphs`` stays ``False``
+    permanently — the diffusion loop's iterative ``sample()`` is not
+    CUDA-graph friendly (dynamic step counts + host-side control flow).
+    The bf16-native flip (Phase 8f, F3) lands on the wrapper's own
+    :class:`physicsnemo.experimental.models.amip_si.wrappers.MetaData`
+    rather than here — recipes always instantiate the wrapper, not this
+    bare backbone.
     """
 
     jit: bool = False

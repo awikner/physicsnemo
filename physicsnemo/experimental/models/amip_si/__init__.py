@@ -22,7 +22,14 @@ CUDA-graph + bf16 friendly metadata advertised in Phase 8f follow-ups.
 from .dit import AmipDiT, DiTBlock, DiTCrossAttentionBlock
 from .erdm_unet import ERDM, CausalTemporalAttention
 from .rolling_dit import CausalTemporalBlock, RollingDiT
-from .wrappers import AmipDiTWrapper, ERDMWrapper, RollingDiTWrapper
+from .wrappers import (
+    AmipDiTWrapper,
+    CombinedModule,
+    ERDMWrapper,
+    RollingDiTWrapper,
+    XDDCWrapper,
+)
+from .x_ddc import XDDCUNet
 
 # Back-compat alias — upstream amip used the bare name ``DiT``. Use
 # :class:`AmipDiT` in new code; the registry-collision with
@@ -34,6 +41,7 @@ __all__ = [
     "AmipDiTWrapper",
     "CausalTemporalAttention",
     "CausalTemporalBlock",
+    "CombinedModule",
     "DiT",
     "DiTBlock",
     "DiTCrossAttentionBlock",
@@ -41,4 +49,6 @@ __all__ = [
     "ERDMWrapper",
     "RollingDiT",
     "RollingDiTWrapper",
+    "XDDCUNet",
+    "XDDCWrapper",
 ]

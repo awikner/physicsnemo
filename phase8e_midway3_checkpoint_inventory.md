@@ -32,8 +32,8 @@ cross-reference (in case ckpts were rsynced):
 |---|---|---|---|
 | **SI_X** (DynamicInterpolant) | `SI_X_AIMIP_interp_gaussian_42_2026-05-27T17-37-14/last.ckpt`<br>`SI_X_AIMIP_spec_42_2026-05-26T21-15-41/last.ckpt` | `configs/SI_midway_AIMIP.yaml`<br>(filename is `SI_midway`, but `model_name: SI_X` inside) | `model=amip_si_x` + `loss=si_x` |
 | **SI** (DriftScheduler) | `SI_AIMIP_interp_gaussian_v_42_2026-06-08T09-01-42/last.ckpt` | `configs/SI_midway_AIMIP_V.yaml`<br>(`model_name: SI`) | `model=amip_si` + `loss=si` |
-| **x_DDC** (super-res cascade) | `x_DDC_x_DDC_42_2026-05-20T16-21-23/last.ckpt`<br>`x_DDC_x_DDC_42_2026-04-16T17-08-57/model_epoch=24_step=72700_best.ckpt` | `configs/DDC_midway_AIMIP.yaml`<br>(`model_name: x_DDC`) | **Not yet ported** — `x_DDC` is in the Phase 8f follow-up scope |
-| **Combined** (forecaster + downscaler) | Typically no standalone ckpt — `combined_midway.yaml` references both an SI_X forecaster and an x_DDC downscaler ckpt | `configs/combined_midway.yaml` | **Not yet ported** — `CombinedModule` is in the Phase 8f follow-up scope |
+| **x_DDC** (super-res cascade) | `x_DDC_x_DDC_42_2026-05-20T16-21-23/last.ckpt`<br>`x_DDC_x_DDC_42_2026-04-16T17-08-57/model_epoch=24_step=72700_best.ckpt` | `configs/DDC_midway_AIMIP.yaml`<br>(`model_name: x_DDC`) | **Ported (Phase 8f, F6)** — `model=amip_x_ddc` + `loss=x_ddc` / `sampler=x_ddc`; see below |
+| **Combined** (forecaster + downscaler) | Typically no standalone ckpt — `combined_midway.yaml` references both an SI_X forecaster and an x_DDC downscaler ckpt | `configs/combined_midway.yaml` | **Ported (Phase 8f, F6)** — `CombinedModule` composes two independently-translated checkpoints at runtime; no standalone ckpt to translate (see `conf/model/amip_combined.yaml`) |
 
 ### ERDM / RFM notes
 
@@ -87,6 +87,37 @@ not-ported `x_DDC` family); results:
 The unit + live test stack lives at
 [`test/tools/checkpoint_translation/test_amip_si.py`](test/tools/checkpoint_translation/test_amip_si.py)
 (26 unit + 6 live, of which 1 xfail and 5 pass).
+
+### x_DDC translator status (Phase 8f, F6)
+
+`XDDCWrapper` + the `x_DDC` → `XDDCWrapper` translation path landed
+this phase (`test_live_translation_round_trips_xddc`, parametrized
+over the same
+[`/work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/`](/work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/)
+tree, filtered to `x_DDC*` run dirs). Only the `decoder_type: unet`
+denoiser is vendored (`XDDCUNet`) — both real Midway3 x_DDC checkpoints
+use it (their configs carry only a `decoder:` UNet block, no `dit:`
+block, and `decoder_type` defaults to `"unet"` upstream when absent).
+`decoder_type: dit` (the DiTAE autoencoder denoiser,
+`modules/models/DiTAE.py`) is **not vendored** — the translator raises
+`NotImplementedError` if it's ever encountered; nothing in scope needs
+it today.
+
+**Pending real-checkpoint validation**: the live test above is written
+and passes its unit-level dry runs (synthetic hparams), but hasn't yet
+been run against the two real x_DDC `.ckpt` files on Delta (that
+requires a GPU session with the checkpoint tree mounted — tracked as
+part of the Phase 8f HPC validation pass alongside the F1/F3/F7 Delta
+runs). Update this row with OK/xfail + notes once that run completes:
+
+| Run subdir | Result | Notes |
+|---|---|---|
+| `x_DDC_x_DDC_42_2026-05-20T16-21-23` | _pending Delta run_ | |
+| `x_DDC_x_DDC_42_2026-04-16T17-08-57` | _pending Delta run_ | Only has `model_epoch=24_step=72700_best.ckpt`, no `last.ckpt`. |
+
+`Combined` still has no standalone checkpoint to translate — see
+`conf/model/amip_combined.yaml` for how to compose
+`CombinedModule` from the two checkpoints above at runtime instead.
 
 ## Translator wiring (when a ckpt is in hand)
 

@@ -53,11 +53,16 @@ Supported source ``model_name`` values:
 * ``EDM`` → :class:`AmipDiTWrapper` (no Phase 8c training wiring;
   inference-only; the translator still produces a valid ``.mdlus``
   that can be sampled with ``sampler=edm``)
+* ``x_DDC`` → :class:`XDDCWrapper` (:class:`DataDependentInterpolant`;
+  Phase 8f — only the ``decoder_type: unet`` denoiser is vendored,
+  ``decoder_type: dit`` raises ``NotImplementedError``)
 
-Not supported (deferred to Phase 8f):
+Not supported:
 
-* ``x_DDC`` (super-resolution cascade)
-* ``Combined`` (two-stage forecaster + downscaler)
+* ``Combined`` (two-stage forecaster + downscaler) — has no
+  standalone checkpoint to translate; compose it at runtime from an
+  independently-translated forecaster + x_DDC pair via
+  :class:`~physicsnemo.experimental.models.amip_si.wrappers.CombinedModule`.
 
 Usage
 -----
@@ -105,6 +110,20 @@ _DROPPED_SOURCE_PREFIXES = ("scheduler.",)
 # ``model.X`` before the backbone re-prefix runs.
 _WRAP_PREFIXES = ("module.", "_orig_mod.")
 
+# ``varying_boundary_variables`` names upstream amip's ``wCO2`` variants
+# route through the c_scalar path rather than c_grid (see the trim
+# heuristic in wrapper_kwargs_from_hparams). Matched case-insensitively,
+# by exact name or prefix (covers e.g. "co2", "co2_anomaly").
+_SCALAR_ROUTED_VARYING_BOUNDARY_NAMES = ("global_mean_co2", "co2")
+
+
+def _is_scalar_routed_varying_boundary_name(name: str) -> bool:
+    name_l = name.lower()
+    return any(
+        name_l == pat or name_l.startswith(pat)
+        for pat in _SCALAR_ROUTED_VARYING_BOUNDARY_NAMES
+    )
+
 
 # Mapping from upstream ``hyper_parameters.config.model.model_name`` to
 # our wrapper class name (resolved against the wrapper YAML below).
@@ -114,11 +133,21 @@ _MODEL_NAME_TO_WRAPPER = {
     "EDM": "AmipDiTWrapper",
     "ERDM": "ERDMWrapper",
     "RFM": "RollingDiTWrapper",
+    "x_DDC": "XDDCWrapper",
 }
 
 # Source ``model_name`` values explicitly out of Phase 8 scope. The
 # translator surfaces a clear error rather than producing junk.
-_UNSUPPORTED_MODEL_NAMES = ("x_DDC", "Combined")
+#
+# ``Combined`` has no standalone Lightning checkpoint to translate —
+# upstream composes it at runtime from an independently-trained
+# forecaster checkpoint + an independently-trained x_DDC checkpoint
+# (see ``configs/combined_midway.yaml``). Translate each of those two
+# checkpoints separately (forecaster via the normal SI/SI_X/ERDM/RFM
+# path, downscaler via the ``x_DDC`` path above), then compose them at
+# runtime with :class:`~physicsnemo.experimental.models.amip_si.wrappers.CombinedModule`
+# — there is nothing for this translator to do for "Combined".
+_UNSUPPORTED_MODEL_NAMES = ("Combined",)
 
 
 def _strip_wrap_prefixes(key: str) -> str:
@@ -250,8 +279,9 @@ def detect_model_name(blob: dict) -> str:
     if name in _UNSUPPORTED_MODEL_NAMES:
         raise NotImplementedError(
             f"source model_name={name!r} is not supported by this "
-            f"translator (x_DDC + Combined are deferred to Phase 8f); "
-            f"see implementation_plan.md"
+            f"translator — see phase8e_midway3_checkpoint_inventory.md "
+            f"for why (Combined has no standalone checkpoint; compose "
+            f"it at runtime from a translated forecaster + x_DDC pair)."
         )
     if name not in _MODEL_NAME_TO_WRAPPER:
         raise ValueError(
@@ -293,7 +323,62 @@ _WRAPPER_BACKBONE_KWARGS_KEY = {
     "AmipDiTWrapper": "dit_kwargs",
     "RollingDiTWrapper": "rolling_dit_kwargs",
     "ERDMWrapper": "erdm_kwargs",
+    "XDDCWrapper": "unet_kwargs",
 }
+
+
+def _xddc_wrapper_kwargs_from_hparams(blob: dict) -> dict:
+    """Extract :class:`XDDCWrapper` constructor kwargs from a Lightning hparams blob.
+
+    x_DDC's hparams layout differs structurally from the SI/SI_X/ERDM/RFM
+    family: backbone kwargs live under ``model.x_DDC.{encoder,decoder,dit}``
+    (dispatched on ``model.x_DDC.decoder_type``), not
+    ``model.x_DDC.model`` — and there's no c_grid/c_scalar conditioning,
+    so no constant/varying boundary reconciliation or scalar_dim
+    extraction applies here. See upstream ``modules/ae_module.py``
+    (``AutoencoderModule.__init__``) for the source layout this mirrors.
+    """
+    hp = blob.get("hyper_parameters", None)
+    if hp is None:
+        raise KeyError(
+            "checkpoint has no 'hyper_parameters' block — cannot auto-derive "
+            "wrapper kwargs; pass --model-config explicitly"
+        )
+    cfg = hp.get("config", {})
+    data = cfg.get("data", {})
+    model = cfg.get("model", {})
+    xddc_cfg = model.get("x_DDC", None)
+    if xddc_cfg is None:
+        raise KeyError(
+            "hyper_parameters.config.model is missing the 'x_DDC' "
+            "sub-block; cannot auto-derive backbone kwargs"
+        )
+
+    decoder_type = xddc_cfg.get("decoder_type", "unet")
+    if decoder_type != "unet":
+        raise NotImplementedError(
+            f"x_DDC decoder_type={decoder_type!r} is not supported by "
+            "this translator — only the convolutional UNet denoiser is "
+            "vendored (XDDCUNet). The DiT autoencoder denoiser "
+            "(decoder_type='dit', modules/models/DiTAE.py) is deferred; "
+            "see phase8e_midway3_checkpoint_inventory.md."
+        )
+    unet_cfg = dict(xddc_cfg.get("decoder", {}))
+    for k in _BACKBONE_AUTO_KEYS:
+        unet_cfg.pop(k, None)
+
+    encoder_cfg = dict(xddc_cfg.get("encoder", {}))
+    downsample_factor = int(encoder_cfg.get("downsample_factor", 4))
+
+    return {
+        "surface_variables": list(data.get("surface_variables", [])),
+        "upper_air_variables": list(data.get("upper_air_variables", [])),
+        "diagnostic_variables": list(data.get("diagnostic_variables", [])),
+        "levels": list(data.get("levels", [])),
+        "horizontal_resolution": list(data.get("horizontal_resolution", [])),
+        "downsample_factor": downsample_factor,
+        "unet_kwargs": unet_cfg,
+    }
 
 
 def wrapper_kwargs_from_hparams(
@@ -314,8 +399,16 @@ def wrapper_kwargs_from_hparams(
 
     Mirrors the constructor signature of
     :class:`AmipDiTWrapper` / :class:`RollingDiTWrapper` /
-    :class:`ERDMWrapper`.
+    :class:`ERDMWrapper` / :class:`XDDCWrapper`.
+
+    x_DDC's hparams layout differs structurally from the rest (no
+    ``model.x_DDC.model`` sub-block, no c_grid/c_scalar) — dispatched
+    to :func:`_xddc_wrapper_kwargs_from_hparams` instead of the generic
+    logic below.
     """
+    if target_class_name == "XDDCWrapper":
+        return _xddc_wrapper_kwargs_from_hparams(blob)
+
     hp = blob.get("hyper_parameters", None)
     if hp is None:
         raise KeyError(
@@ -371,7 +464,21 @@ def wrapper_kwargs_from_hparams(
                 f"reconcile"
             )
         if wanted_varying < len(varying_boundary):
-            dropped = varying_boundary[wanted_varying:]
+            n_drop = len(varying_boundary) - wanted_varying
+            # Prefer dropping name-matched scalar-routed channels (e.g.
+            # ``global_mean_co2``, ``co2*``) over trailing entries — the
+            # log message then stays truthful about *which* channel got
+            # dropped instead of just assuming it's the last one(s).
+            # Falls back to trailing entries when there aren't enough
+            # name matches (preserves prior behavior for non-wCO2 ckpts).
+            scalar_routed = [
+                v for v in varying_boundary
+                if _is_scalar_routed_varying_boundary_name(v)
+            ]
+            dropped = scalar_routed[:n_drop]
+            if len(dropped) < n_drop:
+                remaining = [v for v in varying_boundary if v not in dropped]
+                dropped = dropped + remaining[-(n_drop - len(dropped)):]
             logger.warning(
                 "trimming varying_boundary_variables to match "
                 "c_grid_dim=%d (dropped %d entries: %s); upstream amip "
@@ -380,7 +487,7 @@ def wrapper_kwargs_from_hparams(
                 len(dropped),
                 dropped,
             )
-            varying_boundary = varying_boundary[:wanted_varying]
+            varying_boundary = [v for v in varying_boundary if v not in dropped]
         elif wanted_varying > len(varying_boundary):
             raise ValueError(
                 f"hparams c_grid_dim={target_c_grid_dim} requires "
@@ -468,12 +575,14 @@ def build_target_wrapper(
         AmipDiTWrapper,
         ERDMWrapper,
         RollingDiTWrapper,
+        XDDCWrapper,
     )
 
     classes = {
         "AmipDiTWrapper": AmipDiTWrapper,
         "RollingDiTWrapper": RollingDiTWrapper,
         "ERDMWrapper": ERDMWrapper,
+        "XDDCWrapper": XDDCWrapper,
     }
 
     if model_yaml is not None:
@@ -507,11 +616,13 @@ def build_target_wrapper(
     from physicsnemo.experimental.models.amip_si.dit import AmipDiT
     from physicsnemo.experimental.models.amip_si.erdm_unet import ERDM
     from physicsnemo.experimental.models.amip_si.rolling_dit import RollingDiT
+    from physicsnemo.experimental.models.amip_si.x_ddc import XDDCUNet
 
     backbone_cls = {
         "AmipDiTWrapper": AmipDiT,
         "RollingDiTWrapper": RollingDiT,
         "ERDMWrapper": ERDM,
+        "XDDCWrapper": XDDCUNet,
     }[target_class]
     backbone_kwargs_name = _WRAPPER_BACKBONE_KWARGS_KEY[target_class]
     kwargs[backbone_kwargs_name] = _filter_unknown_backbone_kwargs(
