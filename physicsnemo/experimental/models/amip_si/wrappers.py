@@ -188,6 +188,13 @@ class AmipDiTWrapper(_PNeMoModule):
         dit_kwargs.setdefault("c_grid_dim", self.c_grid_dim)
         dit_kwargs.setdefault("nlat", nlat)
         dit_kwargs.setdefault("nlon", nlon)
+        # ``c_grid_downsample=1`` keeps the c_grid embedding at the same
+        # spatial resolution as ``x_noised`` so the cat at AmipDiT.forward
+        # line 461 aligns. Upstream amip uses ``c_grid_downsample=4`` paired
+        # with a recipe-side pre-downsample of ``x_noised + cond`` to the
+        # patch grid; our recipe doesn't do that, so we keep both streams
+        # at native res.
+        dit_kwargs.setdefault("c_grid_downsample", 1)
         self.backbone = AmipDiT(**dit_kwargs)
 
     # ------------------------------------------------------------------ #
@@ -440,6 +447,7 @@ class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         # grid to differ can pass it through erdm_kwargs.
         erdm_kwargs.setdefault("nlat_work", nlat)
         erdm_kwargs.setdefault("nlon_work", nlon)
+        erdm_kwargs.setdefault("c_grid_downsample", 1)
         self.backbone = ERDM(**erdm_kwargs)
 
     def forward(self, x_noised, c_noise, c_grid=None, c_scalar=None):

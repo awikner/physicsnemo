@@ -109,6 +109,18 @@ def make_scheduler(
         return SequentialLR(
             optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
         )
+    if name == "CosineAnnealingLR":
+        # Plain CosineAnnealingLR — used by the AMIP diffusion recipe.
+        # ``T_max`` defaults to ``total_steps`` (the per-stage budget the
+        # caller supplies); ``cosine_eta_min`` mirrors the yaml key name
+        # used in conf/training/amip_diffusion.yaml. ``eta_min`` is
+        # accepted as a synonym so the Phase 3 LinearWarmupCosineAnnealingLR
+        # config keys also work here.
+        T_max = int(getattr(cfg, "T_max", total_steps))
+        eta_min = float(
+            getattr(cfg, "cosine_eta_min", getattr(cfg, "eta_min", 0.0))
+        )
+        return CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
     raise ValueError(f"Unknown scheduler {name!r}")
 
 

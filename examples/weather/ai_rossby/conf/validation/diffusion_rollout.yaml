@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mid-training rollout validation for the AMIP diffusion recipes
+# (SI / SI_X / ERDM / RFM). Cadence default is every 5 epochs (Phase 8c
+# follow-up Q9 = b) — full diffusion sampling at every-epoch granularity
+# is expensive, and the lower cadence still gives enough resolution to
+# track convergence.
+#
+# Key knobs:
+#
+# * ``rollout.log_steps`` — lead times to score (single-step schedulers
+#   march autoregressively to ``max(log_steps)``; rolling schedulers
+#   default ``horizon = scheduler.window_size`` and ``log_steps`` must
+#   all fit inside it).
+# * ``rollout.sampler.num_steps`` — solver steps per emitted frame at
+#   *validation*. Decoupled from the training scheduler's ``num_steps``
+#   (Phase 8c follow-up Q4 = b) so long-horizon validation can use a
+#   fast sampler.
+# * ``rollout.ensemble_size`` — diffusion ensemble per IC. Default 1
+#   (Phase 8c follow-up Q5). Spread metrics are emitted only when this
+#   exceeds 1.
+# * ``rollout.metrics`` — toggles per metric family. All enabled by
+#   default (Phase 8c follow-up Q7).
+
+every_n_epochs: 5
+
+rollout:
+  enabled: True
+  # Lead times (in dataset steps) at which to score predictions.
+  log_steps: [1, 3, 6]
+  # Total ICs evaluated per epoch across all DDP ranks (Phase 8c Q3 = 4).
+  max_initial_conditions: 4
+  ic_stride: 30
+  batch_size: 1
+  # Ensemble axis (Phase 8c Q5 = 1, configurable).
+  ensemble_size: 1
+  # ``deterministic`` | ``replicate_only`` | ``gaussian_ic``.
+  perturber: deterministic
+  perturber_scales: {}
+  # Horizon defaults to ``scheduler.window_size`` for rolling
+  # schedulers and to ``max(log_steps)`` for single-step. Override here
+  # to extend the rollout past the training window (RFM / ERDM only).
+  horizon: null
+  # Validation-time diffusion sampler — independent of training.
+  sampler:
+    # ``null`` falls back to the inference scheduler's own ``num_steps``.
+    # A fast (e.g. 4-step) override is useful for long rollouts.
+    num_steps: null
+  metrics:
+    rmse: True
+    acc: True
+    spread: True

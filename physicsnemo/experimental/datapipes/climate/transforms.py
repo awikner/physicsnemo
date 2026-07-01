@@ -246,20 +246,29 @@ class ClimateNormalizer:
             return None, None
         target = np.asarray(target_levels, dtype="float32")
         # ERA5-style stats use 'pressure_level' / 'sigma_level' rather than the
-        # PLASIM-native 'Z' / 'Z_2'. Accept either spelling so PanguWeather's
-        # normalization_pangu_s2s.zarr drops in unchanged.
-        _aliases = {"Z": "pressure_level", "Z_2": "sigma_level"}
+        # PLASIM-native 'Z' / 'Z_2'. AMIP's per-variable normalize_mean.nc
+        # uses the shorter 'level' spelling. Accept any of the three so
+        # upstream stats files drop in unchanged.
+        _aliases = {
+            "Z": ("pressure_level", "level"),
+            "Z_2": ("sigma_level",),
+            "pressure_level": ("level",),
+        }
         per_var_mean: list[np.ndarray] = []
         per_var_std: list[np.ndarray] = []
         for v in names:
             var_dims = mean[v].dims
+            actual_dim = None
             if dim in var_dims:
                 actual_dim = dim
-            elif _aliases.get(dim) in var_dims:
-                actual_dim = _aliases[dim]
             else:
+                for alias in _aliases.get(dim, ()):
+                    if alias in var_dims:
+                        actual_dim = alias
+                        break
+            if actual_dim is None:
                 raise ValueError(
-                    f"Stats var {v!r} expected dim {dim} (or {_aliases.get(dim)!r}); "
+                    f"Stats var {v!r} expected dim {dim} (or {_aliases.get(dim)}); "
                     f"got dims {var_dims}"
                 )
             stats_levels = mean.coords[actual_dim].values.astype("float32")

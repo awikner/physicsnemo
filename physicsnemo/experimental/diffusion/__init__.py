@@ -31,6 +31,13 @@ class (not an :class:`nn.Module`). For API consistency this module also
 exposes :class:`EDMSchedulerModule`, a thin :class:`nn.Module` adapter
 that delegates to it — recipes that want the to-device / state-dict
 contract can use the wrapper directly.
+
+EDM has **no** Phase 8c wrapper / Hydra recipe wiring (Phase 8c
+follow-up Q9 = b). Upstream amip's ``train_module.py`` doesn't wire
+EDM either despite shipping a ``configs/EDM.yaml`` — it's vendored
+here for ad-hoc use only (e.g. as a fast-sampling alternative at
+inference) but doesn't participate in the train_diffusion recipe.
+SI / SI_X / ERDM / RFM are the supported diffusion training paths.
 """
 
 import torch.nn as nn

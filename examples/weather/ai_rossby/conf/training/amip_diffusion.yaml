@@ -7,8 +7,37 @@
 # Muon optimizer, EMA decay 0.999 with 6-epoch warmup, fp32, no
 # gradient clipping, single-stage curriculum.
 #
-# Multi-stage curricula (e.g. W=3 pretrain → W=6 finetune) are deferred
-# to a Phase 8c follow-up — see implementation_plan.md.
+# Per-stage diffusion knobs:
+# Each entry under ``stages`` may carry a ``loss_overrides`` mapping
+# whose contents are merged on top of ``cfg.loss`` before
+# ``hydra.utils.instantiate`` for that stage. Use this for multi-stage
+# curricula — e.g. a W=3 pretrain stage followed by a W=6 finetune
+# stage on a rolling scheduler (RFM / ERDM):
+#
+#   stages:
+#     - name: pretrain
+#       num_epochs: 20
+#       loss_overrides:
+#         window_size: 3
+#       ...
+#     - name: finetune
+#       num_epochs: 30
+#       loss_overrides:
+#         window_size: 6
+#       ...
+#
+# The train_diffusion recipe rebuilds the DataLoader (and the
+# scheduler loss instance) at every stage boundary where the merged
+# ``window_size`` changes — single-step ↔ rolling transitions are
+# allowed and trigger a SequenceDataset (re)wrap.
+#
+# Validation:
+# Mid-training rollout validation is wired in train_diffusion.py via
+# ``cfg.validation`` (Hydra group). The recommended override for any
+# diffusion run is ``validation=diffusion_rollout`` — that picks up
+# the 5-epoch cadence + the (RMSE, ACC, ensemble spread) metric stack
+# from ``conf/validation/diffusion_rollout.yaml``. The default
+# ``validation=off`` from ``config.yaml`` disables rollout validation.
 
 use_static_capture: False
 amp: none                       # fp32 default per Phase 8 decision A5
