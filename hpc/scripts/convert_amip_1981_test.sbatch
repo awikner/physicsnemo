@@ -3,18 +3,27 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Phase 8b test conversion — full year 1981 AMIP H5 → Zarr on the cpu
-# partition. Validates the new converter on a full-year payload before
-# the multi-year archive job is staged.
+# AMIP 1981 H5 → Zarr conversion (Phase 8b test). After three buffered-mode
+# failures (NODE_FAIL → TIMEOUT → OOM → TIMEOUT — see logs from jobs
+# 19574177 / 19574650 / 19629473 / 19640283), the converter was refactored
+# to write the Zarr in a streaming fashion (tools/data/amip/amip_h5_to_zarr.py).
+# The streaming write keeps peak memory bounded by --write-batch instead of
+# the full year, which removes the GC slowdown that was killing throughput
+# past file ~750.
 #
-# Output: /work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981.zarr
+# Submission strategy: split the year into two halves so each half fits the
+# cpu-interactive partition's 1h wall cap. Both jobs run in parallel; the
+# resulting sibling Zarrs are concatenated by a follow-up xarray step.
 #
-# Submit with:
-#   sbatch hpc/scripts/convert_amip_1981_test.sbatch
+# Submit both halves with:
+#   sbatch --export=ALL,SAMPLE_LO=0,SAMPLE_HI=730,OUT_SUFFIX=_a \
+#          hpc/scripts/convert_amip_1981_test.sbatch
+#   sbatch --export=ALL,SAMPLE_LO=730,SAMPLE_HI=1460,OUT_SUFFIX=_b \
+#          hpc/scripts/convert_amip_1981_test.sbatch
 
-#SBATCH --partition=cpu
+#SBATCH --partition=cpu-interactive
 #SBATCH --account=bdiu-delta-cpu
-#SBATCH --time=02:00:00
+#SBATCH --time=01:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -26,15 +35,22 @@ set -euo pipefail
 cd /work/nvme/bdiu/awikner/physicsnemo
 source .venv/bin/activate
 
-OUT_PATH=/work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981.zarr
+# Defaults (full year) when invoked without env-var overrides.
+SAMPLE_LO=${SAMPLE_LO:-0}
+SAMPLE_HI=${SAMPLE_HI:-1460}
+OUT_SUFFIX=${OUT_SUFFIX:-}
+
+OUT_PATH=/work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981${OUT_SUFFIX}.zarr
 mkdir -p "$(dirname "$OUT_PATH")"
 
-echo "[$(date)] converting AMIP year 1981 ..."
+echo "[$(date)] converting AMIP year 1981 files [${SAMPLE_LO}, ${SAMPLE_HI}) → $OUT_PATH"
 python tools/data/amip/amip_h5_to_zarr.py \
     --config tools/data/amip/configs/amip_default.yaml \
     --year 1981 \
+    --sample-range "$SAMPLE_LO" "$SAMPLE_HI" \
     --output "$OUT_PATH" \
-    --time-chunk 1
+    --time-chunk 1 \
+    --write-batch 50
 
 echo
 echo "[$(date)] done. Output:"
