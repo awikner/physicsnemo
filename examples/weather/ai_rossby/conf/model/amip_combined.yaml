@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reference config for assembling CombinedModule (Phase 8f, F6) —
+# mirrors upstream's configs/combined_midway.yaml. NOT a drop-in for
+# ``build_model()``/``Module.instantiate`` like the other conf/model/*.yaml
+# files: CombinedModule's constructor takes already-instantiated
+# sub-modules (forecaster + forecaster_scheduler + downscaler +
+# downscaler_scheduler), not flat kwargs, because both halves are
+# loaded from two INDEPENDENTLY-trained checkpoints (there is no
+# standalone "Combined" checkpoint — see
+# phase8e_midway3_checkpoint_inventory.md).
+#
+# This file documents the intended composition; wiring a
+# `build_combined_module(cfg)` helper into a recipe/CLI is left for
+# whichever inference script first needs CombinedModule end-to-end
+# (out of scope for the Phase 8f port itself). Sketch:
+#
+#   forecaster = build_target_wrapper(model_yaml=<forecaster.model>, ...)
+#   forecaster.load_state_dict(translate(forecaster.checkpoint))
+#   downscaler = build_target_wrapper(model_yaml=<downscaler.model>, ...)
+#   downscaler.load_state_dict(translate(downscaler.checkpoint))
+#   combined = CombinedModule(
+#       forecaster=forecaster,
+#       forecaster_scheduler=hydra.utils.instantiate(<forecaster.sampler>),
+#       downscaler=downscaler,
+#       downscaler_scheduler=hydra.utils.instantiate(<downscaler.sampler>),
+#   )
+
+forecaster:
+  # Which low-res forecaster family produced the checkpoint below.
+  model: amip_si_x               # conf/model/amip_si_x.yaml
+  sampler: si_x                  # conf/sampler/si_x.yaml
+  checkpoint: /work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/SI_X_AIMIP_interp_gaussian_42_2026-05-28T09-27-49/last.ckpt
+
+downscaler:
+  model: amip_x_ddc               # conf/model/amip_x_ddc.yaml
+  sampler: x_ddc                  # conf/sampler/x_ddc.yaml
+  checkpoint: /work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/x_DDC_x_DDC_42_2026-05-20T16-21-23/last.ckpt

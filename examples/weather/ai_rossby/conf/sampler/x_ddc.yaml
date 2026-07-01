@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# x_DDC inference sampler. Independent of training: ``num_steps`` can
+# be lowered here for fast sampling at the cost of fidelity. Pairs
+# with the XDDCWrapper (single-frame, no c_grid/c_scalar) only.
+
+_target_: physicsnemo.experimental.diffusion.DataDependentInterpolant
+num_steps: 5
+sigma_coef: 1.0
+train_sampler: power
+l_max: 180
+noise: spherical
+integrator: exponential
+tau: 1.5
+model_last: False
+noise_scale_path: null

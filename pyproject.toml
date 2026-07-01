@@ -336,7 +336,11 @@ uq-extras = [
 muon-optimizers = [
     # Muon optimizer (used by the AMIP diffusion recipes under
     # examples/weather/ai_rossby) — no PyPI release, install from git.
-    "Muon @ git+https://github.com/KellerJordan/Muon",
+    # Distributed under the package name "muon-optimizer" (importable
+    # as `muon`) — do NOT prefix with "Muon @", the upstream repo's
+    # packaging metadata reports a different project name than the
+    # git URL, which trips pip's/uv's name-consistency check.
+    "muon-optimizer @ git+https://github.com/KellerJordan/Muon",
 ]
 
 # Use case specific dependency groups.

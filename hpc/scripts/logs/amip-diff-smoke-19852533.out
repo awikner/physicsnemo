@@ -1,0 +1,94 @@
+AWS OFI NCCL Plugin v1.14.2 loaded
+Built with libfabric 1.22.0 and CUDA 12.8
+Configured for Cray CXI interconnect
+Plugin: /sw/rh9.4/user/aws-ofi-nccl-1.14.2-lf1.22.0-cu12.8/lib/libnccl-net.so
+W0701 13:44:43.057000 1179441 torch/distributed/run.py:851] 
+W0701 13:44:43.057000 1179441 torch/distributed/run.py:851] *****************************************
+W0701 13:44:43.057000 1179441 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0701 13:44:43.057000 1179441 torch/distributed/run.py:851] *****************************************
+/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/train_diffusion.py:50: ExperimentalFeatureWarning: You are importing from 'physicsnemo.experimental'. The APIs in this namespace are experimental, under active development, and may change without notice. Expect possible back-compatibility breaking changes and only partial test coverage.
+  from physicsnemo.experimental.datapipes.climate import (
+/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/train_diffusion.py:50: ExperimentalFeatureWarning: You are importing from 'physicsnemo.experimental'. The APIs in this namespace are experimental, under active development, and may change without notice. Expect possible back-compatibility breaking changes and only partial test coverage.
+  from physicsnemo.experimental.datapipes.climate import (
+[2026-07-01 13:45:12,060][amip_diffusion_train][INFO] - diffusion train: stages=1, total_epochs=1, world_size=2, device=cuda:0
+[2026-07-01 13:45:12,061][amip_diffusion_train][INFO] - diffusion train: stages=1, total_epochs=1, world_size=2, device=cuda:1
+[2026-07-01 13:45:12,389][amip_diffusion_train][INFO] - AMP disabled (cfg.training.amp=none)
+[2026-07-01 13:45:12,389][amip_diffusion_train][INFO] - AMP disabled (cfg.training.amp=none)
+[2026-07-01 13:45:12,453][checkpoint][INFO] - Loaded model state dictionary /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints/AmipDiTWrapper.0.2.mdlus to device cuda:0
+[2026-07-01 13:45:12,453][checkpoint][INFO] - Loaded model state dictionary /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints/AmipDiTWrapper.0.2.mdlus to device cuda:1
+[2026-07-01 13:45:12,527][checkpoint][INFO] - Loaded checkpoint file /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints/checkpoint.0.2.pt to device cuda:0
+Error executing job with overrides: ['model=amip_si', 'loss=si', 'dataset=amip_1981', 'training=amip_diffusion', 'validation=diffusion_rollout', 'training.max_epochs=1', 'training.ema.warmup_epochs=0', 'validation.every_n_epochs=1', 'validation.rollout.max_initial_conditions=2', 'validation.rollout.log_steps=[1]', 'model.dit_kwargs.dim=128', 'model.dit_kwargs.num_blocks=4', 'model.dit_kwargs.num_heads=4', 'model.dit_kwargs.patch_size=4', 'model.dit_kwargs.c_grid_downsample=1', 'dataset.batch_size=2', 'dataset.num_workers=4', 'log_every_n_steps=5', 'run_name=amip-diff-smoke-19852533']
+[2026-07-01 13:45:12,531][checkpoint][INFO] - Loaded checkpoint file /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints/checkpoint.0.2.pt to device cuda:1
+Error executing job with overrides: ['model=amip_si', 'loss=si', 'dataset=amip_1981', 'training=amip_diffusion', 'validation=diffusion_rollout', 'training.max_epochs=1', 'training.ema.warmup_epochs=0', 'validation.every_n_epochs=1', 'validation.rollout.max_initial_conditions=2', 'validation.rollout.log_steps=[1]', 'model.dit_kwargs.dim=128', 'model.dit_kwargs.num_blocks=4', 'model.dit_kwargs.num_heads=4', 'model.dit_kwargs.patch_size=4', 'model.dit_kwargs.c_grid_downsample=1', 'dataset.batch_size=2', 'dataset.num_workers=4', 'log_every_n_steps=5', 'run_name=amip-diff-smoke-19852533']
+Traceback (most recent call last):
+  File "/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/train_diffusion.py", line 457, in main
+    load_checkpoint(
+  File "/work/nvme/bdiu/awikner/physicsnemo/physicsnemo/utils/checkpoint.py", line 1145, in load_checkpoint
+    optimizer.load_state_dict(checkpoint_dict["optimizer_state_dict"])
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1263, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/optim/optimizer.py", line 946, in load_state_dict
+    raise ValueError(
+ValueError: loaded state dict has a different number of parameter groups
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
+Traceback (most recent call last):
+  File "/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/train_diffusion.py", line 457, in main
+    load_checkpoint(
+  File "/work/nvme/bdiu/awikner/physicsnemo/physicsnemo/utils/checkpoint.py", line 1145, in load_checkpoint
+    optimizer.load_state_dict(checkpoint_dict["optimizer_state_dict"])
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1263, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/optim/optimizer.py", line 946, in load_state_dict
+    raise ValueError(
+ValueError: loaded state dict has a different number of parameter groups
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
+W0701 13:45:15.951000 1179441 torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 1179483 closing signal SIGTERM
+E0701 13:45:15.984000 1179441 torch/distributed/elastic/multiprocessing/api.py:986] failed (exitcode: 1) local_rank: 1 (pid: 1179484) of binary: /work/nvme/bdiu/awikner/physicsnemo/.venv/bin/python
+Traceback (most recent call last):
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/bin/torchrun", line 10, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 362, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/distributed/run.py", line 990, in main
+    run(args)
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/distributed/run.py", line 981, in run
+    elastic_launch(
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 170, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/nvme/bdiu/awikner/physicsnemo/.venv/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 317, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+train_diffusion.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-07-01_13:45:15
+  host      : gpub002.delta.ncsa.illinois.edu
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 1179483)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-07-01_13:45:15
+  host      : gpub002.delta.ncsa.illinois.edu
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 1179484)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

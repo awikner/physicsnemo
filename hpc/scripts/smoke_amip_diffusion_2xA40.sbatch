@@ -53,7 +53,8 @@ cd examples/weather/ai_rossby
 # - model=amip_si               → AmipDiTWrapper (single-step diffusion)
 # - loss=si                     → DriftScheduler (SI baseline)
 # - dataset=amip_1981           → 1981 AMIP Zarr
-# - training=amip_diffusion     → Muon + EMA + fp32 + cosine
+# - training=amip_diffusion     → Muon + EMA + fp32 + cosine (Phase 8f F1: real
+#                                 MuonWithAuxAdam via AmipDiTWrapper.muon_param_groups())
 # - validation=diffusion_rollout→ 5-epoch cadence rollout val + spread metric
 # - training.max_epochs=1       → cap to one epoch for the smoke
 # - validation.every_n_epochs=1 → exercise the validator path inside this 1 epoch
@@ -62,6 +63,9 @@ cd examples/weather/ai_rossby
 # - dit_kwargs.num_blocks=4     → ditto
 # - patch_size=4                → coarser patch keeps token count tractable at 180×360
 # - c_grid_downsample=1         → wrapper default, matches train.py x_noised resolution
+#
+# Prereq: `uv pip install git+https://github.com/KellerJordan/Muon` in the venv
+# (Phase 8f F1 — this smoke now exercises the real optimizer, not an AdamW override).
 torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_si \
     loss=si \
@@ -70,8 +74,6 @@ torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     validation=diffusion_rollout \
     training.max_epochs=1 \
     training.ema.warmup_epochs=0 \
-    training.optimizer.type=AdamW \
-    training.optimizer.fused=null \
     validation.every_n_epochs=1 \
     validation.rollout.max_initial_conditions=2 \
     validation.rollout.log_steps='[1]' \
@@ -83,13 +85,8 @@ torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     dataset.batch_size=2 \
     dataset.num_workers=4 \
     log_every_n_steps=5 \
-    run_name="amip-diff-smoke-$SLURM_JOB_ID"
-
-# Note: optimizer overridden Muon→AdamW for the smoke. Muon needs param-group
-# plumbing (the upstream amip splits ≥2D weights into Muon + 1D into Adam via
-# MuonWithAuxAdam — see /work/nvme/bdiu/awikner/amip/modules/train_module.py
-# get_dit_muon_param_groups()). Out of scope for the wiring smoke; tracked as
-# Phase 8f follow-up alongside the rest of the upstream-Muon port.
+    run_name="amip-diff-smoke-$SLURM_JOB_ID" \
+    +checkpoint_dir="./checkpoints_smoke_$SLURM_JOB_ID"
 
 echo
 echo "=== AMIP diffusion smoke test passed for SLURM job $SLURM_JOB_ID"

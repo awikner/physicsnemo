@@ -170,6 +170,7 @@ build/
 mlruns/
 mlflow.db
 checkpoints/
+checkpoints_*/
 cache/
 output/
 

@@ -103,17 +103,15 @@ block, and `decoder_type` defaults to `"unet"` upstream when absent).
 `NotImplementedError` if it's ever encountered; nothing in scope needs
 it today.
 
-**Pending real-checkpoint validation**: the live test above is written
-and passes its unit-level dry runs (synthetic hparams), but hasn't yet
-been run against the two real x_DDC `.ckpt` files on Delta (that
-requires a GPU session with the checkpoint tree mounted — tracked as
-part of the Phase 8f HPC validation pass alongside the F1/F3/F7 Delta
-runs). Update this row with OK/xfail + notes once that run completes:
+**Live-validated** (CPU, this dev node — `/work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/` is mounted directly here even without a GPU; `torch.load` + a CPU forward pass is enough to validate the translator, just slower than on a GPU). `_collect_midway_xddc_ckpts()` actually found **five** `x_DDC*` run dirs on Delta (more than the two originally known about at Phase 8e time) — all five translate → load → forward cleanly:
 
 | Run subdir | Result | Notes |
 |---|---|---|
-| `x_DDC_x_DDC_42_2026-05-20T16-21-23` | _pending Delta run_ | |
-| `x_DDC_x_DDC_42_2026-04-16T17-08-57` | _pending Delta run_ | Only has `model_epoch=24_step=72700_best.ckpt`, no `last.ckpt`. |
+| `x_DDC_x_DDC_42_2026-05-20T16-21-23` | OK | |
+| `x_DDC_x_DDC_42_2026-04-16T17-08-57` | OK | Only has `model_epoch=24_step=72700_best.ckpt`, no `last.ckpt` — `_collect_midway_xddc_ckpts()` falls back to the best-epoch file. |
+| `x_DDC_x_DDC_42_2026-06-01T09-19-35` | OK | Not in the original Phase 8e inventory scrape — discovered by the collector. |
+| `x_DDC_x_DDC_AIMIP_train_noise_42_2026-05-22T16-07-43` | OK | `train_noise` variant — same UNet decoder, different training-noise scheduler hyperparameters (doesn't affect the wrapper/backbone shape). |
+| `x_DDC_x_DDC_AIMIP_train_noise_42_2026-05-23T18-41-12` | OK | Same as above. |
 
 `Combined` still has no standalone checkpoint to translate — see
 `conf/model/amip_combined.yaml` for how to compose

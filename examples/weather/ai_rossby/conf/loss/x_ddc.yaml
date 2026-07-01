@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# x_DDC (data-dependent-coupling super-resolution cascade) training
+# loss (Phase 8f, F6). Mirrors upstream's DDC_midway_AIMIP.yaml
+# scheduler block.
+#
+# Called as ``scheduler.compute_loss(wrapper, x_lowres, x_highres)`` —
+# NOT the ``(wrapper, x, c_grid, c_scalar, y)`` signature the
+# SI/SI_X/ERDM/RFM schedulers use. ``x_lowres`` comes from
+# ``XDDCWrapper.downsample_then_upsample(sample)`` during standalone
+# x_DDC training (bilinear-downsample-then-upsample the same full-res
+# truth); at CombinedModule inference time it instead comes from a
+# real forecaster's prediction, bilinear-upsampled to full resolution.
+
+_target_: physicsnemo.experimental.diffusion.DataDependentInterpolant
+num_steps: 5
+sigma_coef: 1.0
+train_sampler: power
+l_max: 180
+noise: spherical
+integrator: exponential
+tau: 1.5
+model_last: False
+noise_scale_path: null

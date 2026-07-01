@@ -1,0 +1,177 @@
+AWS OFI NCCL Plugin v1.14.2 loaded
+Built with libfabric 1.22.0 and CUDA 12.8
+Configured for Cray CXI interconnect
+Plugin: /sw/rh9.4/user/aws-ofi-nccl-1.14.2-lf1.22.0-cu12.8/lib/libnccl-net.so
+W0701 13:49:04.860000 1963683 torch/distributed/run.py:851] 
+W0701 13:49:04.860000 1963683 torch/distributed/run.py:851] *****************************************
+W0701 13:49:04.860000 1963683 torch/distributed/run.py:851] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0701 13:49:04.860000 1963683 torch/distributed/run.py:851] *****************************************
+/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/train_diffusion.py:50: ExperimentalFeatureWarning: You are importing from 'physicsnemo.experimental'. The APIs in this namespace are experimental, under active development, and may change without notice. Expect possible back-compatibility breaking changes and only partial test coverage.
+  from physicsnemo.experimental.datapipes.climate import (
+/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/train_diffusion.py:50: ExperimentalFeatureWarning: You are importing from 'physicsnemo.experimental'. The APIs in this namespace are experimental, under active development, and may change without notice. Expect possible back-compatibility breaking changes and only partial test coverage.
+  from physicsnemo.experimental.datapipes.climate import (
+[2026-07-01 13:49:18,811][amip_diffusion_train][INFO] - diffusion train: stages=1, total_epochs=1, world_size=2, device=cuda:1
+[2026-07-01 13:49:18,816][amip_diffusion_train][INFO] - diffusion train: stages=1, total_epochs=1, world_size=2, device=cuda:0
+[2026-07-01 13:49:18,959][amip_diffusion_train][INFO] - AMP disabled (cfg.training.amp=none)
+[2026-07-01 13:49:18,959][amip_diffusion_train][INFO] - AMP disabled (cfg.training.amp=none)
+[2026-07-01 13:49:18,960][checkpoint][WARNING] - Provided checkpoint directory /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints_smoke_19852636 does not exist, skipping load
+[2026-07-01 13:49:18,960][checkpoint][WARNING] - Provided checkpoint directory /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints_smoke_19852636 does not exist, skipping load
+[2026-07-01 13:49:18,979][physicsnemo.experimental.diffusion.dynamic_interpolant][INFO] - DriftScheduler initialized: num_steps=10, sigma_coef=1.0, noise=gaussian
+[2026-07-01 13:49:18,979][physicsnemo.experimental.diffusion.dynamic_interpolant][INFO] - DriftScheduler initialized: num_steps=10, sigma_coef=1.0, noise=gaussian
+[2026-07-01 13:49:19,498][amip_diffusion_train][INFO] - validation: every_n_epochs=1, max_ic=2, ensemble_size=1, log_steps=[1], horizon=1
+[2026-07-01 13:49:19,511][amip_diffusion_train][INFO] - stage 0 'default' starting at global_epoch=1: window_mode=False (W=0), steps_per_epoch=730, sched=DriftScheduler
+[2026-07-01 13:49:19,511][amip_diffusion_train][INFO] - stage 0 'default' starting at global_epoch=1: window_mode=False (W=0), steps_per_epoch=730, sched=DriftScheduler
+[2026-07-01 13:49:25,128][amip_diffusion_train][INFO] - epoch 1 batch 0/730 loss=7.3598e+06
+[2026-07-01 13:49:26,151][amip_diffusion_train][INFO] - epoch 1 batch 5/730 loss=5.7598e+06
+[2026-07-01 13:49:26,738][amip_diffusion_train][INFO] - epoch 1 batch 10/730 loss=4.7676e+06
+[2026-07-01 13:49:28,536][amip_diffusion_train][INFO] - epoch 1 batch 15/730 loss=6.7711e+06
+[2026-07-01 13:49:30,472][amip_diffusion_train][INFO] - epoch 1 batch 20/730 loss=5.9406e+06
+[2026-07-01 13:49:31,536][amip_diffusion_train][INFO] - epoch 1 batch 25/730 loss=8.8605e+06
+[2026-07-01 13:49:32,623][amip_diffusion_train][INFO] - epoch 1 batch 30/730 loss=4.4795e+06
+[2026-07-01 13:49:33,913][amip_diffusion_train][INFO] - epoch 1 batch 35/730 loss=5.9142e+06
+[2026-07-01 13:49:36,114][amip_diffusion_train][INFO] - epoch 1 batch 40/730 loss=7.1700e+06
+[2026-07-01 13:49:37,155][amip_diffusion_train][INFO] - epoch 1 batch 45/730 loss=8.1485e+06
+[2026-07-01 13:49:38,525][amip_diffusion_train][INFO] - epoch 1 batch 50/730 loss=9.0679e+06
+[2026-07-01 13:49:39,681][amip_diffusion_train][INFO] - epoch 1 batch 55/730 loss=6.4643e+06
+[2026-07-01 13:49:40,583][amip_diffusion_train][INFO] - epoch 1 batch 60/730 loss=7.4341e+06
+[2026-07-01 13:49:42,205][amip_diffusion_train][INFO] - epoch 1 batch 65/730 loss=5.4397e+06
+[2026-07-01 13:49:43,589][amip_diffusion_train][INFO] - epoch 1 batch 70/730 loss=6.1044e+06
+[2026-07-01 13:49:44,585][amip_diffusion_train][INFO] - epoch 1 batch 75/730 loss=1.3605e+06
+[2026-07-01 13:49:45,998][amip_diffusion_train][INFO] - epoch 1 batch 80/730 loss=6.8716e+06
+[2026-07-01 13:49:47,095][amip_diffusion_train][INFO] - epoch 1 batch 85/730 loss=5.7202e+06
+[2026-07-01 13:49:48,122][amip_diffusion_train][INFO] - epoch 1 batch 90/730 loss=7.3948e+06
+[2026-07-01 13:49:49,418][amip_diffusion_train][INFO] - epoch 1 batch 95/730 loss=8.6848e+06
+[2026-07-01 13:49:50,166][amip_diffusion_train][INFO] - epoch 1 batch 100/730 loss=5.0304e+06
+[2026-07-01 13:49:51,594][amip_diffusion_train][INFO] - epoch 1 batch 105/730 loss=2.7112e+06
+[2026-07-01 13:49:52,873][amip_diffusion_train][INFO] - epoch 1 batch 110/730 loss=3.1290e+06
+[2026-07-01 13:49:53,754][amip_diffusion_train][INFO] - epoch 1 batch 115/730 loss=2.9074e+06
+[2026-07-01 13:49:54,599][amip_diffusion_train][INFO] - epoch 1 batch 120/730 loss=5.1680e+06
+[2026-07-01 13:49:55,965][amip_diffusion_train][INFO] - epoch 1 batch 125/730 loss=5.7089e+06
+[2026-07-01 13:49:56,913][amip_diffusion_train][INFO] - epoch 1 batch 130/730 loss=8.2429e+06
+[2026-07-01 13:49:57,808][amip_diffusion_train][INFO] - epoch 1 batch 135/730 loss=6.9732e+06
+[2026-07-01 13:49:59,220][amip_diffusion_train][INFO] - epoch 1 batch 140/730 loss=1.0449e+07
+[2026-07-01 13:50:00,496][amip_diffusion_train][INFO] - epoch 1 batch 145/730 loss=8.2768e+06
+[2026-07-01 13:50:01,180][amip_diffusion_train][INFO] - epoch 1 batch 150/730 loss=3.8422e+06
+[2026-07-01 13:50:02,829][amip_diffusion_train][INFO] - epoch 1 batch 155/730 loss=3.6414e+06
+[2026-07-01 13:50:03,729][amip_diffusion_train][INFO] - epoch 1 batch 160/730 loss=3.0749e+06
+[2026-07-01 13:50:04,505][amip_diffusion_train][INFO] - epoch 1 batch 165/730 loss=1.4844e+06
+[2026-07-01 13:50:05,513][amip_diffusion_train][INFO] - epoch 1 batch 170/730 loss=6.3866e+06
+[2026-07-01 13:50:06,916][amip_diffusion_train][INFO] - epoch 1 batch 175/730 loss=7.9785e+06
+[2026-07-01 13:50:07,999][amip_diffusion_train][INFO] - epoch 1 batch 180/730 loss=4.0864e+06
+[2026-07-01 13:50:09,050][amip_diffusion_train][INFO] - epoch 1 batch 185/730 loss=3.7736e+06
+[2026-07-01 13:50:09,639][amip_diffusion_train][INFO] - epoch 1 batch 190/730 loss=3.5186e+06
+[2026-07-01 13:50:10,918][amip_diffusion_train][INFO] - epoch 1 batch 195/730 loss=7.0404e+06
+[2026-07-01 13:50:11,715][amip_diffusion_train][INFO] - epoch 1 batch 200/730 loss=6.2266e+06
+[2026-07-01 13:50:12,792][amip_diffusion_train][INFO] - epoch 1 batch 205/730 loss=4.5216e+06
+[2026-07-01 13:50:13,604][amip_diffusion_train][INFO] - epoch 1 batch 210/730 loss=8.4550e+06
+[2026-07-01 13:50:15,305][amip_diffusion_train][INFO] - epoch 1 batch 215/730 loss=8.6298e+06
+[2026-07-01 13:50:16,433][amip_diffusion_train][INFO] - epoch 1 batch 220/730 loss=2.7475e+06
+[2026-07-01 13:50:17,698][amip_diffusion_train][INFO] - epoch 1 batch 225/730 loss=5.3649e+06
+[2026-07-01 13:50:18,569][amip_diffusion_train][INFO] - epoch 1 batch 230/730 loss=9.6116e+06
+[2026-07-01 13:50:19,634][amip_diffusion_train][INFO] - epoch 1 batch 235/730 loss=5.1603e+06
+[2026-07-01 13:50:20,618][amip_diffusion_train][INFO] - epoch 1 batch 240/730 loss=6.7123e+06
+[2026-07-01 13:50:21,865][amip_diffusion_train][INFO] - epoch 1 batch 245/730 loss=5.2542e+06
+[2026-07-01 13:50:22,825][amip_diffusion_train][INFO] - epoch 1 batch 250/730 loss=4.0692e+06
+[2026-07-01 13:50:23,704][amip_diffusion_train][INFO] - epoch 1 batch 255/730 loss=4.3740e+06
+[2026-07-01 13:50:24,739][amip_diffusion_train][INFO] - epoch 1 batch 260/730 loss=3.8414e+06
+[2026-07-01 13:50:25,702][amip_diffusion_train][INFO] - epoch 1 batch 265/730 loss=3.3217e+06
+[2026-07-01 13:50:27,175][amip_diffusion_train][INFO] - epoch 1 batch 270/730 loss=8.6560e+06
+[2026-07-01 13:50:27,802][amip_diffusion_train][INFO] - epoch 1 batch 275/730 loss=6.2204e+06
+[2026-07-01 13:50:28,896][amip_diffusion_train][INFO] - epoch 1 batch 280/730 loss=6.8547e+06
+[2026-07-01 13:50:30,117][amip_diffusion_train][INFO] - epoch 1 batch 285/730 loss=5.4787e+06
+[2026-07-01 13:50:31,261][amip_diffusion_train][INFO] - epoch 1 batch 290/730 loss=5.9818e+06
+[2026-07-01 13:50:32,041][amip_diffusion_train][INFO] - epoch 1 batch 295/730 loss=7.3766e+06
+[2026-07-01 13:50:33,169][amip_diffusion_train][INFO] - epoch 1 batch 300/730 loss=9.5402e+06
+[2026-07-01 13:50:34,077][amip_diffusion_train][INFO] - epoch 1 batch 305/730 loss=6.7071e+06
+[2026-07-01 13:50:34,747][amip_diffusion_train][INFO] - epoch 1 batch 310/730 loss=7.3177e+06
+[2026-07-01 13:50:36,003][amip_diffusion_train][INFO] - epoch 1 batch 315/730 loss=5.2374e+06
+[2026-07-01 13:50:36,750][amip_diffusion_train][INFO] - epoch 1 batch 320/730 loss=7.8564e+06
+[2026-07-01 13:50:38,210][amip_diffusion_train][INFO] - epoch 1 batch 325/730 loss=8.7909e+06
+[2026-07-01 13:50:39,077][amip_diffusion_train][INFO] - epoch 1 batch 330/730 loss=8.4389e+06
+[2026-07-01 13:50:39,934][amip_diffusion_train][INFO] - epoch 1 batch 335/730 loss=8.7126e+06
+[2026-07-01 13:50:41,134][amip_diffusion_train][INFO] - epoch 1 batch 340/730 loss=6.5952e+06
+[2026-07-01 13:50:42,057][amip_diffusion_train][INFO] - epoch 1 batch 345/730 loss=3.2614e+06
+[2026-07-01 13:50:43,321][amip_diffusion_train][INFO] - epoch 1 batch 350/730 loss=6.7042e+06
+[2026-07-01 13:50:43,970][amip_diffusion_train][INFO] - epoch 1 batch 355/730 loss=5.3551e+06
+[2026-07-01 13:50:44,882][amip_diffusion_train][INFO] - epoch 1 batch 360/730 loss=5.5256e+06
+[2026-07-01 13:50:45,856][amip_diffusion_train][INFO] - epoch 1 batch 365/730 loss=8.5510e+06
+[2026-07-01 13:50:46,834][amip_diffusion_train][INFO] - epoch 1 batch 370/730 loss=1.0488e+07
+[2026-07-01 13:50:47,631][amip_diffusion_train][INFO] - epoch 1 batch 375/730 loss=4.0143e+06
+[2026-07-01 13:50:48,624][amip_diffusion_train][INFO] - epoch 1 batch 380/730 loss=8.5719e+06
+[2026-07-01 13:50:50,497][amip_diffusion_train][INFO] - epoch 1 batch 385/730 loss=3.0010e+06
+[2026-07-01 13:50:51,174][amip_diffusion_train][INFO] - epoch 1 batch 390/730 loss=7.1842e+06
+[2026-07-01 13:50:52,259][amip_diffusion_train][INFO] - epoch 1 batch 395/730 loss=3.1707e+06
+[2026-07-01 13:50:53,212][amip_diffusion_train][INFO] - epoch 1 batch 400/730 loss=9.8002e+06
+[2026-07-01 13:50:54,092][amip_diffusion_train][INFO] - epoch 1 batch 405/730 loss=8.9378e+06
+[2026-07-01 13:50:54,794][amip_diffusion_train][INFO] - epoch 1 batch 410/730 loss=3.6263e+06
+[2026-07-01 13:50:56,016][amip_diffusion_train][INFO] - epoch 1 batch 415/730 loss=8.5815e+06
+[2026-07-01 13:50:56,947][amip_diffusion_train][INFO] - epoch 1 batch 420/730 loss=6.2241e+06
+[2026-07-01 13:50:57,831][amip_diffusion_train][INFO] - epoch 1 batch 425/730 loss=9.0989e+06
+[2026-07-01 13:50:58,886][amip_diffusion_train][INFO] - epoch 1 batch 430/730 loss=6.2687e+06
+[2026-07-01 13:50:59,981][amip_diffusion_train][INFO] - epoch 1 batch 435/730 loss=8.7345e+06
+[2026-07-01 13:51:01,522][amip_diffusion_train][INFO] - epoch 1 batch 440/730 loss=4.5569e+06
+[2026-07-01 13:51:02,156][amip_diffusion_train][INFO] - epoch 1 batch 445/730 loss=3.8393e+06
+[2026-07-01 13:51:03,419][amip_diffusion_train][INFO] - epoch 1 batch 450/730 loss=6.0755e+06
+[2026-07-01 13:51:04,019][amip_diffusion_train][INFO] - epoch 1 batch 455/730 loss=7.3007e+06
+[2026-07-01 13:51:05,096][amip_diffusion_train][INFO] - epoch 1 batch 460/730 loss=9.3580e+06
+[2026-07-01 13:51:06,083][amip_diffusion_train][INFO] - epoch 1 batch 465/730 loss=4.7117e+06
+[2026-07-01 13:51:06,821][amip_diffusion_train][INFO] - epoch 1 batch 470/730 loss=4.2065e+06
+[2026-07-01 13:51:07,862][amip_diffusion_train][INFO] - epoch 1 batch 475/730 loss=6.0438e+06
+[2026-07-01 13:51:09,120][amip_diffusion_train][INFO] - epoch 1 batch 480/730 loss=7.7780e+06
+[2026-07-01 13:51:10,494][amip_diffusion_train][INFO] - epoch 1 batch 485/730 loss=5.8687e+06
+[2026-07-01 13:51:11,090][amip_diffusion_train][INFO] - epoch 1 batch 490/730 loss=1.0109e+07
+[2026-07-01 13:51:12,412][amip_diffusion_train][INFO] - epoch 1 batch 495/730 loss=4.5882e+06
+[2026-07-01 13:51:13,339][amip_diffusion_train][INFO] - epoch 1 batch 500/730 loss=5.5541e+06
+[2026-07-01 13:51:14,550][amip_diffusion_train][INFO] - epoch 1 batch 505/730 loss=4.7118e+06
+[2026-07-01 13:51:15,300][amip_diffusion_train][INFO] - epoch 1 batch 510/730 loss=4.2430e+06
+[2026-07-01 13:51:16,364][amip_diffusion_train][INFO] - epoch 1 batch 515/730 loss=5.1969e+06
+[2026-07-01 13:51:17,633][amip_diffusion_train][INFO] - epoch 1 batch 520/730 loss=3.7207e+06
+[2026-07-01 13:51:18,450][amip_diffusion_train][INFO] - epoch 1 batch 525/730 loss=8.9483e+06
+[2026-07-01 13:51:19,057][amip_diffusion_train][INFO] - epoch 1 batch 530/730 loss=4.6660e+06
+[2026-07-01 13:51:20,333][amip_diffusion_train][INFO] - epoch 1 batch 535/730 loss=5.1854e+06
+[2026-07-01 13:51:21,056][amip_diffusion_train][INFO] - epoch 1 batch 540/730 loss=9.8188e+06
+[2026-07-01 13:51:22,726][amip_diffusion_train][INFO] - epoch 1 batch 545/730 loss=8.3468e+06
+[2026-07-01 13:51:23,489][amip_diffusion_train][INFO] - epoch 1 batch 550/730 loss=4.1216e+06
+[2026-07-01 13:51:24,569][amip_diffusion_train][INFO] - epoch 1 batch 555/730 loss=9.8371e+06
+[2026-07-01 13:51:25,607][amip_diffusion_train][INFO] - epoch 1 batch 560/730 loss=5.3581e+06
+[2026-07-01 13:51:26,577][amip_diffusion_train][INFO] - epoch 1 batch 565/730 loss=5.4956e+06
+[2026-07-01 13:51:27,538][amip_diffusion_train][INFO] - epoch 1 batch 570/730 loss=7.7539e+06
+[2026-07-01 13:51:28,292][amip_diffusion_train][INFO] - epoch 1 batch 575/730 loss=9.2641e+06
+[2026-07-01 13:51:29,685][amip_diffusion_train][INFO] - epoch 1 batch 580/730 loss=4.2289e+06
+[2026-07-01 13:51:30,625][amip_diffusion_train][INFO] - epoch 1 batch 585/730 loss=8.2396e+06
+[2026-07-01 13:51:31,509][amip_diffusion_train][INFO] - epoch 1 batch 590/730 loss=2.4827e+06
+[2026-07-01 13:51:32,536][amip_diffusion_train][INFO] - epoch 1 batch 595/730 loss=5.4074e+06
+[2026-07-01 13:51:33,293][amip_diffusion_train][INFO] - epoch 1 batch 600/730 loss=6.1875e+06
+[2026-07-01 13:51:34,876][amip_diffusion_train][INFO] - epoch 1 batch 605/730 loss=6.4362e+06
+[2026-07-01 13:51:35,497][amip_diffusion_train][INFO] - epoch 1 batch 610/730 loss=6.3310e+06
+[2026-07-01 13:51:36,638][amip_diffusion_train][INFO] - epoch 1 batch 615/730 loss=4.8939e+06
+[2026-07-01 13:51:37,833][amip_diffusion_train][INFO] - epoch 1 batch 620/730 loss=8.0447e+06
+[2026-07-01 13:51:38,577][amip_diffusion_train][INFO] - epoch 1 batch 625/730 loss=7.0552e+06
+[2026-07-01 13:51:39,876][amip_diffusion_train][INFO] - epoch 1 batch 630/730 loss=7.6589e+06
+[2026-07-01 13:51:40,667][amip_diffusion_train][INFO] - epoch 1 batch 635/730 loss=7.7560e+06
+[2026-07-01 13:51:41,421][amip_diffusion_train][INFO] - epoch 1 batch 640/730 loss=3.5507e+06
+[2026-07-01 13:51:42,486][amip_diffusion_train][INFO] - epoch 1 batch 645/730 loss=6.0502e+06
+[2026-07-01 13:51:43,744][amip_diffusion_train][INFO] - epoch 1 batch 650/730 loss=5.7956e+06
+[2026-07-01 13:51:44,627][amip_diffusion_train][INFO] - epoch 1 batch 655/730 loss=6.0238e+06
+[2026-07-01 13:51:45,997][amip_diffusion_train][INFO] - epoch 1 batch 660/730 loss=5.9330e+06
+[2026-07-01 13:51:46,626][amip_diffusion_train][INFO] - epoch 1 batch 665/730 loss=2.3861e+06
+[2026-07-01 13:51:47,887][amip_diffusion_train][INFO] - epoch 1 batch 670/730 loss=7.8920e+06
+[2026-07-01 13:51:49,125][amip_diffusion_train][INFO] - epoch 1 batch 675/730 loss=7.9539e+06
+[2026-07-01 13:51:49,733][amip_diffusion_train][INFO] - epoch 1 batch 680/730 loss=8.9342e+06
+[2026-07-01 13:51:50,880][amip_diffusion_train][INFO] - epoch 1 batch 685/730 loss=5.5321e+06
+[2026-07-01 13:51:51,797][amip_diffusion_train][INFO] - epoch 1 batch 690/730 loss=5.4737e+06
+[2026-07-01 13:51:52,658][amip_diffusion_train][INFO] - epoch 1 batch 695/730 loss=4.3727e+06
+[2026-07-01 13:51:53,489][amip_diffusion_train][INFO] - epoch 1 batch 700/730 loss=6.8792e+06
+[2026-07-01 13:51:54,799][amip_diffusion_train][INFO] - epoch 1 batch 705/730 loss=7.0407e+06
+[2026-07-01 13:51:55,514][amip_diffusion_train][INFO] - epoch 1 batch 710/730 loss=1.0407e+07
+[2026-07-01 13:51:56,810][amip_diffusion_train][INFO] - epoch 1 batch 715/730 loss=3.8023e+06
+[2026-07-01 13:51:57,990][amip_diffusion_train][INFO] - epoch 1 batch 720/730 loss=2.4564e+06
+[2026-07-01 13:51:58,655][amip_diffusion_train][INFO] - epoch 1 batch 725/730 loss=9.6414e+06
+[2026-07-01 13:51:59,138][checkpoint][WARNING] - Output directory /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints_smoke_19852636 does not exist, will attempt to create
+[2026-07-01 13:51:59,405][checkpoint][INFO] - Saved model state dictionary: /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints_smoke_19852636/AmipDiTWrapper.0.1.mdlus
+[2026-07-01 13:51:59,461][checkpoint][INFO] - Saved training checkpoint: /work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/checkpoints_smoke_19852636/checkpoint.0.1.pt
+[2026-07-01 13:51:59,862][amip_diffusion_train][INFO] - epoch 1 valid: rmse_step1_surface=3.8930e+02 rmse_step1_upper_air=7.2870e+02 rmse_step1_diagnostic=5.1782e+00
+[2026-07-01 13:51:59,863][amip_diffusion_train][INFO] - peak GPU memory: 1.77 GB
+[2026-07-01 13:51:59,863][amip_diffusion_train][INFO] - peak GPU memory: 1.77 GB
+
+=== AMIP diffusion smoke test passed for SLURM job 19852636

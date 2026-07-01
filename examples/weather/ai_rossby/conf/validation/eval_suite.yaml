@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Long-horizon climate eval suite (Phase 8f, F5) — climatology / bias /
+# QBO / global-mean flux / ensemble-envelope validators against a
+# trained AMIP diffusion checkpoint. Run standalone via:
+#
+#   python eval_diffusion.py model=amip_si loss=si dataset=amip_1981 \
+#       validation=eval_suite \
+#       +eval_suite.checkpoint_dir=./outputs/amip_si_run/checkpoints \
+#       +eval_suite.output_path=./outputs/amip_si_run/eval_suite.pt
+#
+# Each sub-block below maps 1:1 to a validator class in eval_diffusion.py
+# (docstrings there explain the metric). Every sub-block is independently
+# toggled via ``enabled`` — turn off what you don't need to save GPU time
+# (each aggregator pays its own full ``eval_suite.horizon``-length
+# rollout unless the underlying scheduler/model instance is shared and
+# cheap to reuse; the F5 live-validation test should confirm actual
+# wall-time on Delta).
+#
+# ``eval_suite.horizon`` is the rollout length in *dataset steps* for
+# every enabled validator (e.g. 1460 six-hourly steps ≈ 1 year).
+# ``eval_suite.sampler_num_steps`` is forwarded to
+# DiffusionRolloutValidator's per-emitted-frame sampler schedule
+# (Phase 8f, F4) — a single int applies uniformly; a list of length
+# ``horizon`` gives a per-frame schedule. Capping this is what makes a
+# 1-year+ rollout tractable at eval time.
+
+horizon: 1460
+max_initial_conditions: 1
+ic_stride: 9999
+batch_size: 1
+# ``null`` (uniform, scheduler default) | int | list[int] of length `horizon`.
+sampler_num_steps: 4
+
+climatology:
+  enabled: True
+  n_bins: 12          # monthly climatology
+  steps_per_bin: 120  # 120 six-hourly steps ≈ 1 month
+
+bias:
+  enabled: True
+  n_bins: 12
+  steps_per_bin: 120
+
+qbo:
+  enabled: True
+  u_variable_name: ua
+  levels: [10, 30, 50]   # hPa — must match entries in model.levels
+  steps_per_bin: 120
+  months_per_bin: 1.0
+
+global_mean:
+  enabled: True
+  # TOA net-radiation-style flux channels — override to match the
+  # model's actual surface_variables / diagnostic_variables names.
+  flux_variables: [DSWRFtoa]
+
+ensemble_envelope:
+  enabled: False   # off by default — needs ensemble_size>1 (E× cost)
+  ensemble_size: 4
+  perturber: replicate_only   # replicate_only | gaussian_ic
+  perturber_scales: {}

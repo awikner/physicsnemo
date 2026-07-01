@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# bf16-native variant of amip_diffusion.yaml (Phase 8f, F3).
+#
+# Identical to ``amip_diffusion.yaml`` except ``amp: bf16``. The amip_si
+# wrappers' MetaData now declares ``bf16=True`` / ``amp=True`` (Phase 8f)
+# since the fp32-vs-bf16 benchmark
+# (``benchmarks/physicsnemo/experimental/models/amip_si/RESULTS.md``)
+# confirms bf16 autocast training doesn't tank convergence vs. fp32 while
+# cutting wall-time + peak memory. Select via
+# ``training=amip_diffusion_bf16`` on the Hydra command line. No
+# GradScaler is needed for bf16 (see ``train_diffusion.py``'s
+# ``_resolve_amp_dtype`` / grad_scaler wiring) — only fp16 needs one.
+
+use_static_capture: False
+amp: bf16                      # bf16-native (Phase 8f, F3) — fp32 default lives in amip_diffusion.yaml
+grad_clip_norm: 0.0
+max_epochs: 50
+
+optimizer:
+  type: Muon                    # ``uv pip install muon`` required
+  lr: 5.0e-5
+  weight_decay: 3.0e-6
+  fused: null
+
+ema:
+  enabled: True
+  decay: 0.999
+  warmup_epochs: 6
+
+stages:
+  - name: default
+    num_epochs: ${training.max_epochs}
+    unroll_steps: 1             # diffusion train loop ignores this — window
+                                # length comes from cfg.loss.window_size
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: CosineAnnealingLR
+      cosine_eta_min: 1.0e-7

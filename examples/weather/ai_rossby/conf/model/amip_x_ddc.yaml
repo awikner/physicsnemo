@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP x_DDC wrapper config (Phase 8f, F6) — :class:`XDDCWrapper` around
+# the convolutional :class:`XDDCUNet` denoiser for the x_DDC
+# super-resolution cascade. Unlike amip_si.yaml / amip_rfm.yaml /
+# amip_erdm.yaml, there is no c_grid/c_scalar conditioning (no
+# constant_boundary_variables / varying_boundary_variables /
+# scalar_dim) — the model's only conditioning is the bilinear
+# down-then-up-sampled low-res field itself (see
+# ``XDDCWrapper.downsample_then_upsample`` /
+# ``CombinedModule`` for how that field gets built).
+#
+# Values below mirror upstream's DDC_midway_AIMIP.yaml (the config that
+# produced the two real Midway3 x_DDC checkpoints in
+# phase8e_midway3_checkpoint_inventory.md).
+
+name: XDDCWrapper
+module: physicsnemo.experimental.models.amip_si
+
+surface_variables:
+  - skin_temperature
+  - surface_pressure
+  - 2m_temperature
+  - 2m_specific_humidity
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - geopotential
+  - specific_humidity
+diagnostic_variables:
+  - USWRFtoa_24h
+  - ULWRFtoa_24h
+  - USWRFsfc_24h
+  - ULWRFsfc_24h
+  - DSWRFsfc_24h
+  - DLWRFsfc_24h
+  - LHTFLsfc_24h
+  - SHTFLsfc_24h
+  - PRATEsfc_24h
+  - hcc_24h
+  - lcc_24h
+  - mcc_24h
+  - mn2t_24h
+  - mx2t_24h
+  - mxtpr_24h
+
+levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
+         500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
+horizontal_resolution: [180, 360]
+downsample_factor: 4
+
+# XDDCUNet (convolutional denoiser) kwargs forwarded through unet_kwargs.
+# decoder_type: dit (DiTAE autoencoder) is not vendored — see
+# tools/checkpoint_translation/amip_si.py's _xddc_wrapper_kwargs_from_hparams.
+unet_kwargs:
+  model_channels: 384
+  channel_mult: [1, 2, 4]
+  num_res_blocks: 3
+  attn_levels: []
+  num_heads: 8
+  t_emb_dim: 256
+  num_groups: 16
+  dropout: 0.0
