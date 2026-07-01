@@ -113,6 +113,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "extract 1 per __getitem__ call (~6x throughput regression at time_chunk=50 "
         "in our benchmark; see benchmarks/.../plasim/RESULTS.md).",
     )
+    p.add_argument(
+        "--write-batch",
+        type=int,
+        default=50,
+        help="Number of timesteps held in memory at once and written to Zarr "
+        "in one region update. See amip_h5_to_zarr.py for the rationale — "
+        "PLASIM uses the same streaming-write pattern.",
+    )
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -203,6 +211,17 @@ def _decode_time(time_dataset_value, calendar: str) -> cftime.datetime:
     return cls(y, mo, d, h, mi, sec, micros)
 
 
+def _read_time_only(path: Path, calendar: str) -> cftime.datetime:
+    """Read the per-file timestamp (no payload) for the cheap first pass.
+
+    Mirrors the AMIP converter helper: lets the streaming write build
+    the full time coord up front without touching the per-variable
+    payloads.
+    """
+    with h5py.File(path, "r") as f:
+        return _decode_time(f["input"]["time"][()], calendar)
+
+
 def _read_one_file(
     path: Path,
     *,
@@ -279,6 +298,7 @@ def convert(
     sample_range: tuple[int, int] | None,
     output: Path,
     time_chunk: int,
+    write_batch: int = 50,
 ) -> None:
     surface_vars = list(config["surface_variables"])
     upper_air_vars = list(config["upper_air_variables"])
@@ -315,74 +335,85 @@ def convert(
         sample_range,
     )
 
+    # --- Streaming write — see amip_h5_to_zarr.py:convert for the design
+    # rationale. Identical pattern, plus PLASIM's sigma-level handling.
+    import time as _time
+
+    import dask.array as da
+
+    n_time = len(files)
+    logger.info("Pass 1/2: reading %d timestamps for the time coord", n_time)
+    t_phase = _time.time()
     times: list[cftime.datetime] = []
-    surface_stacks: dict[str, list[np.ndarray]] = {v: [] for v in surface_vars}
-    varying_stacks: dict[str, list[np.ndarray]] = {v: [] for v in varying_boundary_vars}
-    diagnostic_stacks: dict[str, list[np.ndarray]] = {v: [] for v in diagnostic_vars}
-    pressure_stacks: dict[str, list[np.ndarray]] = {v: [] for v in pressure_upper_vars}
-    sigma_stacks: dict[str, list[np.ndarray]] = {v: [] for v in sigma_upper_vars}
-    constants: dict[str, np.ndarray] = {}
-
     for k, path in enumerate(files):
-        if k % 50 == 0:
-            logger.info("Reading %d/%d %s", k + 1, len(files), path.name)
-        data = _read_one_file(
-            path,
-            surface_vars=surface_vars,
-            pressure_upper_vars=pressure_upper_vars,
-            sigma_upper_vars=sigma_upper_vars,
-            constant_boundary_vars=constant_boundary_vars,
-            varying_boundary_vars=varying_boundary_vars,
-            diagnostic_vars=diagnostic_vars,
-            pressure_levels=pressure_levels,
-            sigma_levels=sigma_levels,
-            calendar=calendar,
-            include_constants=(k == 0),
-        )
-        times.append(data["time"])
-        for v in surface_vars:
-            surface_stacks[v].append(data[v])
-        for v in varying_boundary_vars:
-            varying_stacks[v].append(data[v])
-        for v in diagnostic_vars:
-            diagnostic_stacks[v].append(data[v])
-        for v in pressure_upper_vars:
-            pressure_stacks[v].append(data[v])
-        for v in sigma_upper_vars:
-            sigma_stacks[v].append(data[v])
-        if k == 0:
-            for v in constant_boundary_vars:
-                constants[v] = data[v]
+        times.append(_read_time_only(path, calendar))
+        if (k + 1) % 200 == 0:
+            logger.info("  %d/%d timestamps read", k + 1, n_time)
+    logger.info("  done in %.1fs", _time.time() - t_phase)
 
-    data_vars: dict[str, xr.DataArray] = {}
+    logger.info("Reading first file for constants + reference shape")
+    first = _read_one_file(
+        files[0],
+        surface_vars=surface_vars,
+        pressure_upper_vars=pressure_upper_vars,
+        sigma_upper_vars=sigma_upper_vars,
+        constant_boundary_vars=constant_boundary_vars,
+        varying_boundary_vars=varying_boundary_vars,
+        diagnostic_vars=diagnostic_vars,
+        pressure_levels=pressure_levels,
+        sigma_levels=sigma_levels,
+        calendar=calendar,
+        include_constants=True,
+    )
+    constants: dict[str, np.ndarray] = {v: first[v] for v in constant_boundary_vars}
+
+    n_lat = lat.shape[0]
+    n_lon = lon.shape[0]
+    n_pressure = len(pressure_levels)
+    n_sigma = len(sigma_levels)
+
+    time_chunk_eff = min(max(1, time_chunk), n_time)
+    surface_shape = (n_time, n_lat, n_lon)
+    surface_chunks = (time_chunk_eff, n_lat, n_lon)
+    pressure_shape = (n_time, n_pressure, n_lat, n_lon)
+    pressure_chunks = (time_chunk_eff, n_pressure, n_lat, n_lon)
+    sigma_shape = (n_time, n_sigma, n_lat, n_lon)
+    sigma_chunks = (time_chunk_eff, n_sigma, n_lat, n_lon)
+
+    data_vars: dict[str, tuple] = {}
+    for v in surface_vars + varying_boundary_vars + diagnostic_vars:
+        data_vars[v] = (
+            ("time", "lat", "lon"),
+            da.zeros(surface_shape, chunks=surface_chunks, dtype="float32"),
+        )
+    for v in pressure_upper_vars:
+        data_vars[v] = (
+            ("time", "pressure_level", "lat", "lon"),
+            da.zeros(pressure_shape, chunks=pressure_chunks, dtype="float32"),
+        )
+    for v in sigma_upper_vars:
+        data_vars[v] = (
+            ("time", "sigma_level", "lat", "lon"),
+            da.zeros(sigma_shape, chunks=sigma_chunks, dtype="float32"),
+        )
+    for v in constant_boundary_vars:
+        data_vars[v] = (("lat", "lon"), constants[v])
+
     coords: dict[str, object] = {
         "time": ("time", times),
         "lat": ("lat", lat),
         "lon": ("lon", lon),
     }
     if pressure_upper_vars:
-        coords["pressure_level"] = ("pressure_level", np.array(pressure_levels, dtype="float32"))
+        coords["pressure_level"] = (
+            "pressure_level",
+            np.array(pressure_levels, dtype="float32"),
+        )
     if sigma_upper_vars:
-        coords["sigma_level"] = ("sigma_level", np.array(sigma_levels, dtype="float32"))
-
-    for v in surface_vars:
-        data_vars[v] = xr.DataArray(np.stack(surface_stacks[v]), dims=("time", "lat", "lon"))
-    for v in varying_boundary_vars:
-        data_vars[v] = xr.DataArray(np.stack(varying_stacks[v]), dims=("time", "lat", "lon"))
-    for v in diagnostic_vars:
-        data_vars[v] = xr.DataArray(np.stack(diagnostic_stacks[v]), dims=("time", "lat", "lon"))
-    for v in pressure_upper_vars:
-        data_vars[v] = xr.DataArray(
-            np.stack(pressure_stacks[v]),
-            dims=("time", "pressure_level", "lat", "lon"),
+        coords["sigma_level"] = (
+            "sigma_level",
+            np.array(sigma_levels, dtype="float32"),
         )
-    for v in sigma_upper_vars:
-        data_vars[v] = xr.DataArray(
-            np.stack(sigma_stacks[v]),
-            dims=("time", "sigma_level", "lat", "lon"),
-        )
-    for v in constant_boundary_vars:
-        data_vars[v] = xr.DataArray(constants[v], dims=("lat", "lon"))
 
     ds = xr.Dataset(data_vars, coords=coords)
     ds.attrs = {
@@ -400,32 +431,98 @@ def convert(
         "sample_range": list(sample_range) if sample_range else "all",
     }
 
-    # Chunking — Zarr v3 takes chunk shapes per data_var via encoding; we don't
-    # need dask-backed dask-array chunking (which would require the optional
-    # `dask` dep), so we pass chunks via `encoding` and let xarray's serializer
-    # split the numpy arrays at write time.
     chunk_spec = {
-        "time": min(time_chunk, ds.sizes["time"]),
-        "lat": ds.sizes["lat"],
-        "lon": ds.sizes["lon"],
+        "time": time_chunk_eff,
+        "lat": n_lat,
+        "lon": n_lon,
     }
     if "pressure_level" in ds.sizes:
-        chunk_spec["pressure_level"] = ds.sizes["pressure_level"]
+        chunk_spec["pressure_level"] = n_pressure
     if "sigma_level" in ds.sizes:
-        chunk_spec["sigma_level"] = ds.sizes["sigma_level"]
-
+        chunk_spec["sigma_level"] = n_sigma
     encoding: dict[str, dict] = {}
     for name in ds.data_vars:
         chunks = tuple(chunk_spec[d] for d in ds[name].dims)
         encoding[name] = {"chunks": chunks}
 
-    logger.info("Writing %s", output)
+    logger.info("Allocating Zarr template at %s", output)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         import shutil
         shutil.rmtree(output)
-    ds.to_zarr(output, mode="w", encoding=encoding, zarr_format=3, consolidated=True)
-    logger.info("Done. Total variables: %d, times: %d", len(ds.data_vars), ds.dims["time"])
+    ds.to_zarr(
+        output,
+        mode="w",
+        encoding=encoding,
+        zarr_format=3,
+        consolidated=True,
+        compute=False,
+    )
+
+    # --- Pass 2/2: stream batched data writes ---------------------------
+    logger.info(
+        "Pass 2/2: streaming %d timesteps in batches of %d", n_time, write_batch
+    )
+    t_phase = _time.time()
+    write_batch = max(1, int(write_batch))
+    surface_3d_vars = surface_vars + varying_boundary_vars + diagnostic_vars
+
+    for batch_start in range(0, n_time, write_batch):
+        batch_end = min(batch_start + write_batch, n_time)
+        bsize = batch_end - batch_start
+        buf_3d = {
+            v: np.empty((bsize, n_lat, n_lon), dtype="float32")
+            for v in surface_3d_vars
+        }
+        buf_pressure = {
+            v: np.empty((bsize, n_pressure, n_lat, n_lon), dtype="float32")
+            for v in pressure_upper_vars
+        }
+        buf_sigma = {
+            v: np.empty((bsize, n_sigma, n_lat, n_lon), dtype="float32")
+            for v in sigma_upper_vars
+        }
+        for k_local, k_global in enumerate(range(batch_start, batch_end)):
+            data = _read_one_file(
+                files[k_global],
+                surface_vars=surface_vars,
+                pressure_upper_vars=pressure_upper_vars,
+                sigma_upper_vars=sigma_upper_vars,
+                constant_boundary_vars=constant_boundary_vars,
+                varying_boundary_vars=varying_boundary_vars,
+                diagnostic_vars=diagnostic_vars,
+                pressure_levels=pressure_levels,
+                sigma_levels=sigma_levels,
+                calendar=calendar,
+                include_constants=False,
+            )
+            for v in surface_3d_vars:
+                buf_3d[v][k_local] = data[v]
+            for v in pressure_upper_vars:
+                buf_pressure[v][k_local] = data[v]
+            for v in sigma_upper_vars:
+                buf_sigma[v][k_local] = data[v]
+
+        batch_vars: dict[str, tuple] = {}
+        for v in surface_3d_vars:
+            batch_vars[v] = (("time", "lat", "lon"), buf_3d[v])
+        for v in pressure_upper_vars:
+            batch_vars[v] = (("time", "pressure_level", "lat", "lon"), buf_pressure[v])
+        for v in sigma_upper_vars:
+            batch_vars[v] = (("time", "sigma_level", "lat", "lon"), buf_sigma[v])
+        batch_ds = xr.Dataset(batch_vars)
+        batch_ds.to_zarr(
+            output,
+            region={"time": slice(batch_start, batch_end)},
+        )
+        logger.info(
+            "  wrote timesteps %d..%d / %d", batch_start, batch_end, n_time
+        )
+
+    logger.info(
+        "Done. Total variables: %d, times: %d (write phase %.1fs)",
+        len(ds.data_vars), n_time, _time.time() - t_phase,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -445,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         sample_range=sample_range,
         output=args.output,
         time_chunk=args.time_chunk,
+        write_batch=args.write_batch,
     )
     return 0
 
