@@ -14,12 +14,10 @@ Claude skills, and a minimal smoke-test validation on each cluster.
 |---|---|---|---|---|---|
 | Delta | NCSA | SLURM | 4× NVIDIA A40 48 GB | `bdiu-delta-gpu` | `bdiu-delta-cpu` |
 | DeltaAI | NCSA | SLURM | 4× NVIDIA H100 NVL 80 GB | `bdiu-dtai-gh` | — |
-| Stampede3 | TACC | SLURM | NVIDIA H100 SXM 80 GB | `tg-atm170020` | `tg-atm170` ¹ |
+| Stampede3 | TACC | SLURM | NVIDIA H100 SXM 80 GB | `tg-atm170020` | `tg-atm170020` |
 | Derecho | NCAR | PBS | 4× NVIDIA A100 40 GB | `UCHI0018` | `UCHI0014` |
 | Midway3 | UChicago RCC | SLURM | NVIDIA V100/A100 | `pi-pedramh` | `pi-pedramh` |
 | DSI | UChicago DSI | SLURM | A40/A100/L40S/H100/H200 | `general_group` | `general_group` |
-
-¹ Verify `tg-atm170` is the correct CPU allocation code on first login (may be `tg-atm170020`).
 
 **Already done:** Delta is fully set up (`hpc/delta.md`, three skills,
 verified smoke tests). Phase 9 extends that baseline to the other five clusters.
@@ -189,27 +187,38 @@ All five are independent and can be done in any order, but **DeltaAI first**
 (most like Delta, lowest risk), **Midway3 second** (amip checkpoints already
 there → unlocks translator live tests on a second cluster immediately).
 
-### Repo path convention
+### Path conventions (code vs. scratch)
 
-Each cluster has a "work" filesystem where the venv lives. The convention
-matches Delta's pattern:
+Every cluster distinguishes between a **persistent work/project filesystem**
+(for code, venv, and test fixtures — survives indefinitely) and a **scratch
+filesystem** (for training data, converted Zarr archives, and job outputs —
+large but subject to purge policies). These must not be confused.
 
-| Cluster | Repo path | Test-data path |
-|---|---|---|
-| Delta | `/work/nvme/bdiu/awikner/physicsnemo` | `/work/nvme/bdiu/awikner/physicsnemo_test_data` |
-| DeltaAI | `/work/nvme/bdiu/awikner/physicsnemo` ² | `/work/nvme/bdiu/awikner/physicsnemo_test_data` |
-| Stampede3 | `$WORK/physicsnemo` | `$WORK/physicsnemo_test_data` |
-| Derecho | `/glade/work/awikner/physicsnemo` | `/glade/work/awikner/physicsnemo_test_data` |
-| Midway3 | `/project/pedramh/awikner/physicsnemo` ³ | `/project/pedramh/awikner/physicsnemo_test_data` |
-| DSI | `/net/projects/general_group/awikner/physicsnemo` ⁴ | same root, `_test_data` suffix |
+| Cluster | Code + venv path | Test-data path | Training data / scratch path | Purge policy |
+|---|---|---|---|---|
+| Delta | `/work/nvme/bdiu/awikner/physicsnemo` | `/work/nvme/bdiu/awikner/physicsnemo_test_data` | `/work/hdd/bdiu/awikner/physicsnemo-zarr/` | No purge (quota-limited) |
+| DeltaAI | `/work/nvme/bdiu/awikner/physicsnemo` ² | `/work/nvme/bdiu/awikner/physicsnemo_test_data` | `/scratch/bdiu/awikner/physicsnemo-zarr/` ² | TBD |
+| Stampede3 | `$WORK/physicsnemo` | `$WORK/physicsnemo_test_data` | `$SCRATCH/physicsnemo-zarr/` | `$SCRATCH` purged after 90 days no access |
+| Derecho | `/glade/work/awikner/physicsnemo` | `/glade/work/awikner/physicsnemo_test_data` | `/glade/derecho/scratch/awikner/physicsnemo-zarr/` | Scratch purged after 60 days no access |
+| Midway3 | `/project/pedramh/awikner/physicsnemo` ³ | `/project/pedramh/awikner/physicsnemo_test_data` | `/scratch/midway3/awikner/physicsnemo-zarr/` | Scratch purge policy TBD |
+| DSI | `/net/projects/general_group/awikner/physicsnemo` ⁴ | same root + `_test_data` | `/net/scratch/awikner/physicsnemo-zarr/` ⁴ | TBD |
 
-² Delta and DeltaAI may share a `/work/nvme` filesystem — verify on first login;
-if shared, a single clone serves both clusters but needs **separate venvs**
-(different system stacks). Name the DeltaAI venv `.venv-deltaai`.
+**Rule:** the repo clone, `.venv`, and any test fixtures referenced by
+`$AI_ROSSBY_TEST_DATA` always live on the persistent filesystem. Large Zarr
+archives and training-run outputs live on scratch. The `sync-all-clusters.sh`
+script only touches the code path.
 
-³ Verify the correct project scratch path for `pi-pedramh` on Midway3.
+² Delta and DeltaAI may share a `/work/nvme` filesystem — verify on first
+login with `df -h /work/nvme` on each cluster. If shared, a single clone
+serves both clusters but needs **separate venvs** (different GPU hardware /
+CUDA builds). Name the DeltaAI venv `.venv-deltaai`. The DeltaAI scratch
+path is also TBD until first login.
 
-⁴ Verify the correct project storage path on DSI.
+³ Verify exact path for `pi-pedramh` project storage on Midway3
+(`ls /project/pedramh/`).
+
+⁴ Verify correct project and scratch paths on DSI on first login
+(`df -h ~` and check the cluster docs at https://cluster-policy.ds.uchicago.edu/).
 
 ### 9b-1 — NCSA DeltaAI
 
@@ -283,11 +292,14 @@ with `--extra cu12`.
   interactively); equivalent to `srun --pty` elsewhere
 - CPU: `skx` or `normal`
 
-**TACC-specific quirks:**
-- `$WORK` is the parallel scratch filesystem — faster than `$HOME` for venvs
-- `$SCRATCH` is purged periodically; use `$WORK` for the venv and test data
-- TACC's interactive launcher: `idev -p gpu-h100 -N 1 -n 1 --time 01:00:00`
-  (allocates a node and drops you into a shell)
+**TACC filesystem conventions:**
+- `$HOME` (~25 GB, backed up) — dot-files only, never venvs or data
+- `$WORK` / `$STOCKYARD` (~1 TB, persistent, no purge) — repo clone + venv
+  + test fixtures live here
+- `$SCRATCH` (~10 TB, purged after 90 days without access) — training data,
+  converted Zarr archives, job output logs live here
+- TACC's interactive launcher: `idev -p <partition> -N 1 -n 1 --time 01:00:00`
+  (allocates a node and drops into a shell; preferred over `srun --pty` on TACC)
 
 **Files:**
 - `hpc/stampede3.md`
@@ -349,7 +361,15 @@ qsub -I -A UCHI0018 -q develop \
   -l walltime=01:00:00 -l select=1:ncpus=8:ngpus=1:mem=64gb
 ```
 
-**Existing data:** amip checkpoints are at
+**NCAR filesystem conventions:**
+- `/glade/home/awikner/` (~50 GB, backed up) — dot-files only
+- `/glade/work/awikner/` (~2 TB, persistent) — repo clone, venv, test fixtures
+- `/glade/derecho/scratch/awikner/` (~30 TB, purged after 60 days no access) —
+  training data, Zarr archives, job outputs
+- `/glade/campaign/` — long-term project storage (separate allocation; suitable
+  for finalized multi-year Zarr archives once they are no longer being written)
+
+**Existing data:** collaborator amip checkpoints are at
 `/glade/derecho/scratch/ayz/AMIP_logs/` (referenced in
 `phase8e_midway3_checkpoint_inventory.md`).
 
@@ -378,10 +398,17 @@ module load python/3.12   # or Anaconda
 - CPU partition: likely `caslake` or `bigmem`
 - Walltime limits: typically 48 h non-interactive, shorter for interactive
 
+**UChicago RCC filesystem conventions:**
+- `/home/awikner/` (~30 GB, backed up) — dot-files only
+- `/project/pedramh/awikner/` (project quota, persistent) — repo clone, venv,
+  test fixtures; shared with the pedramh PI group
+- `/scratch/midway3/awikner/` (large, purge policy TBD) — training data, Zarr
+  archives, job outputs
+
 **Existing data:**
-- amip checkpoints: `/project/pedramh/ayz/AMIP_logs/` — already used in
-  Phase 8e live tests; unlocks the x_DDC translator validation on this cluster
-- amip checkpoints on DeltaAI/Delta mirror: `/work/nvme/bdiu/awikner/amip-checkpoints/`
+- Collaborator amip checkpoints: `/project/pedramh/ayz/AMIP_logs/` — already
+  used in Phase 8e live tests; unlocks x_DDC translator validation here
+- Delta mirror of same checkpoints: `/work/nvme/bdiu/awikner/amip-checkpoints/`
 
 **Files:**
 - `hpc/midway3.md`
@@ -395,6 +422,15 @@ module load python/3.12   # or Anaconda
 
 **Auth:** SSH key only (no DUO); first login uses CNet password, subsequent
 logins use SSH key. ControlMaster still reduces connection overhead.
+
+**DSI filesystem conventions:**
+- `/home/awikner/` — login node accessible; small quota
+- `/net/projects/general_group/awikner/` (TBD exact path — verify) — project
+  storage, persistent; repo clone, venv, test fixtures live here
+- `/net/scratch/awikner/` (TBD — verify) — large scratch; training data, Zarr
+  archives, job outputs
+- Internal storage network runs at 100 Gbps between nodes but is not
+  internet-routable; data transfers in/out require Globus (Phase 10)
 
 **No module system.** Users manage software via Conda/MicroMamba. Since we use
 `uv`, we go directly to Option B (uv manages Python + wheels). We do need the
@@ -462,12 +498,15 @@ set -euo pipefail
 BRANCH="${1:-ai-rossby}"
 
 declare -A REPO_DIRS=(
+    # Persistent work/project filesystems only — never scratch.
+    # Training data (Zarr archives) are on each cluster's scratch separately
+    # and are not managed by this script.
     [delta]="/work/nvme/bdiu/awikner/physicsnemo"
     [deltaai]="/work/nvme/bdiu/awikner/physicsnemo"   # same /work NFS as Delta; verify
-    [stampede3]="\$WORK/physicsnemo"
-    [derecho]="/glade/work/awikner/physicsnemo"
+    [stampede3]="\$WORK/physicsnemo"                  # $WORK is persistent; $SCRATCH is not
+    [derecho]="/glade/work/awikner/physicsnemo"       # /glade/work is persistent; scratch is not
     [midway3]="/project/pedramh/awikner/physicsnemo"
-    [dsi]="/net/projects/general_group/awikner/physicsnemo"   # verify path
+    [dsi]="/net/projects/general_group/awikner/physicsnemo"   # verify path on first login
 )
 declare -A VENV_NAMES=(
     [delta]=".venv"
@@ -605,7 +644,6 @@ These need live inspection and are marked "TBD" in the cluster docs until done:
 | DeltaAI | Does `aws-ofi-nccl` module exist for multi-GPU runs? |
 | Stampede3 | Exact H100 partition name (`sinfo | grep -i h100`) |
 | Stampede3 | CUDA module version (`module avail cuda`) |
-| Stampede3 | Confirm CPU account code (`tg-atm170` — may be `tg-atm170020`) |
 | Stampede3 | `idev` vs `srun --pty` preference for interactive work |
 | Derecho | PBS queue structure (`qstat -Q`) |
 | Derecho | CUDA module version, PyTorch module availability |
