@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Sentinel sampler config: ``inference.py`` falls back to instantiating
+# ``cfg.loss`` and using that as the inference scheduler. This is the
+# safe default — it means the training scheduler is also the inference
+# scheduler unless the user explicitly chooses otherwise (Phase 8d
+# question Q2 = b: per-family sampler swap is supported but not
+# mandated).
+#
+# Override on the CLI to swap, e.g.:
+#   python inference.py model=amip_si loss=si sampler=si_x ...
+# trains-as-SI but samples with the DynamicInterpolant variant.
+
+_target_: null

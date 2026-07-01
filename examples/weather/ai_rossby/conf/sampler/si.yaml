@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SI (DriftScheduler) inference sampler. Independent of training:
+# ``num_steps`` can be lowered here for fast sampling at the cost of
+# fidelity. Single-step scheduler — pairs with single-step wrappers
+# (AmipDiTWrapper) only.
+
+_target_: physicsnemo.experimental.diffusion.DriftScheduler
+num_steps: 10
+sigma_coef: 1.0
+beta_fn: t
+noise: gaussian
+l_max: 45
+noise_scale_path: null
+integrator: euler

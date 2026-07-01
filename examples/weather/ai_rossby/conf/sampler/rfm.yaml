@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RFM (Rolling Flow Matching) inference sampler. Rolling scheduler —
+# pairs with rolling wrappers only. ``window_size`` must match the
+# wrapper's training window.
+
+_target_: physicsnemo.experimental.diffusion.RFMScheduler
+window_size: 6
+num_steps: 4
+solver: euler
+weighting: midrange
+time_eps: 1.0e-3
+init_mode: oracle
+P_mean: 0.0
+P_std: 1.0
+noise: gaussian
+l_max: 90

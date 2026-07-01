@@ -25,6 +25,10 @@ defaults:
   - dataset: plasim_sim52_year12
   - training: pangu_plasim_legacy
   - validation: "off"  # quoted — YAML otherwise parses bare `off` as bool False
+  - sampler: from_loss   # Phase 8d: inference-only diffusion sampler. Ignored
+                         # by train.py; train_diffusion.py uses cfg.loss as
+                         # the training scheduler. inference.py instantiates
+                         # cfg.sampler when the model is a diffusion wrapper.
 
 hydra:
   job:

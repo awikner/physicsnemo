@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EDM (Elucidated Diffusion) inference sampler. Standalone fast-sampling
+# variant — Phase 8c follow-up Q9 = b: no Phase 8c wrapper / Hydra
+# recipe wiring at *training* time, but available here for inference so
+# users can swap to a single-step EDM sampler for fast rollouts even
+# when training used a different scheduler (e.g. ERDM).
+#
+# Single-step scheduler — pairs with single-step wrappers
+# (AmipDiTWrapper) only. The :class:`EDMSchedulerModule` adapter is used
+# rather than the bare :class:`EDMScheduler` so the inference path can
+# call ``scheduler.to(device)`` / ``scheduler.state_dict()`` uniformly.
+
+_target_: physicsnemo.experimental.diffusion.EDMSchedulerModule
+num_steps: 18
+sigma_min: 0.002
+sigma_max: 80.0
+rho: 7.0
+sigma_data: 0.5
+P_mean: -1.2
+P_std: 1.2
+ndim: 2
+sde: False

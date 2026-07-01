@@ -211,13 +211,33 @@ def _build_per_ic_dataset(
     has_diagnostic: bool,
     time_values: Optional[Sequence] = None,
     ic_time=None,
+    ensemble_save_mode: str = "members",
 ) -> xr.Dataset:
     r"""Allocate one xarray container per IC.
 
-    Shape per channel group:
-      pred_surface:   (ensemble, frame, surface_var, lat, lon)
-      pred_upper_air: (ensemble, frame, upper_air_var, level, lat, lon)
-      pred_diagnostic: (ensemble, frame, diag_var, lat, lon)
+    Two on-disk layouts are supported via ``ensemble_save_mode``:
+
+    * ``"members"`` (default) — full ensemble axis preserved.
+      Shapes::
+
+          pred_surface:   (ensemble, frame, surface_var, lat, lon)
+          pred_upper_air: (ensemble, frame, upper_air_var, level, lat, lon)
+          pred_diagnostic: (ensemble, frame, diag_var, lat, lon)
+
+    * ``"summary"`` — per-frame ensemble mean + std, no ensemble axis.
+      Shapes::
+
+          pred_surface_mean / pred_surface_std:
+              (frame, surface_var, lat, lon)
+          pred_upper_air_mean / pred_upper_air_std:
+              (frame, upper_air_var, level, lat, lon)
+          pred_diagnostic_mean / pred_diagnostic_std:
+              (frame, diag_var, lat, lon)
+
+      The ``ensemble_size`` attr is retained so downstream consumers can
+      back out the per-pixel error estimate. With ``ensemble_size = 1``
+      the std fields are written as zeros — equivalent to passing the
+      single member through unchanged.
 
     ``n_frames = max_step + 1`` — frame 0 is the IC, frames 1..max_step
     are the rollout predictions.
@@ -227,29 +247,61 @@ def _build_per_ic_dataset(
     proper ``time`` coord (cftime aware) alongside the integer ``frame``
     index. ``frame == 0`` is the IC.
     """
+    if ensemble_save_mode not in ("members", "summary"):
+        raise ValueError(
+            f"ensemble_save_mode must be 'members' or 'summary', got "
+            f"{ensemble_save_mode!r}"
+        )
+
     H, W = lat.shape[0], lon.shape[0]
     n_s = len(surface_variables)
     n_u = len(upper_air_variables)
     n_d = len(diagnostic_variables)
 
-    data_vars = {
-        "pred_surface": (
+    data_vars: dict = {}
+    if ensemble_save_mode == "members":
+        data_vars["pred_surface"] = (
             ("ensemble", "frame", "surface_var", "lat", "lon"),
             np.zeros((ensemble_size, n_frames, n_s, H, W), dtype=np.float32),
-        ),
-        "pred_upper_air": (
-            ("ensemble", "frame", "upper_air_var", "level", "lat", "lon"),
-            np.zeros((ensemble_size, n_frames, n_u, n_levels, H, W), dtype=np.float32),
-        ),
-    }
-    if has_diagnostic and n_d > 0:
-        data_vars["pred_diagnostic"] = (
-            ("ensemble", "frame", "diag_var", "lat", "lon"),
-            np.zeros((ensemble_size, n_frames, n_d, H, W), dtype=np.float32),
         )
+        data_vars["pred_upper_air"] = (
+            ("ensemble", "frame", "upper_air_var", "level", "lat", "lon"),
+            np.zeros(
+                (ensemble_size, n_frames, n_u, n_levels, H, W), dtype=np.float32
+            ),
+        )
+        if has_diagnostic and n_d > 0:
+            data_vars["pred_diagnostic"] = (
+                ("ensemble", "frame", "diag_var", "lat", "lon"),
+                np.zeros((ensemble_size, n_frames, n_d, H, W), dtype=np.float32),
+            )
+    else:  # summary
+        for kind, name, shape in (
+            ("surface", "pred_surface", (n_frames, n_s, H, W)),
+            (
+                "upper_air",
+                "pred_upper_air",
+                (n_frames, n_u, n_levels, H, W),
+            ),
+        ):
+            if kind == "surface":
+                dims = ("frame", "surface_var", "lat", "lon")
+            else:
+                dims = ("frame", "upper_air_var", "level", "lat", "lon")
+            data_vars[f"{name}_mean"] = (dims, np.zeros(shape, dtype=np.float32))
+            data_vars[f"{name}_std"] = (dims, np.zeros(shape, dtype=np.float32))
+        if has_diagnostic and n_d > 0:
+            dims = ("frame", "diag_var", "lat", "lon")
+            data_vars["pred_diagnostic_mean"] = (
+                dims,
+                np.zeros((n_frames, n_d, H, W), dtype=np.float32),
+            )
+            data_vars["pred_diagnostic_std"] = (
+                dims,
+                np.zeros((n_frames, n_d, H, W), dtype=np.float32),
+            )
 
     coords = {
-        "ensemble": ("ensemble", np.arange(ensemble_size, dtype=np.int64)),
         "frame": ("frame", np.arange(n_frames, dtype=np.int64)),
         "surface_var": ("surface_var", np.asarray(list(surface_variables))),
         "upper_air_var": ("upper_air_var", np.asarray(list(upper_air_variables))),
@@ -257,6 +309,11 @@ def _build_per_ic_dataset(
         "lat": ("lat", lat.astype(np.float32)),
         "lon": ("lon", lon.astype(np.float32)),
     }
+    if ensemble_save_mode == "members":
+        coords["ensemble"] = (
+            "ensemble",
+            np.arange(ensemble_size, dtype=np.int64),
+        )
     if has_diagnostic and n_d > 0:
         coords["diag_var"] = ("diag_var", np.asarray(list(diagnostic_variables)))
     if time_values is not None:
@@ -274,9 +331,70 @@ def _build_per_ic_dataset(
     ds.attrs["ensemble_size"] = int(ensemble_size)
     ds.attrs["max_step"] = int(n_frames - 1)
     ds.attrs["frame_zero_is_ic"] = 1
+    ds.attrs["ensemble_save_mode"] = ensemble_save_mode
     if ic_time is not None:
         ds.attrs["ic_time"] = str(ic_time)
     return ds
+
+
+def _write_per_ic_frame(
+    ds: xr.Dataset,
+    frame: int,
+    *,
+    ensemble_save_mode: str,
+    ensemble_size: int,
+    surface: torch.Tensor,
+    upper_air: torch.Tensor,
+    diagnostic: Optional[torch.Tensor] = None,
+) -> None:
+    r"""Write one rollout frame's predictions into the per-IC dataset.
+
+    Inputs are flat ``(B*E, C, [L,] H, W)`` tensors in physical units
+    (the caller is responsible for denormalization). ``B`` is exactly 1
+    here — the per-IC writer hands one IC at a time — so the
+    reshape to ``(E, ...)`` is direct.
+    """
+
+    def _np(t: torch.Tensor) -> np.ndarray:
+        return t.detach().cpu().numpy().astype(np.float32)
+
+    surface_e = surface.view(ensemble_size, *surface.shape[1:])
+    upper_e = upper_air.view(ensemble_size, *upper_air.shape[1:])
+    diag_e = (
+        diagnostic.view(ensemble_size, *diagnostic.shape[1:])
+        if diagnostic is not None
+        else None
+    )
+
+    if ensemble_save_mode == "members":
+        ds["pred_surface"][:, frame, ...] = _np(surface_e)
+        ds["pred_upper_air"][:, frame, ...] = _np(upper_e)
+        if diag_e is not None and "pred_diagnostic" in ds:
+            ds["pred_diagnostic"][:, frame, ...] = _np(diag_e)
+        return
+
+    # summary mode — per-pixel mean + std across the ensemble axis.
+    s_mean = surface_e.mean(dim=0)
+    u_mean = upper_e.mean(dim=0)
+    if ensemble_size > 1:
+        s_std = surface_e.std(dim=0, unbiased=False)
+        u_std = upper_e.std(dim=0, unbiased=False)
+    else:
+        s_std = torch.zeros_like(s_mean)
+        u_std = torch.zeros_like(u_mean)
+    ds["pred_surface_mean"][frame, ...] = _np(s_mean)
+    ds["pred_surface_std"][frame, ...] = _np(s_std)
+    ds["pred_upper_air_mean"][frame, ...] = _np(u_mean)
+    ds["pred_upper_air_std"][frame, ...] = _np(u_std)
+    if diag_e is not None and "pred_diagnostic_mean" in ds:
+        d_mean = diag_e.mean(dim=0)
+        d_std = (
+            diag_e.std(dim=0, unbiased=False)
+            if ensemble_size > 1
+            else torch.zeros_like(d_mean)
+        )
+        ds["pred_diagnostic_mean"][frame, ...] = _np(d_mean)
+        ds["pred_diagnostic_std"][frame, ...] = _np(d_std)
 
 
 def _extract_layout(dataset: PlasimClimateDataset) -> dict:
@@ -528,6 +646,387 @@ def run_inference_streaming_per_ic(
     return paths
 
 
+def _is_diffusion_model(model) -> bool:
+    """Detect whether the model is one of the Phase 8 diffusion wrappers.
+
+    The detection key is ``pack_state`` — every diffusion wrapper exposes
+    this helper (single-step *and* rolling). The deterministic
+    PanguPlasim / SFNO recipes don't, so the test is exact.
+    """
+    inner = model.module if hasattr(model, "module") else model
+    return hasattr(inner, "pack_state")
+
+
+def _build_inference_scheduler(cfg: DictConfig, device: torch.device):
+    """Instantiate the inference-time diffusion scheduler.
+
+    Order of precedence:
+
+    1. ``cfg.sampler._target_`` is set → instantiate it. This is the
+       Phase 8d Q2 = b path: users explicitly choose the inference
+       sampler family, decoupled from training.
+    2. ``cfg.sampler._target_`` is ``null`` (the ``sampler=from_loss``
+       sentinel) → instantiate ``cfg.loss`` instead, so the inference
+       scheduler is the same family as the training scheduler.
+    """
+    sampler_cfg = cfg.get("sampler", None)
+    target = (
+        sampler_cfg.get("_target_", None) if sampler_cfg is not None else None
+    )
+    if target is None or target == "null":
+        sched = hydra.utils.instantiate(cfg.loss)
+    else:
+        sched = hydra.utils.instantiate(sampler_cfg)
+    if hasattr(sched, "to"):
+        sched = sched.to(device)
+    return sched
+
+
+def _stack_window_initial(
+    dataset, ic: int, W: int, device: torch.device
+) -> dict:
+    """Stack ``W`` consecutive frames ending at ``ic`` into ``(1, W, …)``.
+
+    Pairs with the rolling wrappers' ``pack_window_state`` —
+    ``surface_in`` ends up shaped ``(1, W, C_s, H, W)`` and
+    ``upper_air_in`` ends up shaped ``(1, W, C_u, L, H, W)``.
+    """
+    if W <= 0:
+        raise ValueError(f"window size must be > 0, got {W}")
+    frames = [dataset[(int(ic - W + 1 + i), 1)] for i in range(W)]
+    out: dict[str, torch.Tensor] = {}
+    for k, v0 in frames[0].items():
+        if isinstance(v0, torch.Tensor) and v0.dim() >= 1:
+            out[k] = (
+                torch.stack([f[k] for f in frames], dim=0)
+                .unsqueeze(0)
+                .to(device)
+            )
+        elif isinstance(v0, torch.Tensor):
+            out[k] = (
+                torch.stack([f[k] for f in frames], dim=0)
+                .unsqueeze(0)
+                .to(device)
+            )
+    return out
+
+
+def _denorm_named(normalizer, kind: str, t: torch.Tensor) -> torch.Tensor:
+    """Pass ``t`` through ``normalizer.denormalize_state`` for one group.
+
+    Mirrors the deterministic recipe's per-group denorm; ``normalizer``
+    can be ``None`` (raw-unit rollout), in which case the tensor passes
+    through unchanged.
+    """
+    if normalizer is None:
+        return t
+    return normalizer.denormalize_state(**{kind: t})[kind]
+
+
+@torch.no_grad()
+def run_diffusion_inference_streaming_per_ic(
+    model: torch.nn.Module,
+    dataset: ClimateZarrDataset,
+    *,
+    scheduler,
+    normalizer,
+    device: torch.device,
+    ic_indices: Sequence[int],
+    max_step: int,
+    writer: AsyncForecastWriter,
+    output_dir: str,
+    model_name: str,
+    run_name: str,
+    output_format: str = "zarr",
+    ensemble_size: int = 1,
+    perturber: Optional[Perturber] = None,
+    has_diagnostic: bool = False,
+    sampler_num_steps: Optional[int] = None,
+    seed: int = 0,
+    save_variables: Optional[dict] = None,
+    ensemble_save_mode: str = "members",
+    logger=None,
+) -> list[str]:
+    r"""Diffusion rollout — per-IC streaming, ensemble-aware.
+
+    Mirrors :func:`run_inference_streaming_per_ic` (the deterministic
+    branch) but the inner step is a full diffusion sample:
+
+    * Single-step schedulers (``DriftScheduler``, ``DynamicInterpolant``,
+      ``EDMSchedulerModule``) — autoregressive: one
+      ``scheduler.sample(model, x, c_grid, c_scalar, num_steps=…)`` call
+      per emitted frame, unpacked back into structured channels by the
+      wrapper between steps.
+    * Rolling schedulers (``ERDMScheduler``, ``RFMScheduler``) — one
+      ``scheduler.sample_rollout(model, init_window, c_grid_traj,
+      c_scalar_traj, horizon=max_step, num_steps=…)`` call that emits
+      the full ``max_step`` window at once.
+
+    The dataset must be opened with ``emit_calendar=True`` so each
+    sample carries the ``calendar`` tensor the wrapper needs for
+    ``c_scalar``. Per Q3 = a (rolling models), frame 0 of the per-IC
+    output is the IC's *last* window frame in physical units; frames
+    1..max_step are the predicted future states. Per Q4 = a, the
+    default perturber is :class:`ReplicateOnly` for
+    ``ensemble_size > 1`` (the ensemble axis is driven by the
+    sampler's internal noise, not IC perturbation).
+    """
+    if perturber is None:
+        perturber = Deterministic() if ensemble_size == 1 else ReplicateOnly()
+    rng = torch.Generator(device=device).manual_seed(seed)
+
+    inner_model = model.module if hasattr(model, "module") else model
+
+    # Detect single-step vs window-rollout scheduler.
+    window_mode = hasattr(scheduler, "sample_rollout")
+    window_size = (
+        int(getattr(scheduler, "window_size", 0)) if window_mode else 0
+    )
+
+    layout = _extract_layout(dataset)
+    paths: list[str] = []
+
+    for ic in ic_indices:
+        ic = int(ic)
+        n_frames = max_step + 1
+
+        if layout["time"] is not None:
+            t_slice = layout["time"][ic : ic + n_frames]
+            t_start = layout["time"][ic]
+            t_end = (
+                layout["time"][ic + max_step]
+                if (ic + max_step) < len(layout["time"])
+                else None
+            )
+        else:
+            t_slice = None
+            t_start = ic
+            t_end = ic + max_step
+
+        ds = _build_per_ic_dataset(
+            ic_index=ic,
+            n_frames=n_frames,
+            ensemble_size=ensemble_size,
+            lat=layout["lat"],
+            lon=layout["lon"],
+            surface_variables=layout["surface_variables"],
+            upper_air_variables=layout["upper_air_variables"],
+            diagnostic_variables=layout["diagnostic_variables"],
+            levels=layout["levels_coord"],
+            n_levels=layout["n_levels"],
+            has_diagnostic=has_diagnostic,
+            time_values=t_slice,
+            ic_time=(t_start if layout["time"] is not None else None),
+            ensemble_save_mode=ensemble_save_mode,
+        )
+
+        # Frame 0 = IC observation (physical units). For single-step
+        # rollouts the IC is at time ``ic``; for window rollouts the IC
+        # frame on disk is the *last* of the W oracle frames (Q3 = a).
+        ic_phys_state = _maybe_normalize(
+            normalizer, _stack_initial(dataset, [ic], device)
+        )
+        ic_surface = _denorm_named(normalizer, "surface", ic_phys_state["surface_in"])
+        ic_upper = _denorm_named(
+            normalizer, "upper_air", ic_phys_state["upper_air_in"]
+        )
+        ic_diag = (
+            _denorm_named(normalizer, "diagnostic", ic_phys_state["diagnostic"])
+            if has_diagnostic and "diagnostic" in ic_phys_state
+            else None
+        )
+        # Tile the IC across the ensemble axis for the "members" layout
+        # (frame 0 is identical across members) — keeps the file
+        # self-describing without forcing the caller to special-case
+        # frame 0. The summary writer handles the broadcast internally.
+        ic_surface_e = ic_surface.repeat_interleave(ensemble_size, dim=0)
+        ic_upper_e = ic_upper.repeat_interleave(ensemble_size, dim=0)
+        ic_diag_e = (
+            ic_diag.repeat_interleave(ensemble_size, dim=0)
+            if ic_diag is not None
+            else None
+        )
+        _write_per_ic_frame(
+            ds,
+            frame=0,
+            ensemble_save_mode=ensemble_save_mode,
+            ensemble_size=ensemble_size,
+            surface=ic_surface_e,
+            upper_air=ic_upper_e,
+            diagnostic=ic_diag_e,
+        )
+
+        # --- Rollout ---------------------------------------------------- #
+        if window_mode:
+            # Build the oracle initial window [ic - W + 1 .. ic], normalize,
+            # replicate across the ensemble, pack.
+            init_window = _maybe_normalize(
+                normalizer, _stack_window_initial(dataset, ic, window_size, device)
+            )
+            init_window = perturber(init_window, ensemble_size, generator=rng)
+            init_y = inner_model.pack_window_state(init_window)
+
+            # Build c_grid_traj + c_scalar_traj over [ic - W + 1 .. ic + max_step - 1].
+            traj_len = window_size + max_step - 1
+            traj_frames = [
+                _maybe_normalize(
+                    normalizer,
+                    _stack_at_step(
+                        dataset, [ic - window_size + 1 + j], device
+                    ),
+                )
+                for j in range(traj_len)
+            ]
+
+            def _stack_traj(key: str) -> torch.Tensor:
+                return torch.stack([f[key] for f in traj_frames], dim=1)
+
+            const_boundary = traj_frames[0]["constant_boundary"]
+            c_grid_traj = inner_model.pack_window_c_grid(
+                {
+                    "surface_in": _stack_traj("surface_in"),
+                    "constant_boundary": const_boundary,
+                    "varying_boundary": _stack_traj("varying_boundary"),
+                }
+            )
+            c_scalar_traj = _stack_traj("calendar")
+            if ensemble_size > 1:
+                c_grid_traj = c_grid_traj.repeat_interleave(
+                    ensemble_size, dim=0
+                )
+                c_scalar_traj = c_scalar_traj.repeat_interleave(
+                    ensemble_size, dim=0
+                )
+
+            traj_pred = scheduler.sample_rollout(
+                model,
+                init_y,
+                c_grid_traj,
+                c_scalar_traj,
+                horizon=max_step,
+                num_steps=sampler_num_steps,
+            )  # (E, max_step, C_packed, H, W)
+
+            for k in range(1, max_step + 1):
+                packed = traj_pred[:, k - 1]
+                unpacked = inner_model.unpack_state(packed)
+                surface_phys = _denorm_named(
+                    normalizer, "surface", unpacked["surface_in"]
+                )
+                upper_phys = _denorm_named(
+                    normalizer, "upper_air", unpacked["upper_air_in"]
+                )
+                diag_phys = (
+                    _denorm_named(
+                        normalizer, "diagnostic", unpacked["diagnostic"]
+                    )
+                    if has_diagnostic and "diagnostic" in unpacked
+                    else None
+                )
+                _write_per_ic_frame(
+                    ds,
+                    frame=k,
+                    ensemble_save_mode=ensemble_save_mode,
+                    ensemble_size=ensemble_size,
+                    surface=surface_phys,
+                    upper_air=upper_phys,
+                    diagnostic=diag_phys,
+                )
+        else:
+            # Single-step autoregressive diffusion.
+            state = perturber(ic_phys_state, ensemble_size, generator=rng)
+            const_boundary = state.get("constant_boundary")
+            x = inner_model.pack_state(state)
+
+            for k in range(1, max_step + 1):
+                c_grid = inner_model.pack_c_grid(state)
+                c_scalar = state["calendar"]
+                x_next = scheduler.sample(
+                    model, x, c_grid, c_scalar, num_steps=sampler_num_steps
+                )
+                unpacked = inner_model.unpack_state(x_next)
+                surface_phys = _denorm_named(
+                    normalizer, "surface", unpacked["surface_in"]
+                )
+                upper_phys = _denorm_named(
+                    normalizer, "upper_air", unpacked["upper_air_in"]
+                )
+                diag_phys = (
+                    _denorm_named(
+                        normalizer, "diagnostic", unpacked["diagnostic"]
+                    )
+                    if has_diagnostic and "diagnostic" in unpacked
+                    else None
+                )
+                _write_per_ic_frame(
+                    ds,
+                    frame=k,
+                    ensemble_save_mode=ensemble_save_mode,
+                    ensemble_size=ensemble_size,
+                    surface=surface_phys,
+                    upper_air=upper_phys,
+                    diagnostic=diag_phys,
+                )
+
+                # Advance: next state's surface/upper_air/diag come from
+                # the diffusion sample. Boundary + calendar march to the
+                # next step using the dataset sample at t+k.
+                if k < max_step:
+                    next_step = _maybe_normalize(
+                        normalizer,
+                        _stack_at_step(dataset, [ic + k], device),
+                    )
+                    next_var_boundary = next_step["varying_boundary"]
+                    next_calendar = next_step["calendar"]
+                    if ensemble_size > 1:
+                        next_var_boundary = next_var_boundary.repeat_interleave(
+                            ensemble_size, dim=0
+                        )
+                        next_calendar = next_calendar.repeat_interleave(
+                            ensemble_size, dim=0
+                        )
+                    state = {
+                        "surface_in": unpacked["surface_in"],
+                        "constant_boundary": const_boundary,
+                        "varying_boundary": next_var_boundary,
+                        "calendar": next_calendar,
+                    }
+                    if "upper_air_in" in unpacked:
+                        state["upper_air_in"] = unpacked["upper_air_in"]
+                    if "diagnostic" in unpacked:
+                        state["diagnostic"] = unpacked["diagnostic"]
+                    x = x_next
+
+        if save_variables:
+            ds = subset_forecast_dataset(
+                ds,
+                surface=save_variables.get("surface"),
+                upper_air=save_variables.get("upper_air"),
+                upper_air_levels=save_variables.get("upper_air_levels"),
+                diagnostic=save_variables.get("diagnostic"),
+            )
+
+        fname = make_forecast_filename(
+            model_name=model_name,
+            run_name=run_name,
+            start_time=format_time_for_filename(t_start),
+            end_time=format_time_for_filename(
+                t_end if t_end is not None else (ic + max_step)
+            ),
+            extension=output_format,
+        )
+        path = str(Path(output_dir) / fname)
+        if logger is not None:
+            logger.info(
+                f"  → submitting diffusion IC {ic} → {fname} "
+                f"(writer in_flight={writer.in_flight}, mode={ensemble_save_mode})"
+            )
+        writer.submit(path, ds)
+        paths.append(path)
+
+    return paths
+
+
 @torch.no_grad()
 def run_inference(
     model: torch.nn.Module,
@@ -700,6 +1199,10 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
 
     # --- Build dataset + normalizer (no datapipe — direct dataset access) ---
+    # Diffusion wrappers need a ``calendar`` tensor on each sample; turn
+    # the emit on when the model exposes ``pack_state``. Off for the
+    # deterministic recipes (preserves existing behavior bit-for-bit).
+    is_diffusion = _is_diffusion_model(model)
     data = cfg.dataset
     val_zarr_path = _resolve_path(
         data.val_zarr_path if data.val_zarr_path else data.zarr_path
@@ -710,6 +1213,7 @@ def main(cfg: DictConfig) -> None:
         yearly_repeating_boundary=bool(data.yearly_repeating_boundary),
         leap_boundary_zarr_path=_resolve_path(data.leap_boundary_zarr_path),
         non_leap_boundary_zarr_path=_resolve_path(data.non_leap_boundary_zarr_path),
+        emit_calendar=is_diffusion,
     )
     normalizer = PlasimNormalizer.from_dataset(
         base_ds,
@@ -745,39 +1249,84 @@ def main(cfg: DictConfig) -> None:
         if "save_variables" in inf_cfg
         else None
     )
+    ensemble_save_mode = str(inf_cfg.get("ensemble_save_mode", "members"))
+
+    if is_diffusion:
+        scheduler = _build_inference_scheduler(cfg, dist.device)
+        sampler_num_steps_raw = inf_cfg.get("sampler_num_steps", None)
+        sampler_num_steps = (
+            int(sampler_num_steps_raw)
+            if sampler_num_steps_raw is not None
+            else None
+        )
+    else:
+        scheduler = None
+        sampler_num_steps = None
 
     if dist.rank == 0:
         logger.info(
             f"inference: {len(ic_indices)} ICs × {ensemble_size} ensemble × "
             f"{max_step} steps; perturber={inf_cfg.get('perturber', 'deterministic')!r}; "
             f"output_dir={output_dir} (format={output_format}, "
-            f"writer_max_in_flight={max_in_flight}, num_writers={num_writers})"
+            f"writer_max_in_flight={max_in_flight}, num_writers={num_writers}, "
+            f"mode={'diffusion' if is_diffusion else 'deterministic'}, "
+            f"save_mode={ensemble_save_mode})"
         )
+        if is_diffusion:
+            logger.info(
+                f"diffusion: sampler={type(scheduler).__name__}, "
+                f"sampler_num_steps={sampler_num_steps}"
+            )
 
     # Async writer overlaps disk I/O with GPU rollout — the next IC's
     # forecast runs while the previous one is being flushed to disk.
     with AsyncForecastWriter(
         max_in_flight=max_in_flight, num_workers=num_writers
     ) as writer:
-        paths = run_inference_streaming_per_ic(
-            model,
-            base_ds,
-            normalizer=normalizer,
-            device=dist.device,
-            ic_indices=ic_indices,
-            max_step=max_step,
-            writer=writer,
-            output_dir=output_dir,
-            model_name=str(cfg.model.name),
-            run_name=str(cfg.run_name),
-            output_format=output_format,
-            ensemble_size=ensemble_size,
-            perturber=perturber,
-            has_diagnostic=getattr(model, "has_diagnostic", False),
-            seed=int(cfg.seed) + 1009,
-            save_variables=save_variables,
-            logger=logger,
-        )
+        if is_diffusion:
+            paths = run_diffusion_inference_streaming_per_ic(
+                model,
+                base_ds,
+                scheduler=scheduler,
+                normalizer=normalizer,
+                device=dist.device,
+                ic_indices=ic_indices,
+                max_step=max_step,
+                writer=writer,
+                output_dir=output_dir,
+                model_name=str(cfg.model.name),
+                run_name=str(cfg.run_name),
+                output_format=output_format,
+                ensemble_size=ensemble_size,
+                perturber=perturber,
+                has_diagnostic=getattr(model, "has_diagnostic", False)
+                or bool(getattr(cfg.model, "diagnostic_variables", [])),
+                sampler_num_steps=sampler_num_steps,
+                seed=int(cfg.seed) + 1009,
+                save_variables=save_variables,
+                ensemble_save_mode=ensemble_save_mode,
+                logger=logger,
+            )
+        else:
+            paths = run_inference_streaming_per_ic(
+                model,
+                base_ds,
+                normalizer=normalizer,
+                device=dist.device,
+                ic_indices=ic_indices,
+                max_step=max_step,
+                writer=writer,
+                output_dir=output_dir,
+                model_name=str(cfg.model.name),
+                run_name=str(cfg.run_name),
+                output_format=output_format,
+                ensemble_size=ensemble_size,
+                perturber=perturber,
+                has_diagnostic=getattr(model, "has_diagnostic", False),
+                seed=int(cfg.seed) + 1009,
+                save_variables=save_variables,
+                logger=logger,
+            )
         # __exit__ calls wait_all(): final flush + raise on any worker error.
     logger.info(f"wrote {len(paths)} per-IC forecast files to {output_dir}")
     for p in paths:
