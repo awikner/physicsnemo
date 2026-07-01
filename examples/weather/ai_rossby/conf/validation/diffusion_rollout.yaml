@@ -17,7 +17,12 @@
 # * ``rollout.sampler.num_steps`` — solver steps per emitted frame at
 #   *validation*. Decoupled from the training scheduler's ``num_steps``
 #   (Phase 8c follow-up Q4 = b) so long-horizon validation can use a
-#   fast sampler.
+#   fast sampler. Accepts either a single int (applied uniformly) or a
+#   list of ints of length ``horizon`` — one entry per emitted frame
+#   (Phase 8f, F4). E.g. ``[20, 20, 10, 10, 4, 4]`` spends more solver
+#   steps on the first few (harder) frames and tapers off for later
+#   ones, capping total sampling cost on long rollouts (needed by the
+#   Phase 8f eval suite's multi-year climatology/QBO runs).
 # * ``rollout.ensemble_size`` — diffusion ensemble per IC. Default 1
 #   (Phase 8c follow-up Q5). Spread metrics are emitted only when this
 #   exceeds 1.
@@ -46,7 +51,11 @@ rollout:
   # Validation-time diffusion sampler — independent of training.
   sampler:
     # ``null`` falls back to the inference scheduler's own ``num_steps``.
-    # A fast (e.g. 4-step) override is useful for long rollouts.
+    # A single int applies uniformly to every emitted frame; a fast
+    # (e.g. 4-step) override is useful for long rollouts. A list of
+    # length ``horizon`` gives a per-emitted-frame schedule instead,
+    # e.g.:
+    #   num_steps: [20, 20, 10, 10, 4, 4]
     num_steps: null
   metrics:
     rmse: True

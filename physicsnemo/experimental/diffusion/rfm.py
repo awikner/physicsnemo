@@ -254,11 +254,22 @@ class RFMScheduler(nn.Module):
         c_grid_traj  : (b, T, c_grid, H, W)  forcings over absolute future frames
         c_scalar_traj: (b, T, scalar_dim) or None
         horizon      : number of frames to forecast (emit)
+        num_steps    : diffusion solver steps per emitted frame. Either a
+            single int/None (applied uniformly, previous behavior) or a
+            sequence of length ``horizon`` giving a per-emitted-frame
+            step count (Phase 8f, F4 — caps sampling cost at long
+            horizons).
 
         Returns predicted trajectory (b, horizon, C, H, W).
         """
         b = init_window.shape[0]
         device = init_window.device
+
+        if isinstance(num_steps, (list, tuple)) and len(num_steps) != horizon:
+            raise ValueError(
+                f"num_steps schedule has length {len(num_steps)}, expected "
+                f"horizon={horizon}"
+            )
 
         # Steady staircase, held fixed at the start of every roll (the shift
         # identity t_w(0) = t_{w+1}(1) makes this exact after each emit-shift).
@@ -271,7 +282,8 @@ class RFMScheduler(nn.Module):
             c_grid_win = self._gather_window(c_grid_traj, k)
             c_scalar_win = self._gather_window(c_scalar_traj, k)
 
-            z = self.roll_once(model, z, t0, c_grid_win, c_scalar_win, num_steps)
+            step_k = num_steps[k] if isinstance(num_steps, (list, tuple)) else num_steps
+            z = self.roll_once(model, z, t0, c_grid_win, c_scalar_win, step_k)
 
             emitted = z[:, 0]                # (b, C, H, W) front frame, now at t=1
             outputs.append(emitted)

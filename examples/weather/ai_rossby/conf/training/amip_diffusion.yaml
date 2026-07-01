@@ -7,6 +7,11 @@
 # Muon optimizer, EMA decay 0.999 with 6-epoch warmup, fp32, no
 # gradient clipping, single-stage curriculum.
 #
+# bf16-native variant (Phase 8f, F3): select ``training=amip_diffusion_bf16``
+# for the identical config with ``amp: bf16`` — see
+# ``benchmarks/physicsnemo/experimental/models/amip_si/RESULTS.md`` for the
+# fp32-vs-bf16 throughput/memory/loss comparison.
+#
 # Per-stage diffusion knobs:
 # Each entry under ``stages`` may carry a ``loss_overrides`` mapping
 # whose contents are merged on top of ``cfg.loss`` before

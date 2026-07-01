@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -223,9 +224,15 @@ def _build_validator(
 
     sampler_cfg = rollout_cfg.get("sampler", None) or {}
     sampler_num_steps = sampler_cfg.get("num_steps", None)
-    sampler_num_steps = (
-        int(sampler_num_steps) if sampler_num_steps is not None else None
-    )
+    if sampler_num_steps is None:
+        pass
+    elif OmegaConf.is_config(sampler_num_steps) or isinstance(
+        sampler_num_steps, (list, tuple)
+    ):
+        # Per-emitted-frame schedule (Phase 8f, F4) — one int per frame.
+        sampler_num_steps = [int(s) for s in sampler_num_steps]
+    else:
+        sampler_num_steps = int(sampler_num_steps)
 
     perturber = _make_perturber(
         rollout_cfg.get("perturber", "deterministic"),
@@ -456,6 +463,23 @@ def main(cfg: DictConfig) -> None:
         + 1,
     )
 
+    # --- Per-batch loss TSV (benchmarking, F3) -----------------------------
+    # Mirrors train.py's ``cfg.bench.per_batch_tsv`` wiring — every
+    # minibatch's wall-clock time + loss is appended to a TSV for the
+    # fp32-vs-bf16 comparison in
+    # benchmarks/physicsnemo/experimental/models/amip_si/RESULTS.md.
+    # Only rank 0 writes to avoid file contention.
+    bench_tsv_file = None
+    _bench_start_wall = None
+    if cfg.get("bench") and cfg.bench.get("per_batch_tsv"):
+        if dist.rank == 0:
+            bench_tsv_path = Path(_resolve_path(cfg.bench.per_batch_tsv))
+            bench_tsv_path.parent.mkdir(parents=True, exist_ok=True)
+            bench_tsv_file = open(bench_tsv_path, "w", buffering=1)  # line-buffered
+            bench_tsv_file.write("epoch\tbatch_idx\twall_s\tloss\n")
+            logger.info(f"benchmark per-batch TSV → {bench_tsv_path}")
+        _bench_start_wall = time.perf_counter()
+
     # --- Stage loop -------------------------------------------------------
     # Per-stage rebuilds: the DataLoader (window size may change), the
     # scheduler loss (window_size / num_steps may change), and the LR
@@ -543,6 +567,12 @@ def main(cfg: DictConfig) -> None:
                 if ema is not None:
                     ema.update(inner_model, epoch=global_epoch)
                 lr_scheduler.step()
+                if bench_tsv_file is not None:
+                    bench_tsv_file.write(
+                        f"{global_epoch}\t{batch_idx}\t"
+                        f"{time.perf_counter() - _bench_start_wall:.4f}\t"
+                        f"{losses['loss']:.6f}\n"
+                    )
                 if (
                     dist.rank == 0
                     and (batch_idx % int(cfg.log_every_n_steps) == 0)
@@ -585,6 +615,12 @@ def main(cfg: DictConfig) -> None:
                     logger.info(f"epoch {global_epoch} valid: {summary}")
 
             global_epoch += 1
+
+    if bench_tsv_file is not None:
+        bench_tsv_file.close()
+    if dist.device.type == "cuda":
+        peak_mem_gb = torch.cuda.max_memory_allocated(dist.device) / 1e9
+        logger.info(f"peak GPU memory: {peak_mem_gb:.2f} GB")
 
 
 if __name__ == "__main__":

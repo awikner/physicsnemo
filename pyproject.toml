@@ -333,6 +333,11 @@ datapipes-extras = [
 uq-extras = [
     "gpytorch>=1.11",
 ]
+muon-optimizers = [
+    # Muon optimizer (used by the AMIP diffusion recipes under
+    # examples/weather/ai_rossby) — no PyPI release, install from git.
+    "Muon @ git+https://github.com/KellerJordan/Muon",
+]
 
 # Use case specific dependency groups.
 gnns = [

@@ -205,8 +205,20 @@ class DiffusionRolloutValidator:
         skip denorm.
     sampler_num_steps
         Number of diffusion solver steps per emitted frame at
-        inference. ``None`` falls back to the scheduler's own
-        ``num_steps`` attribute (training default).
+        inference. Accepts three forms (Phase 8f, F4):
+
+        * ``None`` — falls back to the scheduler's own ``num_steps``
+          attribute (training default).
+        * ``int`` — applied uniformly to every emitted frame (previous
+          behavior).
+        * ``Sequence[int]`` of length ``horizon`` — a per-emitted-frame
+          schedule, e.g. more solver steps for the first few (harder)
+          frames and fewer for later ones, capping sampling cost at
+          long horizons. Frame ``k`` (1-indexed, ``k=1..horizon``) uses
+          ``sampler_num_steps[k - 1]``. For window-mode schedulers
+          (RFM / ERDM), the schedule is forwarded verbatim to
+          ``scheduler.sample_rollout(..., num_steps=...)``, which
+          indexes it the same way internally.
     seed
         Per-epoch RNG seed for the perturber.
     """
@@ -230,7 +242,7 @@ class DiffusionRolloutValidator:
         climatology_upper_air: Optional[torch.Tensor] = None,
         climatology_diagnostic: Optional[torch.Tensor] = None,
         normalizer=None,
-        sampler_num_steps: Optional[int] = None,
+        sampler_num_steps: "Optional[int | Sequence[int]]" = None,
         seed: int = 0,
     ):
         if ensemble_size < 1:
@@ -273,6 +285,13 @@ class DiffusionRolloutValidator:
             raise ValueError(
                 f"max(log_steps)={log_steps[-1]} exceeds horizon={self.horizon}"
             )
+        if isinstance(sampler_num_steps, (list, tuple)):
+            if len(sampler_num_steps) != self.horizon:
+                raise ValueError(
+                    f"sampler_num_steps schedule has length "
+                    f"{len(sampler_num_steps)}, expected horizon={self.horizon}"
+                )
+            self.sampler_num_steps = [int(s) for s in sampler_num_steps]
 
         # Derive grid + channel layout from a probe sample.
         sample = dataset[0]
@@ -405,6 +424,12 @@ class DiffusionRolloutValidator:
             for k, v in batch.items()
         }
 
+    def _num_steps_for_frame(self, k: int) -> Optional[int]:
+        """Resolve ``sampler_num_steps`` for emitted frame ``k`` (1-indexed)."""
+        if isinstance(self.sampler_num_steps, list):
+            return self.sampler_num_steps[k - 1]
+        return self.sampler_num_steps
+
     def _denorm_pred_truth(
         self, kind: str, pred: torch.Tensor, truth: torch.Tensor
     ):
@@ -510,7 +535,7 @@ class DiffusionRolloutValidator:
 
             # Diffusion sample → next-step prediction (still normalized).
             x_next = self.scheduler.sample(
-                model, x, c_grid, c_scalar, num_steps=self.sampler_num_steps
+                model, x, c_grid, c_scalar, num_steps=self._num_steps_for_frame(k)
             )
 
             # Score this step (if requested) against the dataset's frame at t+k.

@@ -310,11 +310,22 @@ class ERDMScheduler(nn.Module):
         c_grid_traj  : (b, T, c_grid, H, W)  forcings over absolute future frames
         c_scalar_traj: (b, T, scalar_dim) or None
         horizon      : number of frames to forecast (emit)
+        num_steps    : diffusion solver steps per emitted frame. Either a
+            single int/None (applied uniformly, previous behavior) or a
+            sequence of length ``horizon`` giving a per-emitted-frame
+            step count (Phase 8f, F4 — caps sampling cost at long
+            horizons).
 
         Returns predicted trajectory (b, horizon, C, H, W).
         """
         b = init_window.shape[0]
         device = init_window.device
+
+        if isinstance(num_steps, (list, tuple)) and len(num_steps) != horizon:
+            raise ValueError(
+                f"num_steps schedule has length {len(num_steps)}, expected "
+                f"horizon={horizon}"
+            )
 
         # Schedule-matched noising of the oracle window at global time t=0, using
         # the temporal noise prior so the W frames are AR(1)-correlated.
@@ -328,7 +339,8 @@ class ERDMScheduler(nn.Module):
             c_grid_win = self._gather_window(c_grid_traj, k)
             c_scalar_win = self._gather_window(c_scalar_traj, k)
 
-            x_bar = self.sample_window(model, x_bar, c_grid_win, c_scalar_win, num_steps)
+            step_k = num_steps[k] if isinstance(num_steps, (list, tuple)) else num_steps
+            x_bar = self.sample_window(model, x_bar, c_grid_win, c_scalar_win, step_k)
 
             emitted = x_bar[:, 0]            # (b, C, H, W) clean front frame
             outputs.append(emitted)

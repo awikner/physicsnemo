@@ -29,7 +29,7 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
 
     Recognized keys:
 
-    * ``optimizer_type`` — ``"AdamW"`` (only supported variant so far).
+    * ``optimizer_type`` — ``"AdamW"`` or ``"Muon"``.
     * ``lr`` — base learning rate.
     * ``weight_decay`` — default 0.
     * ``fused`` — when True, requests the fused CUDA kernel for AdamW
@@ -37,12 +37,21 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
       the eager AdamW with a warning if the runtime can't honor it. Defaults
       to True on CUDA (matches PanguWeather's reference SFNO trainer), False
       otherwise.
+
+    ``optimizer_type="Muon"`` requires ``model`` to expose a
+    ``muon_param_groups(lr, weight_decay)`` method (the amip_si wrappers —
+    :class:`AmipDiTWrapper` / :class:`RollingDiTWrapper` / :class:`ERDMWrapper`
+    — all do) and the ``Muon`` package
+    (``pip install git+https://github.com/KellerJordan/Muon``, or the
+    ``muon-optimizers`` extra in ``pyproject.toml``). The two param groups it
+    returns are handed verbatim to ``muon.MuonWithAuxAdam``.
     """
     name = getattr(cfg, "optimizer_type", "AdamW")
+    if name == "Muon":
+        return _make_muon_optimizer(model, cfg)
     if name != "AdamW":
         raise ValueError(
-            f"Phase 3 only supports optimizer_type='AdamW' (got {name!r}). "
-            "Wire other optimizers (e.g. Muon) as the recipe matures."
+            f"Unsupported optimizer_type={name!r} (supported: 'AdamW', 'Muon')."
         )
     fused = bool(getattr(cfg, "fused", torch.cuda.is_available()))
     kwargs = dict(
@@ -62,6 +71,37 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
         else:
             kwargs["fused"] = True
     return torch.optim.AdamW(model.parameters(), **kwargs)
+
+
+def _make_muon_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
+    """Build ``muon.MuonWithAuxAdam`` from ``model.muon_param_groups()``.
+
+    ``cfg.weight_decay`` is forwarded to both the Muon and aux-AdamW
+    groups (matches upstream amip, which applies a single weight_decay
+    across both). The Muon group's LR multiplier defaults to the
+    wrapper method's own default (10x, per upstream).
+    """
+    if not hasattr(model, "muon_param_groups"):
+        raise ValueError(
+            f"optimizer_type='Muon' requires a model exposing "
+            f"muon_param_groups(); {type(model).__name__} does not. "
+            "Use one of the amip_si wrappers (AmipDiTWrapper / "
+            "RollingDiTWrapper / ERDMWrapper) or add Muon support to "
+            "the wrapper."
+        )
+    try:
+        from muon import MuonWithAuxAdam
+    except ImportError as exc:
+        raise ImportError(
+            "optimizer_type='Muon' requires the `muon` package: "
+            "`pip install git+https://github.com/KellerJordan/Muon` "
+            "(or `pip install nvidia-physicsnemo[muon-optimizers]`)."
+        ) from exc
+    param_groups = model.muon_param_groups(
+        lr=float(cfg.lr),
+        weight_decay=float(getattr(cfg, "weight_decay", 0.01)),
+    )
+    return MuonWithAuxAdam(param_groups)
 
 
 def make_scheduler(
