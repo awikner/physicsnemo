@@ -406,13 +406,10 @@ def test_combined_module_handles_driftscheduler_forecaster_no_tuple_return():
     """DriftScheduler.sample() returns a plain tensor (no return_model_last) —
     CombinedModule's tuple-unpacking guard must be a no-op here."""
     torch.manual_seed(0)
-    # NOTE: at least one constant_boundary_variable is required here —
-    # AmipDiT always allocates a c_grid_embed layer whenever
-    # c_grid_downsample > 0 (its own constructor default), so pairing
-    # c_grid_dim=0 with AmipDiTWrapper.pack_c_grid()'s "return None"
-    # convention produces a channel-count mismatch at forward time. Not
-    # an XDDCWrapper/CombinedModule concern — sidestepped here by
-    # giving the forecaster a non-empty c_grid.
+    # Gives the forecaster a real (non-empty) c_grid — see
+    # test_backbones.py::test_dit_c_grid_dim_zero_with_downsample_positive_forward_ok
+    # for the dedicated c_grid_dim=0 regression coverage; this test's
+    # focus is the tuple-vs-tensor scheduler handling, not that edge case.
     forecaster = AmipDiTWrapper(
         surface_variables=["a", "b"],
         upper_air_variables=["ta"],

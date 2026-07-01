@@ -283,7 +283,14 @@ class AmipDiT(_PNeMoModule):
         self.with_poles = False
 
         # c_grid downsampling: (c_grid_dim, 180, 360) -> (c_grid_embed_dim, 45, 90)
-        if c_grid_downsample > 0:
+        # Gated on c_grid_dim > 0 too (not just c_grid_downsample > 0):
+        # otherwise a c_grid_dim=0 config still allocates c_grid_embed and
+        # bakes c_grid_embed_dim into patch_in_channels, but forward()
+        # skips concatenating c_grid_emb whenever c_grid is None (the
+        # wrapper's pack_c_grid() returns None for c_grid_dim=0) — a
+        # channel-count mismatch at the first patch_embed_main conv.
+        # Matches the already-correct guard in RollingDiT / ERDM.
+        if c_grid_dim > 0 and c_grid_downsample > 0:
             self.c_grid_embed = nn.Conv2d(c_grid_dim, c_grid_embed_dim,
                                           kernel_size=c_grid_downsample,
                                           stride=c_grid_downsample)

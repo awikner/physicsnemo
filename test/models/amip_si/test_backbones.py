@@ -34,8 +34,12 @@ with warnings.catch_warnings():
 
 
 def _dit_kwargs() -> dict:
+    # in_channels is the PatchEmbed channel count and bakes in the
+    # [x_noised, cond] concat assumption (2 * state channels) — see
+    # wrappers.py's AmipDiTWrapper.dit_kwargs.setdefault("in_channels", ...).
+    # out_channels is the bare (undoubled) state channel count.
     return dict(
-        in_channels=4,
+        in_channels=8,
         out_channels=4,
         dim=64,
         num_heads=4,
@@ -59,6 +63,31 @@ def test_dit_forward_shape_finite():
     with torch.no_grad():
         out = model(x_noised, cond, t, c_grid=None, c_scalar=c_scalar)
     assert out.shape == (b, c, h, w), out.shape
+    assert torch.isfinite(out).all()
+
+
+def test_dit_c_grid_dim_zero_with_downsample_positive_forward_ok():
+    """Regression test for a latent shape-mismatch bug: c_grid_embed was
+    previously allocated (and its channels baked into patch_in_channels)
+    whenever ``c_grid_downsample > 0``, regardless of ``c_grid_dim`` — so
+    a c_grid_dim=0 config (no c_grid conditioning at all) crashed at
+    forward time as soon as c_grid_downsample defaulted/was set to a
+    positive value (the wrapper's own default). RollingDiT / ERDM already
+    gated this correctly on ``c_grid_dim > 0``; AmipDiT didn't.
+    """
+    torch.manual_seed(0)
+    kwargs = _dit_kwargs()
+    kwargs["c_grid_downsample"] = 2  # nonzero — previously always allocated c_grid_embed
+    model = AmipDiT(**kwargs).eval()
+    assert model.c_grid_embed is None
+    b, h, w = 2, 16, 32
+    x_noised = torch.randn(b, 4, h, w)
+    cond = torch.randn(b, 4, h, w)
+    t = torch.rand(b)
+    c_scalar = torch.randn(b, 2)
+    with torch.no_grad():
+        out = model(x_noised, cond, t, c_grid=None, c_scalar=c_scalar)
+    assert out.shape == (b, 4, h, w)
     assert torch.isfinite(out).all()
 
 
