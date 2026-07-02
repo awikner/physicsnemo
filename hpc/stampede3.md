@@ -3,10 +3,10 @@
 The realization of `hpc/install.md` for **TACC Stampede3** (SLURM, Lmod on RHEL). Sister document
 to `hpc/delta.md`; follows the same ai-rossby smoke-test workflow.
 
-> **⚠️ SKELETON — authored from the Phase 9 plan, not yet verified on the cluster.**
-> Every value tagged **`TBD`** must be confirmed on first login (see the checklist at the
-> bottom) and this banner removed once smoke tests pass. Until then, trust `hpc/delta.md`
-> for anything this doc leaves open.
+> **Partially verified 2026-07-02** — Option B cu128 install succeeded (**torch 2.11.0+cu128**,
+> exact match to the 12.8 Nsight); GPU partition is **`h100`**. The project code is
+> **`TG-ATM170020`** (uppercase — TACC rejects the lowercase form as "Unknown project"). Smoke
+> run tracked below; a few items remain `TBD` (checklist at bottom).
 
 ---
 
@@ -16,9 +16,9 @@ to `hpc/delta.md`; follows the same ai-rossby smoke-test workflow.
 |---|---|
 | Scheduler | SLURM (Lmod modules) |
 | GPU hardware | NVIDIA H100 SXM, 80 GB |
-| GPU account / allocation | `tg-atm170020` |
-| CPU account / allocation | `tg-atm170020` |
-| Default smoke-test partition (GPU) | **TBD** — likely `gpu-h100` or `h100` (`sinfo -s \| grep -i h100`) |
+| GPU account / allocation | `TG-ATM170020` |
+| CPU account / allocation | `TG-ATM170020` |
+| Default smoke-test partition (GPU) | **`h100`** (24 nodes, H100 — verified); submit via `sbatch` / `idev` |
 | Default data-conversion partition (CPU) | **TBD** — likely `skx` or `normal` |
 | Interactive allocator | `idev` (TACC's node-grab; preferred over bare `srun --pty`) |
 | Walltime caps | **TBD** (`sinfo -o "%P %l"` for per-partition limits) |
@@ -55,15 +55,10 @@ module load python3/3.12          # or the exact version found
 python3 -c "import torch; print(torch.__version__, torch.version.cuda)"   # may error if no torch module
 ```
 
-- **If TACC provides torch ≥ 2.10** → **Option A**: `uv venv --system-site-packages`,
-  reuse the system torch (tight NCCL/MPI integration, no multi-GB download). This is the
-  preferred path on Stampede3 if available.
-- **If torch < 2.10 or absent** → **Option B**: load only the `cuda/12.x` module, let uv pull
-  torch from the `pytorch-cu128` index: `uv sync --extra cu12 --group dev --python 3.12`.
-
-**TBD:** record which option was used and the exact module versions once verified.
-`hpc/scripts/sync-all-clusters.sh` currently assumes Option B for Stampede3 — if Option A wins,
-override the `[stampede3]` entry in that script's `SYNC_CMD` map (e.g. `uv sync --group dev`).
+**Verified:** ai-rossby uses **Option B with `--extra cu12`** (CUDA 12.8) — `uv sync` pulled
+**torch 2.11.0+cu128**, an exact match to the system Nsight (12.8). This is what
+`sync-all-clusters.sh` uses for `[stampede3]`. (uv picked a `$WORK/miniconda3` Python 3.12 as the
+base interpreter; that's fine.)
 
 ## One-time setup
 
@@ -78,14 +73,23 @@ cd $WORK
 git clone git@github.com:awikner/physicsnemo.git   # ForwardAgent serves the Mac's GitHub key
 cd physicsnemo && git checkout ai-rossby
 
-# 3. Load the system stack (exact modules TBD — see strategy above), then:
+# 3. Install (Option B cu128). TWO Stampede3 login-node gotchas — both required:
 unset VIRTUAL_ENV
-uv sync --extra cu12 --group dev --python 3.12      # Option B; adjust for Option A
+export UV_CACHE_DIR=$SCRATCH/.uv-cache      # $HOME is tiny; cache the multi-GB tree on $SCRATCH
+export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1  # see vmem note ↓
+uv sync --extra cu12 --group dev --python 3.12
 
 # 4. Test-data area on $WORK
 mkdir -p $WORK/physicsnemo_test_data
 export AI_ROSSBY_TEST_DATA=$WORK/physicsnemo_test_data   # add to ~/.bashrc
 ```
+
+> **⚠️ Login-node vmem cap.** The Stampede3 login node limits each process to **8 GB** virtual
+> memory (`ulimit -v 8388608`). A default `uv sync` of the cu128 tree exceeds it and dies with
+> *"memory allocation of N bytes failed"*. The `UV_CONCURRENT_*=1` exports above throttle uv so it
+> stays under the cap. Compute nodes have no such limit but also lack outbound internet, so the
+> download must run on the login node — hence the throttle. `UV_CACHE_DIR` on `$SCRATCH` likewise
+> avoids the tiny `$HOME` quota.
 
 Verify (login node, CPU-only):
 
@@ -110,7 +114,7 @@ pytest -m "smoke and cuda" -x -q test/
 `idev` grabs a compute node and drops you into a shell on it:
 
 ```bash
-idev -p <GPU_PARTITION> -N 1 -n 1 -t 01:00:00 -A tg-atm170020    # partition TBD
+idev -p <GPU_PARTITION> -N 1 -n 1 -t 01:00:00 -A TG-ATM170020    # partition TBD
 # once on the node:
 cd $WORK/physicsnemo && source .venv/bin/activate
 pytest -m "smoke and cuda" -x -q test/models/<feature>/
@@ -127,7 +131,7 @@ TACC discourages bare `srun` from login nodes; the portable non-interactive patt
 ```bash
 #!/bin/bash
 #SBATCH -p <GPU_PARTITION>          # TBD
-#SBATCH -A tg-atm170020
+#SBATCH -A TG-ATM170020
 #SBATCH -t 00:30:00
 #SBATCH -N 1
 #SBATCH -n 1
@@ -164,7 +168,7 @@ nsys --version ; ncu --version   # ⚠️ record exact versions on first login
 ## Data-conversion CPU jobs
 
 CPU-only preprocessing (HDF5→Zarr, climatology/bias, normalization stats) runs on the CPU
-partition (`skx`/`normal`, **TBD**) under `tg-atm170020`, via `idev` (interactive) or
+partition (`skx`/`normal`, **TBD**) under `TG-ATM170020`, via `idev` (interactive) or
 `sbatch`. Scripts read `SLURM_CPUS_PER_TASK` to size their `multiprocessing.Pool`. See the
 `stampede3-cpu-job` skill.
 

@@ -18,7 +18,7 @@ submits with `qsub`, not `sbatch`/`srun`. Pairs with `derecho-shell` and `derech
 | PBS directive | Default | Notes |
 |---|---|---|
 | `-A` (project) | `UCHI0018` | GPU project; only deviation: user names another |
-| `-q` (queue) | **TBD** `develop` | Verify it's GPU-capable with `qstat -Q` |
+| `-q` (queue) | `develop` | Routes to `gpudev` (allocates an A100); verified GPU-capable |
 | `-l walltime` | `00:30:00` | Bump to `01:00:00` for DDP; keep ≤ the queue cap |
 | `-l select` | `1:ncpus=8:ngpus=1:mem=64gb` | Bump `ngpus=2` for DDP; A100 nodes have 4 |
 | `-N` (name) | `pn-smoke` | |

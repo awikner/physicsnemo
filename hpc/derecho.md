@@ -4,9 +4,8 @@ The realization of `hpc/install.md` for **NCAR Derecho** (**PBS** scheduler, Lmo
 environment). Sister document to `hpc/delta.md`. Derecho is the one cluster in scope that uses
 **PBS Pro**, not SLURM — job control and directives differ throughout (see the callout below).
 
-> **⚠️ SKELETON — authored from the Phase 9 plan, not yet verified on the cluster.**
-> Every value tagged **`TBD`** must be confirmed on first login (checklist at the bottom) and
-> this banner removed once smoke tests pass. Trust `hpc/delta.md` for anything left open.
+> **✅ Verified 2026-07-02** — Option B cu129 install + a `develop`-queue GPU smoke passed on an
+> A100 (see Smoke-test results). A few low-priority items remain `TBD` (checklist at the bottom).
 
 ---
 
@@ -33,7 +32,7 @@ Directives do **not** expand shell variables (e.g. `#PBS -o` cannot use `$PBS_JO
 | GPU hardware | 4× NVIDIA A100 (40 GB) per GPU node |
 | GPU account / project | `UCHI0018` |
 | CPU account / project | `UCHI0014` |
-| Default smoke-test queue (GPU) | **TBD** — plan guess `develop` (`qstat -Q`; confirm it's GPU-capable) |
+| Default smoke-test queue (GPU) | **`develop`** (routing queue → `gpudev`; allocates an A100). Verified GPU-capable |
 | Default data-conversion queue (CPU) | **TBD** — `main` or `cpu` |
 | Walltime cap (interactive/dev queue) | **TBD** — plan guess ~1 h |
 | Single-node constraint | ✅ all smoke tests + data-conversion jobs run on 1 node |
@@ -175,7 +174,7 @@ Scripts read `$NCPUS` (PBS's per-job CPU count; fall back to `os.cpu_count()`) t
 
 | Date | torch version | GPU type | Result | Notes |
 |---|---|---|---|---|
-| _pending first run_ | | A100 40 GB | | |
+| 2026-07-02 | 2.12.1+cu129 | A100-SXM4-40GB (`develop`→`gpudev`) | **PASS** | `pangu_plasim`: 2 passed, 34 deselected, 7.5 s |
 
 ---
 

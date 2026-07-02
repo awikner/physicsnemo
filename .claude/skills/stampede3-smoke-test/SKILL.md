@@ -1,11 +1,11 @@
 ---
 name: stampede3-smoke-test
-description: Submit a pytest target as a GPU smoke test on TACC Stampede3's H100 partition under allocation tg-atm170020. Use whenever the user asks to run a smoke test, run GPU tests, or verify a ported physicsnemo feature on Stampede3/H100. Blocks until pytest exits and reports the result.
+description: Submit a pytest target as a GPU smoke test on TACC Stampede3's H100 partition under allocation TG-ATM170020. Use whenever the user asks to run a smoke test, run GPU tests, or verify a ported physicsnemo feature on Stampede3/H100. Blocks until pytest exits and reports the result.
 ---
 
 # stampede3-smoke-test
 
-Runs a pytest smoke target on a TACC Stampede3 **H100** node under allocation `tg-atm170020`,
+Runs a pytest smoke target on a TACC Stampede3 **H100** node under allocation `TG-ATM170020`,
 in the ai-rossby workflow defined by `hpc/stampede3.md`. Pairs with `stampede3-shell`
 (interactive) and `stampede3-cpu-job` (CPU preprocessing).
 
@@ -19,7 +19,7 @@ in the ai-rossby workflow defined by `hpc/stampede3.md`. Pairs with `stampede3-s
 | Flag | Default | Notes |
 |---|---|---|
 | `-p` / `--partition` | **TBD** (`gpu-h100` / `h100`) | Verify with `sinfo -s \| grep -i h100` |
-| `-A` / `--account` | `tg-atm170020` | Only deviation: user names another allocation |
+| `-A` / `--account` | `TG-ATM170020` | Only deviation: user names another allocation |
 | `-t` / `--time` | `00:30:00` | Bump to `01:00:00` for DDP; keep ≤ the smoke cap |
 | `-N` (nodes) | `1` | Smoke tests are single-node by contract |
 | `-n` (tasks) | `1` | Pytest runs once; DDP driven by `torchrun` inside |
@@ -49,7 +49,7 @@ in the ai-rossby workflow defined by `hpc/stampede3.md`. Pairs with `stampede3-s
 
 ```bash
 TARGET=test/models/pangu_plasim/ sbatch --wait \
-  -p <GPU_PARTITION> -A tg-atm170020 -t 00:30:00 -N 1 -n 1 -J pn-smoke \
+  -p <GPU_PARTITION> -A TG-ATM170020 -t 00:30:00 -N 1 -n 1 -J pn-smoke \
   -o hpc/scripts/logs/smoke-%j.out \
   hpc/scripts/smoke_stampede3.sbatch
 # then tail the newest hpc/scripts/logs/smoke-*.out and report the tail
@@ -61,7 +61,7 @@ TARGET=test/models/pangu_plasim/ sbatch --wait \
   want a fidelity/recipe job (which belongs in `hpc/scripts/` with its own script).
 - User asks for walltime beyond the smoke cap, > the node's GPU count, or multi-node — stop and
   surface the contract violation.
-- User names an allocation other than `tg-atm170020` without explanation — confirm first.
+- User names an allocation other than `TG-ATM170020` without explanation — confirm first.
 - The repo is not on `ai-rossby` — note it (smoke tests likely don't exist on `main`).
 
 ## Out-of-scope

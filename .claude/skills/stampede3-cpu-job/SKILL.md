@@ -1,12 +1,12 @@
 ---
 name: stampede3-cpu-job
-description: Submit a CPU job (data conversion, climatology computation, normalization stats, .nc-to-Zarr conversion, multiprocessing batch, etc.) on TACC Stampede3's CPU partition under allocation tg-atm170020. Use whenever the user asks to run a data-conversion or non-GPU compute job on Stampede3. Pairs with stampede3-smoke-test (GPU) and stampede3-shell (interactive GPU).
+description: Submit a CPU job (data conversion, climatology computation, normalization stats, .nc-to-Zarr conversion, multiprocessing batch, etc.) on TACC Stampede3's CPU partition under allocation TG-ATM170020. Use whenever the user asks to run a data-conversion or non-GPU compute job on Stampede3. Pairs with stampede3-smoke-test (GPU) and stampede3-shell (interactive GPU).
 ---
 
 # stampede3-cpu-job
 
 Submits CPU-only preprocessing work to a TACC Stampede3 CPU partition under allocation
-`tg-atm170020`, in the ai-rossby workflow defined by `hpc/stampede3.md`. Target: HDF5→Zarr
+`TG-ATM170020`, in the ai-rossby workflow defined by `hpc/stampede3.md`. Target: HDF5→Zarr
 converters, climatology/bias aggregations, normalization-stat computations, and other
 `multiprocessing` batches under `tools/data/`.
 
@@ -25,7 +25,7 @@ converters, climatology/bias aggregations, normalization-stat computations, and 
 | Flag | Default | Notes |
 |---|---|---|
 | `-p` (partition) | **TBD** CPU partition | `sinfo -s` on first login |
-| `-A` (account) | `tg-atm170020` | Only deviation: user names another allocation |
+| `-A` (account) | `TG-ATM170020` | Only deviation: user names another allocation |
 | `-t` (time) | `04:00:00` | Bump for very large conversions; keep ≤ the cap |
 | `-N` (nodes) | `1` | Single-node by contract |
 | `-n` (tasks) | `1` | One process; `multiprocessing` spawns the pool internally |
@@ -54,7 +54,7 @@ converters, climatology/bias aggregations, normalization-stat computations, and 
 
 - User requests a GPU partition for CPU work — point at `stampede3-smoke-test` (GPU) instead.
 - User asks for walltime beyond the partition cap — stop and surface it.
-- User names an allocation other than `tg-atm170020` without explanation — confirm first.
+- User names an allocation other than `TG-ATM170020` without explanation — confirm first.
 - The conversion script ignores `SLURM_CPUS_PER_TASK` — note it; parallelism won't match the
   allocation.
 

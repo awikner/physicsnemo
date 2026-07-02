@@ -1,12 +1,12 @@
 ---
 name: stampede3-shell
-description: Open an interactive shell on a TACC Stampede3 H100 GPU node via idev under allocation tg-atm170020. Use when the user wants to debug a failing smoke test on a real H100, run pytest by hand on a node, or otherwise needs a GPU-attached bash session on Stampede3.
+description: Open an interactive shell on a TACC Stampede3 H100 GPU node via idev under allocation TG-ATM170020. Use when the user wants to debug a failing smoke test on a real H100, run pytest by hand on a node, or otherwise needs a GPU-attached bash session on Stampede3.
 ---
 
 # stampede3-shell
 
 Opens an interactive shell on a Stampede3 **H100** node using TACC's `idev` node-grabber under
-allocation `tg-atm170020`. The user lands ready to `source .venv/bin/activate` and run pytest by
+allocation `TG-ATM170020`. The user lands ready to `source .venv/bin/activate` and run pytest by
 hand. Use for *debugging*, not batch verification — that's `stampede3-smoke-test`.
 
 > **⚠️ SKELETON.** Partition name and walltime cap are **TBD until verified on Stampede3**
@@ -17,7 +17,7 @@ hand. Use for *debugging*, not batch verification — that's `stampede3-smoke-te
 | Flag | Default | Notes |
 |---|---|---|
 | `-p` (partition) | **TBD** (`gpu-h100` / `h100`) | `sinfo -s \| grep -i h100` |
-| `-A` (account) | `tg-atm170020` | Only deviation: user names another allocation |
+| `-A` (account) | `TG-ATM170020` | Only deviation: user names another allocation |
 | `-t` (time) | `01:00:00` | Lower for short sessions; keep ≤ the interactive cap |
 | `-N` (nodes) | `1` | Single-node |
 | `-n` (tasks) | `1` | One shell |
@@ -28,7 +28,7 @@ hand. Use for *debugging*, not batch verification — that's `stampede3-smoke-te
    full node's GPUs.
 2. **Run `idev`** to grab the node:
    ```bash
-   idev -p <GPU_PARTITION> -A tg-atm170020 -N 1 -n 1 -t 01:00:00
+   idev -p <GPU_PARTITION> -A TG-ATM170020 -N 1 -n 1 -t 01:00:00
    ```
    `idev` drops the user onto the compute node. Then (they run, or you pre-stage the reminder):
    ```bash

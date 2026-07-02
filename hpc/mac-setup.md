@@ -10,7 +10,7 @@ Nothing here lives in the repo except this file. The actual `~/.ssh/config`,
 recreated from the templates below.
 
 The design goal: **authenticate once per cluster per day**, then every `ssh`,
-`scp`, `rsync`, and `git` operation for the next 8 hours reuses that
+`scp`, `rsync`, and `git` operation for the next 24 hours reuses that
 connection with no further MFA/DUO prompts. This is what makes
 `sync-all-clusters.sh` and the per-cluster Claude skills usable without a
 password prompt on every command.
@@ -21,11 +21,11 @@ password prompt on every command.
 
 Two SSH features do the heavy lifting:
 
-- **`ControlMaster` + `ControlPersist 8h`** — the first `ssh <cluster>`
+- **`ControlMaster` + `ControlPersist 24h`** — the first `ssh <cluster>`
   authenticates and opens a *master* connection whose control socket lives in
   `~/.ssh/controlmasters/`. Every later `ssh <cluster>` (from any process on
   the Mac — including Claude's Bash tool) rides that socket instead of
-  re-authenticating. The master lingers 8 h after the last client detaches,
+  re-authenticating. The master lingers 24 h after the last client detaches,
   so one morning login covers a full workday.
 - **`ForwardAgent yes`** — the Mac's `ssh-agent` (holding your GitHub key) is
   exposed on the remote host, so `git pull` / `git clone` on a cluster
@@ -71,7 +71,7 @@ persistence settings. These aliases are what `morning-login` and
 ```sshconfig
 # ═══ Phase 9 cluster aliases (morning-login / sync-all-clusters.sh) ═══════════
 # Short-name aliases with ControlMaster persistence. `ssh <alias>` reuses one
-# authenticated connection for 8 h, so MFA/DUO prompts fire once per day.
+# authenticated connection for 24 h, so MFA/DUO prompts fire once per day.
 
 Host delta
   HostName login.delta.ncsa.illinois.edu
@@ -79,7 +79,7 @@ Host delta
   ForwardAgent yes
   ControlMaster auto
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
-  ControlPersist 8h
+  ControlPersist 24h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 
@@ -90,7 +90,7 @@ Host deltaai
   ForwardAgent yes
   ControlMaster auto
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
-  ControlPersist 8h
+  ControlPersist 24h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 
@@ -100,7 +100,7 @@ Host stampede3
   ForwardAgent yes
   ControlMaster auto
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
-  ControlPersist 8h
+  ControlPersist 24h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 
@@ -110,7 +110,7 @@ Host derecho
   ForwardAgent yes
   ControlMaster auto
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
-  ControlPersist 8h
+  ControlPersist 24h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 
@@ -120,7 +120,7 @@ Host midway3
   ForwardAgent yes
   ControlMaster auto
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
-  ControlPersist 8h
+  ControlPersist 24h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 
@@ -131,7 +131,7 @@ Host dsi
   ForwardAgent yes
   ControlMaster auto
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
-  ControlPersist 8h
+  ControlPersist 24h
   ServerAliveInterval 60
   ServerAliveCountMax 3
 ```
@@ -154,7 +154,7 @@ Host dsi
 Establishes the ControlMaster connections for the day. Run it once each
 morning; complete each cluster's MFA/DUO as it prompts. After that, all SSH /
 SCP / rsync / git-over-SSH traffic to those clusters skips re-authentication
-for 8 h.
+for 24 h.
 
 Save as `~/bin/morning-login`, `chmod +x`:
 
@@ -162,7 +162,7 @@ Save as `~/bin/morning-login`, `chmod +x`:
 #!/usr/bin/env bash
 # morning-login — establish ControlMaster connections to all HPC clusters.
 # Run once per day. You will be prompted for MFA/DUO per cluster that requires
-# it; after that all SSH/SCP/rsync commands skip re-authentication for 8 h.
+# it; after that all SSH/SCP/rsync commands skip re-authentication for 24 h.
 #
 # Usage:  morning-login [cluster …]
 #   No args   → connects to all clusters.
