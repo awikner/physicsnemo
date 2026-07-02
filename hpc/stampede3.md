@@ -3,10 +3,10 @@
 The realization of `hpc/install.md` for **TACC Stampede3** (SLURM, Lmod on RHEL). Sister document
 to `hpc/delta.md`; follows the same ai-rossby smoke-test workflow.
 
-> **Partially verified 2026-07-02** — Option B cu128 install succeeded (**torch 2.11.0+cu128**,
-> exact match to the 12.8 Nsight); GPU partition is **`h100`**. The project code is
-> **`TG-ATM170020`** (uppercase — TACC rejects the lowercase form as "Unknown project"). Smoke
-> run tracked below; a few items remain `TBD` (checklist at bottom).
+> **✅ Verified 2026-07-02** — Option B cu128 install (**torch 2.11.0+cu128**, exact match to the
+> 12.8 Nsight); **smoke passed on the `h100` partition** (see Smoke-test results). Project code is
+> **`TG-ATM170020`** (uppercase — TACC rejects the lowercase form as "Unknown project"). A few
+> items remain `TBD` (checklist at bottom).
 
 ---
 
@@ -176,7 +176,7 @@ partition (`skx`/`normal`, **TBD**) under `TG-ATM170020`, via `idev` (interactiv
 
 | Date | torch version | GPU type | Result | Notes |
 |---|---|---|---|---|
-| _pending first run_ | | H100 SXM | | |
+| 2026-07-02 | 2.11.0+cu128 | H100 SXM (`h100`) | **PASS** | `pangu_plasim`: 2 passed, 34 deselected, 99 s |
 
 ---
 
