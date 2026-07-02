@@ -12,6 +12,9 @@
 # Only touches each cluster's persistent code filesystem (repo + venv). Training
 # data (Zarr archives) live on scratch and are NOT managed here.
 #
+# Portable to macOS's stock bash 3.2 (no associative arrays — per-cluster config
+# lives in the `cluster_cfg` case below).
+#
 # NB: a plain `git pull --ff-only` fails on a dirty tree. If a clone has local
 # edits (e.g. a hand-applied pyproject fix), reconcile once before running this:
 #     ssh <cluster> 'cd <repo> && git checkout -- pyproject.toml uv.lock'
@@ -20,74 +23,57 @@ set -uo pipefail   # not -e: one cluster failing must not abort the rest
 BRANCH="${1:-ai-rossby}"
 [ $# -gt 0 ] && shift
 
-# Ordered so output is deterministic (bash assoc arrays are unordered).
-ALL_CLUSTERS=(delta deltaai stampede3 derecho midway3 dsi)
-targets=("${@:-${ALL_CLUSTERS[@]}}")
+ALL_CLUSTERS="delta deltaai stampede3 derecho midway3 dsi"
+targets="${*:-$ALL_CLUSTERS}"
 
-# Persistent work/project filesystems only — never scratch. Verified during Phase 9 setup.
-declare -A REPO_DIRS=(
-    [delta]="/work/nvme/bdiu/awikner/physicsnemo"
-    [deltaai]="/work/nvme/bdiu/awikner/physicsnemo"          # shared /work (Lustre) with Delta
-    [stampede3]="\$WORK/physicsnemo"                          # $WORK persistent; $SCRATCH is not
-    [derecho]="/glade/work/awikner/physicsnemo"              # /glade/work persistent; scratch is not
-    [midway3]="/project/pedramh/awikner/physicsnemo"
-    [dsi]="/net/projects2/laude/awikner/physicsnemo"         # general_group is only the SLURM account; storage is the laude group
-)
-
-# Separate venv per cluster even when the repo path is shared (different GPU
-# hardware / CUDA build). DeltaAI rides Delta's clone but its own aarch64 venv.
-declare -A VENV_NAMES=(
-    [delta]=".venv"
-    [deltaai]=".venv-deltaai"
-    [stampede3]=".venv"
-    [derecho]=".venv"
-    [midway3]=".venv"
-    [dsi]=".venv"
-)
-
-# Per-cluster sync command, chosen so torch's CUDA matches each site's system
-# Nsight profiler (see the Phase 9 plan § 9f and hpc/<cluster>.md § Profiling):
-#   cu12  = CUDA 12.8 wheels (Delta, Stampede3 — system Nsight 12.8)
-#   cu129 = CUDA 12.9 wheels (Derecho, Midway3, DSI — system Nsight 12.9+)
-#   DeltaAI uses Option A: reuse the site's torch 2.10+cu129 module, no cu-wheel.
 DEFAULT_SYNC="uv sync --extra cu12 --group dev --python 3.12"
-declare -A SYNC_CMD=(
-    [delta]="uv sync --extra cu12 --group dev --python 3.12"       # Nsight 12.8
-    [stampede3]="uv sync --extra cu12 --group dev --python 3.12"   # Nsight 12.8
-    [derecho]="uv sync --extra cu129 --group dev --python 3.12"    # Nsight 12.9
-    [midway3]="uv sync --extra cu129 --group dev --python 3.12"    # Nsight 12.9
-    [dsi]="uv sync --extra cu129 --group dev --python 3.12"        # general partition: driver 595 / nsys 2026.1.3
-    # DeltaAI Option A — reuse the miniforge torch 2.10+cu129 module instead of a cu-wheel:
-    [deltaai]="module load python/miniforge3_pytorch/2.10.0 && source .venv-deltaai/bin/activate && uv pip install -e . && uv pip install --group dev"
-)
 
-# Per-cluster uv cache dir — a small $HOME overflows on the multi-GB cu-wheel
-# tree, so cache on the roomy work/scratch filesystem. uv creates it if missing.
-declare -A CACHE_DIRS=(
-    [delta]="/work/nvme/bdiu/awikner/.uv-cache"
-    [deltaai]="/work/nvme/bdiu/awikner/.uv-cache"
-    [stampede3]="\$SCRATCH/.uv-cache"
-    [derecho]="/glade/derecho/scratch/awikner/.uv-cache"
-    [midway3]="/scratch/midway3/awikner/.uv-cache"
-    [dsi]="/net/scratch/awikner/.uv-cache"
-)
-
-# Extra per-cluster env before uv. Stampede3's login node caps vmem at 8 GB, so
-# throttle uv's concurrency there or it OOMs mid-resolve (":" = no-op elsewhere).
-declare -A EXTRA_ENV=(
-    [stampede3]="export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1"
-)
+# Per-cluster config. Sets REPO / VENV / SYNC / CACHE / EXTRA_ENV for cluster $1.
+#   REPO   — persistent code filesystem (never scratch); \$WORK etc. expand remotely
+#   VENV   — separate per cluster (different GPU / CUDA build)
+#   SYNC   — CUDA extra chosen to match the site's system Nsight (plan § 9f):
+#            cu12=CUDA 12.8 (Delta, Stampede3); cu129=CUDA 12.9 (Derecho, Midway3,
+#            DSI); DeltaAI uses Option A (reuse its torch 2.10+cu129 module).
+#   CACHE  — uv cache off the small $HOME (multi-GB cu-wheel tree); uv creates it
+#   EXTRA_ENV — extra exports before uv (Stampede3's 8 GB login vmem cap → throttle)
+cluster_cfg() {
+    REPO=""; VENV=".venv"; SYNC="$DEFAULT_SYNC"; CACHE=""; EXTRA_ENV=":"
+    case "$1" in
+      delta)
+        REPO="/work/nvme/bdiu/awikner/physicsnemo"
+        SYNC="uv sync --extra cu12 --group dev --python 3.12"          # Nsight 12.8
+        CACHE="/work/nvme/bdiu/awikner/.uv-cache" ;;
+      deltaai)
+        REPO="/work/nvme/bdiu/awikner/physicsnemo"; VENV=".venv-deltaai"  # shared /work with Delta
+        SYNC="module load python/miniforge3_pytorch/2.10.0 && source .venv-deltaai/bin/activate && uv pip install -e . && uv pip install --group dev && uv pip uninstall torch torchvision triton"
+        CACHE="/work/nvme/bdiu/awikner/.uv-cache" ;;
+      stampede3)
+        REPO="\$WORK/physicsnemo"                                       # $WORK persistent; $SCRATCH is not
+        SYNC="uv sync --extra cu12 --group dev --python 3.12"          # Nsight 12.8
+        CACHE="\$SCRATCH/.uv-cache"
+        EXTRA_ENV="export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1" ;;
+      derecho)
+        REPO="/glade/work/awikner/physicsnemo"
+        SYNC="uv sync --extra cu129 --group dev --python 3.12"         # Nsight 12.9
+        CACHE="/glade/derecho/scratch/awikner/.uv-cache" ;;
+      midway3)
+        REPO="/project/pedramh/awikner/physicsnemo"
+        SYNC="uv sync --extra cu129 --group dev --python 3.12"         # Nsight 12.9
+        CACHE="/scratch/midway3/awikner/.uv-cache" ;;
+      dsi)
+        REPO="/net/projects2/laude/awikner/physicsnemo"                # general_group = SLURM account; storage is the laude group
+        SYNC="uv sync --extra cu129 --group dev --python 3.12"         # general partition: driver 595 / nsys 2026.1.3
+        CACHE="/net/scratch/awikner/.uv-cache" ;;
+      *) REPO="" ;;
+    esac
+}
 
 rc=0
-for cluster in "${targets[@]}"; do
-    repo="${REPO_DIRS[$cluster]:-}"
-    venv="${VENV_NAMES[$cluster]:-.venv}"
-    sync_cmd="${SYNC_CMD[$cluster]:-$DEFAULT_SYNC}"
-    cache="${CACHE_DIRS[$cluster]:-}"
-    extra_env="${EXTRA_ENV[$cluster]:-:}"
+for cluster in $targets; do
+    cluster_cfg "$cluster"
     echo "── $cluster ─────────────────────────────────────────────"
-    if [ -z "$repo" ]; then
-        echo "  → SKIP (no repo path configured)"; rc=1; continue
+    if [ -z "$REPO" ]; then
+        echo "  → SKIP (unknown cluster '$cluster')"; rc=1; continue
     fi
     # Fail fast with a clear message instead of hanging on an interactive prompt.
     if ! ssh -O check "$cluster" &>/dev/null; then
@@ -95,15 +81,16 @@ for cluster in "${targets[@]}"; do
     fi
     if ssh "$cluster" bash -lc "
         set -euo pipefail
-        cd $repo
+        export PATH=\$HOME/.local/bin:\$PATH   # ensure uv is found (not all ~/.bashrc add it)
+        cd $REPO
         git fetch origin
         git checkout $BRANCH
         git pull --ff-only origin $BRANCH
         unset VIRTUAL_ENV
-        export UV_PROJECT_ENVIRONMENT=$venv
-        ${cache:+export UV_CACHE_DIR=$cache}
-        $extra_env
-        $sync_cmd
+        export UV_PROJECT_ENVIRONMENT=$VENV
+        ${CACHE:+export UV_CACHE_DIR=$CACHE}
+        $EXTRA_ENV
+        $SYNC
         echo 'uv sync: OK'
     "; then
         echo "  → OK"
