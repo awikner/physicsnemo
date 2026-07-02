@@ -1,0 +1,23 @@
+#!/bin/bash
+# hpc/scripts/smoke_derecho.pbs — GPU smoke test on NCAR Derecho (PBS Pro).
+# Submit from the repo root so the relative -o path resolves:
+#     qsub hpc/scripts/smoke_derecho.pbs
+#     TARGET=test/models/pangu_plasim/ qsub -v TARGET hpc/scripts/smoke_derecho.pbs
+# PBS writes pn-smoke.o<jobid> into hpc/scripts/logs/.
+#
+# ⚠️ SKELETON: queue name and module versions are TBD until verified on Derecho
+#    (see hpc/derecho.md). #PBS directives cannot expand shell vars.
+#    CUDA 12.9 + cu129 wheels match Derecho's system Nsight 12.9 (see hpc/derecho.md § Profiling).
+#PBS -A UCHI0018
+#PBS -q develop
+#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64gb
+#PBS -N pn-smoke
+#PBS -j oe
+#PBS -o hpc/scripts/logs/
+
+set -euo pipefail
+module load ncarenv/24.12 cuda/12.9.0 python/3.12.5   # cuda 12.9 verified; ncarenv/python TBD
+cd /glade/work/awikner/physicsnemo
+source .venv/bin/activate
+pytest -m "smoke and cuda" -x -q "${TARGET:-test/}"

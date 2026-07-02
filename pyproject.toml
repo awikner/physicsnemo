@@ -73,6 +73,7 @@ managed = true
 conflicts = [
     [
         { extra = "cu12" },
+        { extra = "cu129" },
         { extra = "cu13" },
     ],
     [
@@ -114,6 +115,16 @@ name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
+# PyTorch CUDA 12.9 index - used when the cu129 extra is active, for clusters
+# whose system Nsight / CUDA toolkit is 12.9 (e.g. NCAR Derecho, NCSA DeltaAI) so
+# nsys/ncu exact-match the venv's torch build.  torch/torchvision 2.10+cu129
+# wheels exist; RAPIDS (cuml-cu12 etc.) is CUDA-12-generic and shared with cu12.
+# See hpc/install.md § Nsight/profiling compatibility.
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
 # NATTEN pre-built wheel indexes (flat HTML pages), split by CUDA version AND
 # torch version.  The full path is required because natten encodes both CUDA
 # and torch versions in local version identifiers (e.g. 0.21.5+torch2100cu128)
@@ -135,15 +146,18 @@ explicit = true
 
 [tool.uv.sources]
 # When cu12 is active, torch/torchvision come from the CUDA 12.8 index.
+# When cu129 is active, they come from the CUDA 12.9 index (Nsight-12.9 clusters).
 # When cu13 is active, they come from the CUDA 13.0 index.
-# When neither extra is active (bare install), they come from PyPI.
+# When no CUDA extra is active (bare install), they come from PyPI.
 # On macOS, CUDA extras should not be used (no GPU builds available).
 torch = [
     { index = "pytorch-cu128", extra = "cu12" },
+    { index = "pytorch-cu129", extra = "cu129" },
     { index = "pytorch-cu130", extra = "cu13" },
 ]
 torchvision = [
     { index = "pytorch-cu128", extra = "cu12" },
+    { index = "pytorch-cu129", extra = "cu129" },
     { index = "pytorch-cu130", extra = "cu13" },
 ]
 cuml-cu13 = { index = "nvidia" }
@@ -188,6 +202,12 @@ requires-dist = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+
+[tool.hatch.metadata]
+# The `muon-optimizers` optional-dependency installs from a git direct reference
+# (no PyPI release), which hatchling only permits when this flag is set. Required
+# for any editable/wheel build of physicsnemo (e.g. Option A `uv pip install -e .`).
+allow-direct-references = true
 
 [tool.hatch.version]
 path = "physicsnemo/__init__.py"
@@ -261,6 +281,19 @@ cu12 = [
     "pylibraft-cu12>=26.2.0",
     # See cu13 note: cupy 14.x also interacts badly with torch>=2.11 on the
     # cu128 wheel via cupy issue #9827.
+    "cupy-cuda12x>=13.6.0,<14.0.0",
+    "nvidia-dali-cuda120",
+]
+# Identical to cu12 but pins torch/torchvision to the CUDA 12.9 index (see
+# [tool.uv.sources]).  For clusters whose *system* Nsight / CUDA toolkit is 12.9,
+# so nsys/ncu exact-match the venv's torch build (NCAR Derecho; NCSA DeltaAI when
+# not reusing its miniforge torch module).  RAPIDS deps are CUDA-12-generic and
+# shared with cu12.  Mutually exclusive with cu12/cu13 (see [tool.uv] conflicts).
+cu129 = [
+    "torch>=2.10.0",
+    "torchvision>=0.25.0a0",
+    "cuml-cu12>=26.2.0",
+    "pylibraft-cu12>=26.2.0",
     "cupy-cuda12x>=13.6.0,<14.0.0",
     "nvidia-dali-cuda120",
 ]

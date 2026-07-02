@@ -127,6 +127,16 @@ cluster's torch is too far behind, or when you need an upstream-pure environment
 Option A keeps tight integration with the cluster's NCCL/MPI. Option B is portable across
 clusters but slower and may miss optimizations.
 
+**Match the CUDA version to the system Nsight profiler.** If you profile with the cluster's
+Nsight Systems / Compute (`nsys` / `ncu`, see Step 7), the venv's torch CUDA build must be **≤**
+the system Nsight's CUDA version — Nsight is backward-compatible (a newer `ncu` profiles an app
+built with an equal-or-older CUDA, never a newer one). So: find the system Nsight/CUDA first, then
+pick the CUDA extra whose toolkit matches it. physicsnemo ships `cu12` (CUDA 12.8), `cu129`
+(CUDA 12.9), and `cu13` (CUDA 13.0) — choose the one **equal** to the system Nsight's CUDA where
+possible (exact match is ideal for `ncu` kernel profiling). When a cluster's module already
+provides torch ≥ 2.10 at the right CUDA (Option A), reusing it is the tightest Nsight match of
+all: toolkit, driver, and profiler are the same build the site ships.
+
 ## Step 5 — Smoke check
 
 A trivial check on a login node (CPU-only):
@@ -156,6 +166,32 @@ Create `hpc/<cluster>.md` capturing:
 - Known oddities (HDF5 locking, NCCL fabric tuning, container vs. native, etc.).
 
 The Delta recipe at `hpc/delta.md` is a worked example.
+
+## Step 7 — Profiling with Nsight (Systems & Compute)
+
+ai-rossby performance work uses NVIDIA **Nsight Systems** (`nsys`, timeline / system profiling)
+and **Nsight Compute** (`ncu`, kernel profiling). These ship with the cluster's CUDA toolkit /
+NVHPC SDK — **not** with the venv — so you run them *around* the venv's Python.
+
+1. **Find the system Nsight and its CUDA version.** Usually arrives with a `cuda` / `nvhpc`
+   module (sometimes already on the default PATH):
+   ```bash
+   module load <cuda-or-nvhpc-module>     # cluster-specific; see hpc/<cluster>.md
+   nsys --version        # e.g. "2025.1.3" (CUDA 12.9-era)
+   ncu  --version        # e.g. "2025.2.0.0"
+   nvcc --version        # toolkit version → the CUDA the profilers target
+   ```
+2. **Match the venv's torch CUDA to it** (Step 4). `ncu` is happiest when the app's CUDA equals
+   the profiler's, and refuses an app built with a *newer* CUDA than it supports.
+3. **Profile the venv under the loaded module**, from inside a GPU job (the profilers need a GPU):
+   ```bash
+   module load <cuda-or-nvhpc-module>
+   source .venv/bin/activate
+   nsys profile -o /scratch/.../run_%p       python -m my_script ...
+   ncu   --set full -o /scratch/.../kernel_%p python -m my_script ...
+   ```
+   Profiler output is large — write it to scratch. Record the per-cluster profiling module +
+   `nsys`/`ncu` versions in `hpc/<cluster>.md` under a **Profiling** section.
 
 ---
 

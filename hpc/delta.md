@@ -238,6 +238,27 @@ multi-GPU runs.
 Those non-smoke job scripts get their own files under `hpc/scripts/` and reference this doc
 for environment setup.
 
+## Profiling with Nsight
+
+Nsight Systems (`nsys`) and Nsight Compute (`ncu`) come from the NVHPC SDK 25.3 — already on the
+default login PATH (no module needed); `cuda/12.8` provides the same. Verified versions:
+
+| Tool | Version | CUDA |
+|---|---|---|
+| Nsight Systems (`nsys`) | 2025.1.1 | 12.8 |
+| Nsight Compute (`ncu`) | 2025.1.0 | 12.8 |
+| `nvcc` | 12.8 | — |
+
+ai-rossby's venv torch is **cu128 (12.8)** — an *exact* match to the system Nsight, so `ncu`
+kernel profiling attaches cleanly (see `hpc/install.md` § Step 7). Profile from inside a GPU job
+(via `delta-shell` / `delta-smoke-test`), writing the large output to scratch:
+
+```bash
+cd /work/nvme/bdiu/awikner/physicsnemo && source .venv/bin/activate
+nsys profile   -o $AI_ROSSBY_TEST_DATA/scratch/nsys_%p  python -m <target> ...
+ncu   --set full -o $AI_ROSSBY_TEST_DATA/scratch/ncu_%p python -m <target> ...
+```
+
 ## Data-conversion CPU jobs
 
 CPU-only work (HDF5→Zarr converters, climatology + bias aggregations, normalization-stat

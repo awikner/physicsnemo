@@ -6,14 +6,15 @@ Establish a frictionless development workflow where code is written on a
 personal Mac and executed on any of the six active HPC clusters with a single
 command per day for authentication. Covers: SSH config, environment bootstrap,
 environment propagation when packages change, cluster-specific documentation,
-Claude skills, and a minimal smoke-test validation on each cluster.
+Claude skills, Nsight profiling + per-cluster CUDA alignment (sub-phase 9f), and
+a minimal smoke-test validation on each cluster.
 
 **Clusters in scope (Polaris deferred):**
 
 | Cluster | Site | Scheduler | GPU hardware | GPU account | CPU account |
 |---|---|---|---|---|---|
 | Delta | NCSA | SLURM | 4× NVIDIA A40 48 GB | `bdiu-delta-gpu` | `bdiu-delta-cpu` |
-| DeltaAI | NCSA | SLURM | 4× NVIDIA H100 NVL 80 GB | `bdiu-dtai-gh` | — |
+| DeltaAI | NCSA | SLURM | 4× NVIDIA GH200 120 GB (**aarch64**) | `bdiu-dtai-gh` | — |
 | Stampede3 | TACC | SLURM | NVIDIA H100 SXM 80 GB | `tg-atm170020` | `tg-atm170020` |
 | Derecho | NCAR | PBS | 4× NVIDIA A100 40 GB | `UCHI0018` | `UCHI0014` |
 | Midway3 | UChicago RCC | SLURM | NVIDIA V100/A100 | `pi-pedramh` | `pi-pedramh` |
@@ -222,7 +223,10 @@ path is also TBD until first login.
 
 ### 9b-1 — NCSA DeltaAI
 
-**Hardware:** H100 NVL GPU nodes (80 GB, NVLink-connected pairs).
+**Hardware:** GH200 Grace-Hopper nodes (**aarch64**, 120 GB, 4 GPUs/node, `gh[001-152]`).
+**✅ Done 2026-07-01** — fully set up and verified; see `hpc/deltaai.md` (pangu_plasim smoke
+passed on a GH200). Partitions `ghx4-interactive` (2 h) / `ghx4` (2-day); `nccl-ofi-plugin/
+1.18.0-cuda129` for multi-GPU.
 
 **Expected system stack:** identical NCSA module environment to Delta. Verify:
 
@@ -231,24 +235,32 @@ module list | grep -i cuda       # expect cudatoolkit/25.x_12.x
 module list | grep -i nccl
 ```
 
-**Install:** same Option B as Delta (uv + `cu12` extra, Python 3.12). If the
-Delta and DeltaAI `/work` filesystems are **separate**, clone fresh and run
-`uv sync`. If they are **shared**, skip the clone step and just create
-`.venv-deltaai`:
+**Install — Option A (reuse the site's torch for an exact Nsight-12.9 match, per
+9f).** DeltaAI's `python/miniforge3_pytorch/2.10.0` module already provides
+torch 2.10+cu129, matching the system Nsight (12.9); reuse it rather than pulling
+a fresh cu-wheel. Use a **separate** `.venv-deltaai` even if `/work/nvme` is
+shared with Delta (different GPU / CUDA build):
 
 ```bash
-cd /work/nvme/bdiu/awikner/physicsnemo
+module load python/miniforge3_pytorch/2.10.0
+cd /work/nvme/bdiu/awikner/physicsnemo            # shared clone with Delta? verify /work/nvme first
 unset VIRTUAL_ENV
-uv venv --name .venv-deltaai      # or: uv sync with VIRTUAL_ENV unset
-uv sync --extra cu12 --group dev --python 3.12
+uv venv --system-site-packages --python "$(which python)" .venv-deltaai   # inherit the module's torch
 source .venv-deltaai/bin/activate
+python -c "import torch; print(torch.__version__, torch.version.cuda)"     # expect 2.10.x / 12.9
+uv pip install -e . && uv pip install --group dev                          # physicsnemo + dev on top
 ```
 
+If the module's torch turns out to be < 2.10, fall back to Option B with the new
+`--extra cu129` (still a 12.9 match) instead of `cu12`.
+
 **TBD on first login:**
+- Confirm the module's torch is 2.10+cu129 (`python -c "import torch; ..."`)
 - Exact interactive GPU partition name (likely `gpuH100x4-interactive` but verify
   with `sinfo | grep -i h100`)
 - Whether non-interactive partition is `gpuH100x4` (2-day walltime)
 - Whether `aws-ofi-nccl` module exists for multi-GPU NCCL optimization
+- Nsight versions: `module load python/miniforge3_pytorch/2.10.0; nsys --version; ncu --version`
 
 **Files:**
 - `hpc/deltaai.md` — cluster facts, install notes, partition names, templates
@@ -583,6 +595,66 @@ the Mac-side setup. Covers:
 
 ---
 
+## Sub-phase 9f — Nsight profiling + per-cluster CUDA alignment
+
+Performance work uses NVIDIA **Nsight Systems** (`nsys`) and **Nsight Compute**
+(`ncu`), which ship with each cluster's CUDA toolkit / NVHPC SDK (not the venv).
+The ai-rossby env on each cluster must build torch against a CUDA version the
+**system Nsight can profile**. Nsight is backward-compatible: `ncu` version *N*
+profiles an app built with CUDA ≤ *N*, and **refuses** an app built with a newer
+CUDA. So the rule is: **ai-rossby torch CUDA ≤ system Nsight CUDA**, and *exact
+match* is preferred (ideal for `ncu` kernel profiling).
+
+These combinations were derived from the existing PanguWeather envs (already
+validated against each site's Nsight) and confirmed live on the three warm
+clusters (Delta / Stampede3 / Derecho) on first inspection:
+
+| Cluster | System CUDA / Nsight — module to load for `nsys`/`ncu` | `nsys` / `ncu` | ai-rossby torch | Install path |
+|---|---|---|---|---|
+| Delta | **12.8** — NVHPC SDK 25.3 (default PATH), or `cuda/12.8` | 2025.1.1 / 2025.1.0 | **cu128** (`--extra cu12`) | Option B (already installed — cu128 exact-matches Delta's 12.8 Nsight) |
+| DeltaAI ✅ | **12.9** — `python/miniforge3_pytorch/2.10.0` (aarch64/GH200) | 2025.3.1 / 2025.2.0 | **cu129** (torch 2.10+cu129) | **Option A** verified — reuse the module's torch |
+| Stampede3 | **12.8** — `nvidia/25.3` (NVHPC) or `cuda/12.8` | 2025.1 (NVHPC) | **cu128** (`--extra cu12`) | Option B |
+| Derecho | **12.9** — `cuda/12.9.0` | 2025.1.3 / 2025.2.0 | **cu129** (`--extra cu129`) | Option B (module torch is 2.8 < 2.10, can't reuse) |
+| Midway3 | ~12.9 — `python/miniforge-25.3.0` (env `…_cu129`) | verify live | **cu129** | Option A if the module's torch ≥ 2.10, else `--extra cu129` |
+| DSI | TBD — `nvidia-smi` / `nvcc` on a GPU node | verify live | TBD (likely cu128 or cu129) | Option B |
+
+Reference PanguWeather envs (torch versions that fixed the system-Nsight match):
+Delta `…_cu126` torch 2.6.0+cu126 (module `pytorch-conda/2.8`); Derecho
+`…_syscuda` torch 2.8.0+cu129 (module `conda` + `cuda/12.9.0`); DeltaAI
+`…_cu129` (module `python/miniforge3_pytorch/2.10.0`, torch 2.10); Midway3
+`py311_pip_sfno_cu129` (module `python/miniforge-25.3.0`); Stampede3
+`aires_panguplasim` (module `python/3.9.18`, no torch — Python 3.9 is below
+physicsnemo's ≥ 3.11 floor, so ai-rossby uses its own uv Python 3.12 + cu128).
+
+**Key correction vs. the raw PanguWeather CUDA labels:** the ai-rossby CUDA is
+chosen to match each cluster's **system Nsight**, not the incidental CUDA its
+PanguWeather env happened to ship. Delta's PanguWeather env is cu126 (pinned by
+`pytorch-conda/2.8`), but Delta's *system* Nsight is 12.8 — so ai-rossby stays on
+cu128 there (exact match), and no cu126 build is needed anywhere. Only cu129 is a
+new requirement, added to `pyproject.toml` as a `cu129` extra + `pytorch-cu129`
+index mirroring `cu12` (torch/torchvision 2.10+cu129 wheels confirmed to exist;
+RAPIDS deps are CUDA-12-generic and shared with `cu12`).
+
+### Work items
+
+1. **`pyproject.toml`** — add the `cu129` extra + `pytorch-cu129` index (done;
+   mirrors `cu12`, mutually exclusive with `cu12`/`cu13`). **Validate resolution
+   with `uv sync --extra cu129` on first Option-B use (Derecho)** — this is the
+   first time the extra is exercised; commit the resulting `uv.lock` update.
+2. **`hpc/install.md`** — Step 7 (Nsight profiling) + the "match CUDA to system
+   Nsight" note in Step 4 (done).
+3. **Each `hpc/<cluster>.md`** — a **Profiling** section: the module that puts
+   `nsys`/`ncu` on PATH, the verified versions, and an example `nsys profile` /
+   `ncu` invocation of the venv. The CUDA extra / Option A|B recorded per the
+   table above.
+4. **`sync-all-clusters.sh`** — per-cluster `SYNC_CMD`: `cu12` for Delta/
+   Stampede3, `cu129` for Derecho, Option-A reinstall for DeltaAI (and Midway3 if
+   its module torch ≥ 2.10), TBD for DSI.
+5. **Profiling skill** — deferred; documentation-only for now (revisit once the
+   `nsys`/`ncu` invocation is routine on ≥ 2 clusters).
+
+---
+
 ## File manifest
 
 ### New files committed to repo
@@ -610,6 +682,14 @@ the Mac-side setup. Covers:
 | `.claude/skills/midway3-cpu-job/SKILL.md` | Midway3 CPU job skill |
 | `.claude/skills/dsi-smoke-test/SKILL.md` | DSI GPU smoke skill |
 | `.claude/skills/dsi-shell/SKILL.md` | DSI interactive shell skill |
+
+### Modified files (existing repo files touched by Phase 9)
+
+| Path | Change |
+|---|---|
+| `pyproject.toml` | Add `cu129` extra + `pytorch-cu129` index for Nsight-12.9 clusters (sub-phase 9f) |
+| `hpc/install.md` | Step 7 (Nsight profiling) + "match CUDA to system Nsight" note in Step 4 |
+| `hpc/delta.md` | Add a **Profiling** section (system Nsight 2025.1 / CUDA 12.8) |
 
 ### Not in repo (Mac-local)
 
