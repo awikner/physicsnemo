@@ -79,20 +79,25 @@ for cluster in $targets; do
     if ! ssh -O check "$cluster" &>/dev/null; then
         echo "  → SKIP (no live connection — run: morning-login $cluster)"; rc=1; continue
     fi
-    if ssh "$cluster" bash -lc "
-        set -euo pipefail
-        export PATH=\$HOME/.local/bin:\$PATH   # ensure uv is found (not all ~/.bashrc add it)
-        cd $REPO
-        git fetch origin
-        git checkout $BRANCH
-        git pull --ff-only origin $BRANCH
-        unset VIRTUAL_ENV
-        export UV_PROJECT_ENVIRONMENT=$VENV
-        ${CACHE:+export UV_CACHE_DIR=$CACHE}
-        $EXTRA_ENV
-        $SYNC
-        echo 'uv sync: OK'
-    "; then
+    # Build the remote script with the local per-cluster values baked in; \$HOME
+    # etc. stay literal for remote expansion.
+    remote_script="set -euo pipefail
+export PATH=\$HOME/.local/bin:\$PATH
+cd $REPO
+git fetch origin
+git checkout $BRANCH
+git pull --ff-only origin $BRANCH
+unset VIRTUAL_ENV
+export UV_PROJECT_ENVIRONMENT=$VENV
+${CACHE:+export UV_CACHE_DIR=$CACHE}
+$EXTRA_ENV
+$SYNC
+echo 'uv sync: OK'"
+    # Feed it to a remote LOGIN bash via stdin. (Running `bash -lc "<multiline>"`
+    # over ssh mis-parses: ssh re-joins argv, and the newline after -lc leaves -c
+    # without an argument — a harmless but noisy `bash: -c` error — while the body
+    # runs in the outer shell anyway. Piping to `bash -l` avoids both.)
+    if ssh "$cluster" bash -l <<<"$remote_script"; then
         echo "  → OK"
     else
         echo "  → FAILED (see above; if it's a dirty tree: git checkout -- pyproject.toml uv.lock)"; rc=1
