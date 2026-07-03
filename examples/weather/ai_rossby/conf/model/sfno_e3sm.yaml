@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim model config — E3SM SFNO benchmark
+# (converted from PanguWeather-e3sm v2.0 E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml
+# SFNO block; jsw_256 = embed_dim 256).
+#
+# Reference: /work/nvme/bdiu/awikner/PanguWeather-e3sm/v2.0/config/
+#            E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml
+
+name: SfnoPlasim
+module: physicsnemo.experimental.models.sfno_plasim
+
+# Variable groups — must match the ai-rossby E3SM Zarr store's attrs
+# (tools/data/e3sm/pangu_h5_to_zarr.py PANGU_E3SM_CHANNELS). Land variables
+# (SOILWATER_10CM, TSOI_10CM) are NOT written by the per-year converter (soil
+# vars only appear in the climatology store) so they're absent here — the
+# reference config's land_variables have no analogue in this Zarr schema.
+surface_variables: [TREFHT, U10, PSL]
+upper_air_variables: [T, U, V, RELHUM, Z3]
+constant_boundary_variables: [TOPO, PCT_GLACIER, PCT_NATVEG, PFTDATA_MASK]
+varying_boundary_variables: [SST, ICE, sol_in]
+diagnostic_variables: [PRECT]
+
+# E3SM hybrid-pressure levels (hPa) — full 18-level source coverage per the
+# ai-rossby archive convention (tools/data/e3sm/pangu_h5_to_zarr.py).
+levels: [4.714998332947841, 10.655023096474308, 19.235455601758737,
+  28.79458853709195, 50.11779996521295, 69.59908688413749, 96.46377266572703,
+  145.04282239200347, 200.99889546355382, 256.72368590525895,
+  302.21364012188303, 385.999023919911, 492.46857402252755,
+  608.6437744215842, 713.7046383204334, 849.6612491105952,
+  925.5197481473349, 998.4964394917621]
+horizontal_resolution: [180, 360]
+
+# SFNO-specific kwargs — track E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml's SFNO block
+# exactly (identical to sfno_plasim_5412.yaml's block; E3SM reference uses the
+# same architecture, just a different data source).
+spectral_transform: sht
+filter_type: linear
+operator_type: dhconv
+scale_factor: 1
+embed_dim: 256
+num_layers: 12
+use_mlp: True
+mlp_ratio: 2.0
+activation_function: gelu
+encoder_layers: 1
+pos_embed: True
+drop_rate: 0.0
+drop_path_rate: 0.0
+num_blocks: 16
+sparsity_threshold: 0.0
+normalization_layer: instance_norm
+hard_thresholding_fraction: 1.0
+use_complex_kernels: True
+big_skip: True
+rank: 1.0
+factorization: null
+separable: False
+complex_network: True
+complex_activation: real
+spectral_layers: 3
+checkpointing: 0
+data_grid: equiangular
