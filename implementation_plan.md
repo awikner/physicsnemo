@@ -1205,12 +1205,17 @@ Resolved (was §6 in earlier drafts):
    (symlinked at `test/_data`, gitignored). Full recipe: `hpc/delta.md`,
    portable template: `hpc/install.md`.
 2. **SFNO scope** — *in scope* (Phase 7), faithful + native variants, same unit + smoke contract as Pangu_Plasim.
+3. **Per-cluster HPC docs** — done (Phase 9). Five clusters mirror `hpc/delta.md`, each with a passing
+   `smoke and cuda` test: `hpc/deltaai.md` (GH200 aarch64, Option A cu129), `hpc/stampede3.md`
+   (H100, cu128), `hpc/derecho.md` (A100, **PBS**, cu129), `hpc/midway3.md` (H100/A100, **SLURM**, cu129),
+   `hpc/dsi.md` (H100, cu129). Env propagation via `hpc/scripts/sync-all-clusters.sh`; per-cluster CUDA
+   matched to each site's system Nsight (`phase9_implementation_plan.md` § 9f); Mac-side SSH/ControlMaster
+   in `hpc/mac-setup.md`. **Casper** intentionally out of scope — it's NCAR's viz/analysis cluster, not
+   part of the training/smoke workflow (Derecho already covers NCAR/GLADE).
 
 Remaining:
 - **Phase 5 fidelity-gate job script** — non-interactive `gpuA40x4` submission script + tolerance choices.
   Drafted when the translator lands.
-- **Per-cluster docs as we extend beyond Delta** — Derecho/Casper (PBS), Midway (SLURM) need their own
-  `hpc/<cluster>.md` mirroring `hpc/delta.md`.
 - **SFNO + Pangu_Plasim performance optimizations beyond CUDA-lever parity** — the Phase 7 benchmark
   closed a 17% throughput gap to PanguWeather via TF32 + cudnn.benchmark + DDP bucket-view + fused
   AdamW (commit `094e72b2`). To go *beyond* parity, follow-up candidates (none in scope yet):
