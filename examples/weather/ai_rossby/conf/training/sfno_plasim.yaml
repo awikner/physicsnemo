@@ -10,6 +10,12 @@ amp: none
 grad_clip_norm: 0.0
 max_epochs: 50
 
+# DDP / compile tuning (opt-in; defaults preserve prior behavior). See
+# train.py's DDP-wrap comment for the makani / PanguWeather-e3sm provenance.
+ddp_bucket_cap_mb: null               # null = PyTorch's 25MB default bucket size
+ddp_static_graph: False               # safe to enable here (checkpointing branches on a fixed hyperparameter, not data-dependent control flow)
+jit_compile: False                    # wraps the DDP model with torch.compile(); unvalidated for the vendored SHT/complex-number ops
+
 optimizer:
   type: AdamW
   lr: 1.0e-4

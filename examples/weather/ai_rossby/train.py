@@ -537,6 +537,20 @@ def main(cfg: DictConfig) -> None:
     # --- Model + DDP ------------------------------------------------------
     model = build_model(cfg.model).to(dist.device)
     if dist.world_size > 1:
+        # bucket_cap_mb / static_graph are opt-in (None/False preserves the
+        # prior PyTorch-default behavior). Motivated by profiling that showed
+        # NCCL AllReduce at ~18.5% of GPU time across many small (25MB
+        # default) buckets — both NVIDIA's makani (SFNO/FourCastNet training
+        # library; defaults to ONE bucket sized to the whole local parameter
+        # set) and the PanguWeather-e3sm reference trainer (bucket_cap_mb=250,
+        # find_unused_parameters=False) consolidate buckets to cut per-call
+        # NCCL overhead. static_graph=True is safe here because checkpointing
+        # branches on a fixed hyperparameter (same set of params gets
+        # gradients every iteration), not on data-dependent control flow.
+        bucket_cap_mb = cfg_train.get("ddp_bucket_cap_mb", None)
+        ddp_kwargs = {}
+        if bucket_cap_mb is not None:
+            ddp_kwargs["bucket_cap_mb"] = int(bucket_cap_mb)
         model = DistributedDataParallel(
             model,
             device_ids=[dist.local_rank] if dist.device.type == "cuda" else None,
@@ -544,8 +558,17 @@ def main(cfg: DictConfig) -> None:
             broadcast_buffers=dist.broadcast_buffers,
             find_unused_parameters=dist.find_unused_parameters,
             gradient_as_bucket_view=True,
+            static_graph=bool(cfg_train.get("ddp_static_graph", False)),
+            **ddp_kwargs,
         )
     inner_model = model.module if hasattr(model, "module") else model
+
+    # Optional torch.compile — NVIDIA's makani applies this unconditionally
+    # (`self.model = torch.compile(self.model)`) to its SFNO/FourCastNet
+    # models; opt-in here since the vendored SHT/complex-number ops may not
+    # compile cleanly and this hasn't been validated for correctness yet.
+    if bool(cfg_train.get("jit_compile", False)):
+        model = torch.compile(model)
 
     # --- Loss + optim ------------------------------------------------------
     loss_fn = build_loss(cfg).to(dist.device)
