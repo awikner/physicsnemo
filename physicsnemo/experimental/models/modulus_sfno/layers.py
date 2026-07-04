@@ -64,6 +64,11 @@ class DropPath(nn.Module):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
 
+    # Stochastic-depth RNG (torch.rand) is a torch.compile graph-break source;
+    # disable to keep the compiled graph clean (mirrors makani's DropPath.forward
+    # handling). No-op unless torch.compile is active, and a further no-op when
+    # drop_prob == 0.0 (the SFNO-E3SM config), where drop_path returns x directly.
+    @torch.compiler.disable(recursive=True)
     def forward(self, x):  # pragma: no cover
         return drop_path(x, self.drop_prob, self.training)
 

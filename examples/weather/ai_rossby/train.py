@@ -565,10 +565,15 @@ def main(cfg: DictConfig) -> None:
 
     # Optional torch.compile — NVIDIA's makani applies this unconditionally
     # (`self.model = torch.compile(self.model)`) to its SFNO/FourCastNet
-    # models; opt-in here since the vendored SHT/complex-number ops may not
-    # compile cleanly and this hasn't been validated for correctness yet.
+    # models. The SHT + complex-contraction island is carved out of the graph
+    # via `@torch.compiler.disable` on SpectralFilterLayer.forward (torch-
+    # inductor can't codegen the complex ops), so compile fuses the real-valued
+    # encoder/decoder/norm/MLP/skip compute — the ~60% of per-step cost that is
+    # GEMM/conv/pointwise. dynamic=False because our shapes are static (fixed
+    # grid + fixed local batch), avoiding recompiles on the shape-dependent
+    # scatter guards. Opt-in; validate loss stays within noise before adopting.
     if bool(cfg_train.get("jit_compile", False)):
-        model = torch.compile(model)
+        model = torch.compile(model, dynamic=False)
 
     # --- Loss + optim ------------------------------------------------------
     loss_fn = build_loss(cfg).to(dist.device)

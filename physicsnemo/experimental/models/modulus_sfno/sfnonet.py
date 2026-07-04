@@ -119,6 +119,15 @@ class SpectralFilterLayer(nn.Module):
         else:
             raise (NotImplementedError)
 
+    # Carve the entire SHT + complex-contraction island out of any torch.compile
+    # graph. torch-inductor cannot codegen the complex operators here (the
+    # spectral contractions in contractions.py are @torch.jit.script and use
+    # view_as_real/view_as_complex), so compiling through them warns and falls
+    # back to eager anyway. Disabling here lets inductor compile the surrounding
+    # real-valued encoder/decoder/norm/MLP/skip compute cleanly. This mirrors
+    # NVIDIA makani's strategy of keeping the spherical-harmonic transform out of
+    # the compiled region. No-op unless torch.compile is active.
+    @torch.compiler.disable(recursive=True)
     def forward(self, x):
         return self.filter(x)
 

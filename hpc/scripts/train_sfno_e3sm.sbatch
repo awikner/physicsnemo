@@ -4,30 +4,44 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Optimized SFNO-E3SM training config — the winner of a training-speed
-# optimization pass (see implementation_plan.md / the SFNO-E3SM optimization
-# plan) targeting global batch 16 on a single Delta gpuA100x4-interactive
-# node (4x A100 40GB).
+# optimization pass targeting global batch 16 on a single Delta
+# gpuA100x4-interactive node (4x A100 40GB).
 #
 # Winning config vs. the naive fp32 baseline (1.067 s/step, 15.0 samples/sec):
-#   bf16 AMP + model.checkpointing=3 + fused AdamW  ->  0.991 s/step,
-#   16.15 samples/sec (~1.08x speedup).
+#   bf16 AMP + PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#   + model.checkpointing=2 + fused AdamW  ->  0.766 s/step, 20.9 samples/sec
+#   (~1.39x vs fp32 baseline; ~1.29x vs the earlier bf16+checkpointing=3 best).
 #
-# Key finding: model.checkpointing=3 (activation checkpointing) is NOT
-# optional here — at E3SM's 180x360 grid (~8x more grid points than the
-# PLASIM_5412 benchmark this architecture was designed for), batch_size=4/GPU
-# (global batch 16) OOMs on a 40GB A100 with checkpointing<3, in BOTH fp32
-# and bf16. Do not remove it without re-verifying memory headroom.
+# Key finding (makani-derived): activation checkpointing is the dominant speed
+# tax here — at E3SM's 180x360 grid (~8x more grid points than the PLASIM_5412
+# benchmark this architecture was designed for), global batch 16 needs
+# checkpointing to fit a 40GB A100. NVIDIA makani's documented allocator fix
+# `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reclaims ~490 MB of
+# reserved-but-unallocated fragmentation, which is exactly enough to drop from
+# checkpointing=3 (recompute the WHOLE block in backward) to checkpointing=2
+# (recompute only the MLP) — a 29% step-time win at identical numerics.
+# checkpointing<2 (0 or 1) still OOMs even with expandable_segments; do not
+# lower it without re-verifying memory headroom.
 #
 # Other levers tried and NOT adopted:
 #   - CUDA graphs (training.use_static_capture=True): physicsnemo detects
 #     SfnoPlasim doesn't support graph capture and auto-disables it (no-op).
-#   - NVMe data staging (copy the year-zarr to node-local /tmp before
-#     training): a naive `cp -r` of the chunked Zarr store (thousands of
-#     small chunk files) didn't finish copying within a 25-minute test
-#     budget. Moot anyway — nsys profiling (Phase 2) showed no dataloader
-#     I/O-stall evidence; this model is compute-bound, not I/O-bound.
-#   - torch.compile / FSDP: not implemented in train.py; would need code
-#     changes, out of scope for this pass.
+#   - NVMe data staging: a naive `cp -r` of the chunked Zarr store (thousands
+#     of small chunk files) didn't finish within a 25-min budget; moot anyway
+#     since nsys profiling showed this model is compute-bound, not I/O-bound.
+#   - DDP bucket_cap_mb / static_graph tuning (makani + PanguWeather-e3sm
+#     inspired): within measurement noise at this 303.9M-param / batch-16 scale.
+#   - torch.compile (training.jit_compile=True): the SHT/complex island is now
+#     carved out of the graph via @torch.compiler.disable (makani's strategy),
+#     so it compiles cleanly with loss identical to eager — but the steady-state
+#     gain is only ~1.3% here (within noise) and it adds ~90 s compile warmup
+#     per job, so it's left OFF by default. The infra is kept as an opt-in flag.
+#   - channels_last: would need hot-loop tensor-format changes with SHT stride
+#     risk; low expected upside given the SHT dominates the spectral path. Future.
+#   - Spatial/channel model parallelism (makani's torch_harmonics.distributed):
+#     per-rank activation memory is invariant to the data-vs-spatial split at
+#     fixed global-batch/GPU-count, and it adds per-SHT all-to-all comm — no
+#     win on a single node; an enabler for multi-node / larger-grid scale-out.
 #
 # Submit with:
 #   sbatch hpc/scripts/train_sfno_e3sm.sbatch
@@ -47,6 +61,11 @@ set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
 source .venv/bin/activate
+
+# makani's documented allocator fix — reclaims reserved-but-unallocated
+# fragmentation so global batch 16 fits at checkpointing=2 (see header). MUST
+# be exported before CUDA initializes, i.e. before torchrun launches python.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Per-batch loss/timing output dir on HDD scratch.
 OUT_DIR=/work/hdd/bdiu/awikner/sfno_bench
@@ -87,7 +106,7 @@ torchrun \
         training.grad_clip_norm=0.0 \
         training.ema.enabled=False \
         training.amp=bf16 \
-        model.checkpointing=3 \
+        model.checkpointing=2 \
         training.optimizer.fused=True \
         dataset.zarr_path=${ZARR_PATH} \
         dataset.val_zarr_path=${VAL_ZARR_PATH} \
