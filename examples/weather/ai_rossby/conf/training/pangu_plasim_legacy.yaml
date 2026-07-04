@@ -8,15 +8,24 @@
 #   no AMP, no grad clip, EMA on with 6-epoch warmup.
 
 use_static_capture: False             # opt-in StaticCaptureTraining + CUDA graphs (PhysicsNeMo decorator)
-amp: none                       # none/off | bf16 | fp16
+# bf16 AMP: measured 1.19x step-time speedup on A100 vs fp32 at PLASIM 64x128
+# (loss within noise). Pangu's Swin attention is GEMM-heavy, so tensor-core
+# bf16 helps far more than it did for the SHT-bound SFNO. See
+# hpc/scripts/bench_pangu_plasim.sbatch for the full A/B.
+amp: bf16                       # none/off | bf16 | fp16
 grad_clip_norm: 0.0             # 0 disables gradient clipping
 max_epochs: 100                 # sum of stage num_epochs; redundant guard
+# torch.compile (jit_compile=True) is unusable on Delta: torch-inductor's C++
+# codegen fails at link (`ld: undefined reference to 'main'`, gcc-toolset-13);
+# and it was only ~1.3% for SFNO anyway. Left off; field present so a future
+# `+`-free override doesn't hit Hydra struct mode.
+jit_compile: False
 
 optimizer:
   type: AdamW
   lr: 1.0e-4
   weight_decay: 3.0e-6
-  fused: null                   # null → torch.cuda.is_available()
+  fused: True                   # measured ~1.6% on top of bf16 (fused AdamW kernel)
 
 ema:
   enabled: True

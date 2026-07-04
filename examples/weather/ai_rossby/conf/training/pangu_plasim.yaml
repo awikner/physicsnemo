@@ -5,15 +5,25 @@
 # PanguPlasim (VAE) single-stage training config — LinearWarmupCosineAnnealingLR.
 
 use_static_capture: False             # opt-in StaticCaptureTraining + CUDA graphs (PhysicsNeMo decorator)
-amp: none
+# bf16 AMP: measured 1.22x step-time speedup vs fp32 (1-GPU, PLASIM 64x128,
+# loss within noise) — matches the Legacy model's 1.21x. Pangu's GEMM-heavy
+# Swin attention maps well onto A100 tensor cores. See
+# hpc/scripts/bench_pangu_plasim.sbatch. NOTE: the VAE variant currently needs
+# find_unused_parameters=True to train under multi-GPU DDP (dual-encoder / VAE
+# heads leave some params ungradiented) — a pre-existing gap, orthogonal to AMP.
+amp: bf16
 grad_clip_norm: 0.0
 max_epochs: 100
+# torch.compile (jit_compile=True) is unusable on Delta: torch-inductor's C++
+# codegen fails at link (gcc-toolset-13); left off. Field present so a future
+# override doesn't hit Hydra struct mode.
+jit_compile: False
 
 optimizer:
   type: AdamW
   lr: 1.0e-4
   weight_decay: 3.0e-6
-  fused: null
+  fused: True                   # fused AdamW kernel (~1.6% on top of bf16)
 
 ema:
   enabled: True
