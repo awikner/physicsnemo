@@ -17,7 +17,7 @@
 #
 # Overrides (Hydra-style — appended verbatim to the train.py command):
 #
-#     OVERRIDES='data.batch_size=8 max_epochs=2' \
+#     OVERRIDES='dataset.batch_size=8 training.max_epochs=2' \
 #         sbatch hpc/scripts/ai_rossby_shake_out.sbatch
 #
 # Required env (set in your shell before sbatch, or hard-coded below):
@@ -68,8 +68,8 @@ cd examples/weather/ai_rossby
 
 # torchrun on the local node — `--standalone` skips the rendezvous server.
 torchrun --standalone --nproc-per-node=4 train.py \
-    data.zarr_path="$ZARR_PATH" \
-    data.mean_path="$MEAN_PATH" \
-    data.std_path="$STD_PATH" \
+    dataset.zarr_path="$ZARR_PATH" \
+    dataset.mean_path="$MEAN_PATH" \
+    dataset.std_path="$STD_PATH" \
     run_name="pp-legacy-shakeout-$SLURM_JOB_ID" \
     $OVERRIDES
