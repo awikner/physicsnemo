@@ -33,6 +33,7 @@ Launch multi-GPU with torchrun (Delta convention):
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from pathlib import Path
 
@@ -572,6 +573,30 @@ def main(cfg: DictConfig) -> None:
         ddp_kwargs = {}
         if bucket_cap_mb is not None:
             ddp_kwargs["bucket_cap_mb"] = int(bucket_cap_mb)
+
+        # torch>=2.11 DDP workaround. DistributedDataParallel.__init__ runs
+        # torch.distributed._verify_params_across_processes(), which raises
+        # "value cannot be converted to type int without overflow" on the SFNO
+        # parameter set under torch 2.11 — a bug in torch's C++ metadata build,
+        # NOT a real cross-rank shape mismatch (every rank holds identical
+        # shapes; the model has 151 real fp32 params, none oversized). torch
+        # gates that verification — and the rank-0 weight broadcast that
+        # follows it (_sync_module_states) — behind the DDP `init_sync` flag.
+        # When the running torch exposes `init_sync`, pass it False to skip the
+        # buggy check. Because that ALSO skips DDP's built-in weight sync, and
+        # train.py seeds the model per-rank (seed + dist.rank) so ranks start
+        # from DIFFERENT weights, we replicate rank-0's params + buffers to all
+        # ranks ourselves first — preserving DDP's identical-initial-state
+        # contract. Older torch (no `init_sync` kwarg, and no overflow bug)
+        # falls through to the standard verified path unchanged.
+        if "init_sync" in inspect.signature(
+            DistributedDataParallel.__init__
+        ).parameters:
+            with torch.no_grad():
+                for tensor in list(model.parameters()) + list(model.buffers()):
+                    torch.distributed.broadcast(tensor.data, src=0)
+            ddp_kwargs["init_sync"] = False
+
         model = DistributedDataParallel(
             model,
             device_ids=[dist.local_rank] if dist.device.type == "cuda" else None,
