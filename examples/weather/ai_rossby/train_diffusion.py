@@ -402,8 +402,12 @@ def main(cfg: DictConfig) -> None:
     logger = PythonLogger("amip_diffusion_train")
 
     if dist.rank == 0:
-        _maybe_init_wandb(cfg, dist=dist)
-        LaunchLogger.initialize(use_wandb=bool(cfg.wandb.enabled))
+        # Create the wandb run first, then bind it to LaunchLogger so all
+        # training + validation log_epoch / log_minibatch dicts route to
+        # wandb. _maybe_init_wandb returns False (and LaunchLogger stays
+        # console-only) if wandb is disabled or the package is missing.
+        wandb_active = _maybe_init_wandb(cfg, dist=dist)
+        LaunchLogger.initialize(use_wandb=wandb_active)
 
     torch.manual_seed(int(cfg.seed) + dist.rank)
 

@@ -1,0 +1,8 @@
+# Extra runtime dependencies for the ai-rossby recipe, on top of a
+# PhysicsNeMo install. Install with:  pip install -r requirements.txt
+#
+# wandb is the recipe's default logging backend (see conf/config.yaml). It is
+# used in `offline` mode by default (no login / network required); training
+# and validation metrics are routed to it via LaunchLogger. Set
+# wandb.enabled=False to opt out.
+wandb>=0.16

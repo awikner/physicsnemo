@@ -85,17 +85,35 @@ def _resolve_path(p: str | None) -> str | None:
     return to_absolute_path(p) if p else None
 
 
-def _maybe_init_wandb(cfg: DictConfig, *, dist) -> None:
-    """Initialize wandb if ``cfg.wandb.enabled`` and rank == 0.
+def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
+    """Create the wandb run when ``cfg.wandb.enabled`` and rank == 0.
 
-    No-op otherwise. LaunchLogger detects wandb at construction time and
-    routes ``log_minibatch`` / ``log_epoch`` dicts through it under the
-    section name (``train`` / ``valid``).
+    Returns ``True`` when a wandb run was created on this rank so the
+    caller can enable the wandb backend on :class:`LaunchLogger`
+    (``LaunchLogger.initialize(use_wandb=...)``). Returns ``False`` when
+    wandb is disabled, this is not the root rank, or the ``wandb`` package
+    is not importable.
+
+    IMPORTANT: this must run **before** ``LaunchLogger.initialize`` — the
+    logger binds the wandb backend at initialize time and only when a run
+    already exists. Once bound, ``LaunchLogger`` routes every
+    ``log_minibatch`` / ``log_epoch`` dict — training (``train/``) **and**
+    validation (``valid/``) — to the run automatically.
+
+    Only rank 0 creates a run (wandb is single-process); other ranks return
+    ``False`` so their ``LaunchLogger`` stays console-only.
     """
     wb = cfg.get("wandb", None)
     if wb is None or not bool(wb.get("enabled", False)) or dist.rank != 0:
-        return
-    from physicsnemo.utils.logging.wandb import initialize_wandb
+        return False
+    try:
+        from physicsnemo.utils.logging.wandb import initialize_wandb
+    except ImportError:
+        PythonLogger("pangu_plasim_train").warning(
+            "wandb.enabled=True but the `wandb` package is not importable; "
+            "continuing with console logging only."
+        )
+        return False
 
     initialize_wandb(
         project=str(wb.get("project", "ai-rossby")),
@@ -104,6 +122,7 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> None:
         mode=str(wb.get("mode", "offline")),
         config=OmegaConf.to_container(cfg, resolve=True),
     )
+    return True
 
 
 def _build_captured_train_step(
@@ -465,13 +484,15 @@ def main(cfg: DictConfig) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(cfg.seed) + dist.rank)
 
-    LaunchLogger.initialize()
-
-    # --- Wandb (optional) -------------------------------------------------
-    # When cfg.wandb is present and enabled, hook wandb up to LaunchLogger
-    # so all log_minibatch / log_epoch dicts (training AND validation) flow
-    # to the run automatically. Rank-0 only.
-    _maybe_init_wandb(cfg, dist=dist)
+    # --- Wandb + logger backend -------------------------------------------
+    # Create the wandb run (rank 0) FIRST, then hand the result to
+    # LaunchLogger.initialize so it binds the wandb backend. With the
+    # backend on, every LaunchLogger log_minibatch / log_epoch dict —
+    # training ('train/') AND validation ('valid/') — is routed to wandb
+    # automatically. Ordering matters: LaunchLogger only binds wandb when a
+    # run already exists, so this must precede initialize().
+    wandb_active = _maybe_init_wandb(cfg, dist=dist)
+    LaunchLogger.initialize(use_wandb=wandb_active)
 
     # --- Data -------------------------------------------------------------
     datapipe = build_datapipe(

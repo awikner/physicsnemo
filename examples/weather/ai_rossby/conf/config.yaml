@@ -45,14 +45,19 @@ checkpoint_save_interval: 10
 max_checkpoints_to_keep: 5
 log_every_n_steps: 1
 
-# --- Wandb (optional) ------------------------------------------------------
-# When enabled=True (rank 0 only) initialize_wandb runs and LaunchLogger
-# routes all log_minibatch / log_epoch dicts through it under 'train/' and
-# 'valid/' namespaces.
+# --- Wandb (default logging backend) ---------------------------------------
+# On by default. On rank 0 initialize_wandb runs and LaunchLogger routes all
+# log_minibatch / log_epoch dicts through wandb under the 'train/' and
+# 'valid/' namespaces (training loss components + validation val_loss / RMSE
+# / ACC). `mode: offline` writes a local ./wandb/ run with no login or network
+# — run `wandb sync ./wandb/<run>` later to upload, or set `mode: online` to
+# stream live (requires `wandb login`). If the `wandb` package is not
+# installed the trainer logs a warning and falls back to console logging.
+# Set enabled=False to disable entirely.
 wandb:
-  enabled: False
+  enabled: True
   project: ai-rossby
-  entity: null
+  entity: null                    # wandb team/username; null = your default entity
   name: ${run_name}
   mode: offline                   # offline | online | disabled
 
