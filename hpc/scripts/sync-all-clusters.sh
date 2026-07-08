@@ -26,7 +26,14 @@ BRANCH="${1:-ai-rossby}"
 ALL_CLUSTERS="delta deltaai stampede3 derecho midway3 dsi"
 targets="${*:-$ALL_CLUSTERS}"
 
-DEFAULT_SYNC="uv sync --extra cu12 --group dev --python 3.12"
+# Optional extras the ai-rossby recipe needs on top of the CUDA extra. Without
+# them `uv sync` prunes their packages and SFNO training breaks:
+#   sfno-extras      — torch-harmonics / tensorly (required by the SFNO models)
+#   utils-extras     — wandb / mlflow (logging backends)
+#   datapipes-extras — zarr / xarray / netCDF4 / dask (PLASIM/ERA5 data I/O)
+RECIPE_EXTRAS="--extra sfno-extras --extra utils-extras --extra datapipes-extras"
+
+DEFAULT_SYNC="uv sync --extra cu12 $RECIPE_EXTRAS --group dev --python 3.12"
 
 # Per-cluster config. Sets REPO / VENV / SYNC / CACHE / EXTRA_ENV for cluster $1.
 #   REPO   — persistent code filesystem (never scratch); \$WORK etc. expand remotely
@@ -41,28 +48,28 @@ cluster_cfg() {
     case "$1" in
       delta)
         REPO="/work/nvme/bdiu/awikner/physicsnemo"
-        SYNC="uv sync --extra cu12 --group dev --python 3.12"          # Nsight 12.8
+        SYNC="uv sync --extra cu12 $RECIPE_EXTRAS --group dev --python 3.12"  # Nsight 12.8
         CACHE="/work/nvme/bdiu/awikner/.uv-cache" ;;
       deltaai)
         REPO="/work/nvme/bdiu/awikner/physicsnemo"; VENV=".venv-deltaai"  # shared /work with Delta
-        SYNC="module load python/miniforge3_pytorch/2.10.0 && source .venv-deltaai/bin/activate && uv pip install -e . && uv pip install --group dev && uv pip uninstall torch torchvision triton"
+        SYNC="module load python/miniforge3_pytorch/2.10.0 && source .venv-deltaai/bin/activate && uv pip install -e \".[sfno-extras,utils-extras,datapipes-extras]\" && uv pip install --group dev && uv pip uninstall torch torchvision triton"
         CACHE="/work/nvme/bdiu/awikner/.uv-cache" ;;
       stampede3)
         REPO="\$WORK/physicsnemo"                                       # $WORK persistent; $SCRATCH is not
-        SYNC="uv sync --extra cu12 --group dev --python 3.12"          # Nsight 12.8
+        SYNC="uv sync --extra cu12 $RECIPE_EXTRAS --group dev --python 3.12"  # Nsight 12.8
         CACHE="\$SCRATCH/.uv-cache"
         EXTRA_ENV="export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1" ;;
       derecho)
         REPO="/glade/work/awikner/physicsnemo"
-        SYNC="uv sync --extra cu129 --group dev --python 3.12"         # Nsight 12.9
+        SYNC="uv sync --extra cu129 $RECIPE_EXTRAS --group dev --python 3.12"  # Nsight 12.9
         CACHE="/glade/derecho/scratch/awikner/.uv-cache" ;;
       midway3)
         REPO="/project/pedramh/awikner/physicsnemo"
-        SYNC="uv sync --extra cu129 --group dev --python 3.12"         # Nsight 12.9
+        SYNC="uv sync --extra cu129 $RECIPE_EXTRAS --group dev --python 3.12"  # Nsight 12.9
         CACHE="/scratch/midway3/awikner/.uv-cache" ;;
       dsi)
         REPO="/net/projects2/laude/awikner/physicsnemo"                # general_group = SLURM account; storage is the laude group
-        SYNC="uv sync --extra cu129 --group dev --python 3.12"         # general partition: driver 595 / nsys 2026.1.3
+        SYNC="uv sync --extra cu129 $RECIPE_EXTRAS --group dev --python 3.12"  # general partition: driver 595 / nsys 2026.1.3
         CACHE="/net/scratch/awikner/.uv-cache" ;;
       *) REPO="" ;;
     esac

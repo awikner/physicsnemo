@@ -86,50 +86,46 @@ def _resolve_path(p: str | None) -> str | None:
 
 
 def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
-    """Create the wandb run when ``cfg.wandb.enabled`` and rank == 0.
+    """Create a wandb run on EVERY rank; return whether THIS rank drives
+    :class:`LaunchLogger`'s wandb backend (rank 0 only).
 
-    Returns ``True`` when a wandb run was created on this rank so the
-    caller can enable the wandb backend on :class:`LaunchLogger`
-    (``LaunchLogger.initialize(use_wandb=...)``). Returns ``False`` when
-    wandb is disabled, this is not the root rank, or the ``wandb`` package
-    is not importable.
+    Why init on every rank (not just rank 0): wandb spins up background
+    threads (service IPC / console capture / GPU-stats monitor) that grab the
+    GIL inside CUDA calls. If only rank 0 runs wandb, that jitter is
+    asymmetric and desyncs DDP's NCCL collectives — the gradient all-reduce
+    deadlocks mid-epoch. Initializing wandb on ALL ranks makes the jitter
+    symmetric so the ranks stay in lockstep. This mirrors the PanguWeather
+    reference trainer, which calls ``init_wandb`` unconditionally on every
+    rank and logs only from rank 0. physicsnemo's :func:`initialize_wandb`
+    already names runs per-rank (``..._Process_<rank>_...``) and assigns a
+    shared DDP group tag, so the extra ranks' runs group cleanly; they stay
+    empty (only rank 0 logs) but their background threads provide the timing
+    symmetry that keeps DDP alive.
+
+    Returns ``True`` only on rank 0 (so ``LaunchLogger`` routes metrics to
+    wandb from rank 0 alone — avoiding duplicate data across ranks), and
+    ``False`` on the other ranks even though they DID create a run. Returns
+    ``False`` everywhere when wandb is disabled or not importable.
 
     IMPORTANT: this must run **before** ``LaunchLogger.initialize`` — the
     logger binds the wandb backend at initialize time and only when a run
-    already exists. Once bound, ``LaunchLogger`` routes every
-    ``log_minibatch`` / ``log_epoch`` dict — training (``train/``) **and**
-    validation (``valid/``) — to the run automatically.
-
-    Only rank 0 creates a run (wandb is single-process); other ranks return
-    ``False`` so their ``LaunchLogger`` stays console-only.
-
-    Auto-disabled under multi-GPU DDP: wandb's background machinery (service
-    IPC / console capture / GPU monitor) grabs the GIL inside CUDA calls on
-    rank 0, which stalls that rank's NCCL progress and deadlocks the DDP
-    gradient all-reduce mid-epoch. So when ``world_size > 1`` we skip wandb
-    (single-GPU runs are unaffected and keep full wandb logging). Set
-    ``wandb.allow_multigpu=True`` to override and experiment.
+    already exists.
     """
     wb = cfg.get("wandb", None)
-    if wb is None or not bool(wb.get("enabled", False)) or dist.rank != 0:
-        return False
-    if dist.world_size > 1 and not bool(wb.get("allow_multigpu", False)):
-        PythonLogger("pangu_plasim_train").warning(
-            "wandb.enabled=True but world_size>1; auto-disabling wandb under "
-            "multi-GPU DDP (it deadlocks NCCL via GIL/CUDA contention on "
-            "rank 0). Console logging stays active; set "
-            "wandb.allow_multigpu=True to override."
-        )
+    if wb is None or not bool(wb.get("enabled", False)):
         return False
     try:
         from physicsnemo.utils.logging.wandb import initialize_wandb
     except ImportError:
-        PythonLogger("pangu_plasim_train").warning(
-            "wandb.enabled=True but the `wandb` package is not importable; "
-            "continuing with console logging only."
-        )
+        if dist.rank == 0:
+            PythonLogger("pangu_plasim_train").warning(
+                "wandb.enabled=True but the `wandb` package is not importable; "
+                "continuing with console logging only."
+            )
         return False
 
+    # Called on ALL ranks (see docstring). initialize_wandb reads the
+    # DistributedManager to name + group the per-rank runs.
     initialize_wandb(
         project=str(wb.get("project", "ai-rossby")),
         entity=str(wb.get("entity", "")) or None,
@@ -137,7 +133,9 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
         mode=str(wb.get("mode", "offline")),
         config=OmegaConf.to_container(cfg, resolve=True),
     )
-    return True
+    # Rank 0 alone routes LaunchLogger metrics to wandb; the other ranks
+    # created a run only for background-thread symmetry (see docstring).
+    return dist.rank == 0
 
 
 def _build_captured_train_step(
