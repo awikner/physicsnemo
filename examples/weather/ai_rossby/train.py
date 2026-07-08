@@ -33,7 +33,6 @@ Launch multi-GPU with torchrun (Delta convention):
 
 from __future__ import annotations
 
-import inspect
 import warnings
 from pathlib import Path
 
@@ -103,9 +102,24 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
 
     Only rank 0 creates a run (wandb is single-process); other ranks return
     ``False`` so their ``LaunchLogger`` stays console-only.
+
+    Auto-disabled under multi-GPU DDP: wandb's background machinery (service
+    IPC / console capture / GPU monitor) grabs the GIL inside CUDA calls on
+    rank 0, which stalls that rank's NCCL progress and deadlocks the DDP
+    gradient all-reduce mid-epoch. So when ``world_size > 1`` we skip wandb
+    (single-GPU runs are unaffected and keep full wandb logging). Set
+    ``wandb.allow_multigpu=True`` to override and experiment.
     """
     wb = cfg.get("wandb", None)
     if wb is None or not bool(wb.get("enabled", False)) or dist.rank != 0:
+        return False
+    if dist.world_size > 1 and not bool(wb.get("allow_multigpu", False)):
+        PythonLogger("pangu_plasim_train").warning(
+            "wandb.enabled=True but world_size>1; auto-disabling wandb under "
+            "multi-GPU DDP (it deadlocks NCCL via GIL/CUDA contention on "
+            "rank 0). Console logging stays active; set "
+            "wandb.allow_multigpu=True to override."
+        )
         return False
     try:
         from physicsnemo.utils.logging.wandb import initialize_wandb
@@ -569,33 +583,18 @@ def main(cfg: DictConfig) -> None:
         # NCCL overhead. static_graph=True is safe here because checkpointing
         # branches on a fixed hyperparameter (same set of params gets
         # gradients every iteration), not on data-dependent control flow.
+        #
+        # NOTE: torch is pinned <2.11 (see pyproject) because torch 2.11
+        # regressed DDP for the SFNO models — DDP.__init__ raises an
+        # int-overflow in _verify_params_across_processes, and the reducer
+        # deadlocks mid-epoch. On 2.10.x this standard wrap matches the
+        # working SFNO-PlaSim benchmark. Separately, wandb is auto-disabled
+        # under DDP (see _maybe_init_wandb) — its rank-0 background threads
+        # otherwise stall NCCL and deadlock training.
         bucket_cap_mb = cfg_train.get("ddp_bucket_cap_mb", None)
         ddp_kwargs = {}
         if bucket_cap_mb is not None:
             ddp_kwargs["bucket_cap_mb"] = int(bucket_cap_mb)
-
-        # torch>=2.11 DDP workaround. DistributedDataParallel.__init__ runs
-        # torch.distributed._verify_params_across_processes(), which raises
-        # "value cannot be converted to type int without overflow" on the SFNO
-        # parameter set under torch 2.11 — a bug in torch's C++ metadata build,
-        # NOT a real cross-rank shape mismatch (every rank holds identical
-        # shapes; the model has 151 real fp32 params, none oversized). torch
-        # gates that verification — and the rank-0 weight broadcast that
-        # follows it (_sync_module_states) — behind the DDP `init_sync` flag.
-        # When the running torch exposes `init_sync`, pass it False to skip the
-        # buggy check. Because that ALSO skips DDP's built-in weight sync, and
-        # train.py seeds the model per-rank (seed + dist.rank) so ranks start
-        # from DIFFERENT weights, we replicate rank-0's params + buffers to all
-        # ranks ourselves first — preserving DDP's identical-initial-state
-        # contract. Older torch (no `init_sync` kwarg, and no overflow bug)
-        # falls through to the standard verified path unchanged.
-        if "init_sync" in inspect.signature(
-            DistributedDataParallel.__init__
-        ).parameters:
-            with torch.no_grad():
-                for tensor in list(model.parameters()) + list(model.buffers()):
-                    torch.distributed.broadcast(tensor.data, src=0)
-            ddp_kwargs["init_sync"] = False
 
         model = DistributedDataParallel(
             model,

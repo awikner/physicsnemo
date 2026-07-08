@@ -54,8 +54,15 @@ log_every_n_steps: 1
 # stream live (requires `wandb login`). If the `wandb` package is not
 # installed the trainer logs a warning and falls back to console logging.
 # Set enabled=False to disable entirely.
+#
+# IMPORTANT — multi-GPU: wandb is auto-disabled when world_size > 1. Its
+# rank-0 background threads (service IPC / console capture / GPU monitor)
+# grab the GIL inside CUDA calls and stall NCCL, deadlocking DDP training.
+# Single-GPU runs keep full wandb logging; multi-GPU runs log to the console
+# (+ bench TSV). Set allow_multigpu=True to force wandb on under DDP anyway.
 wandb:
   enabled: True
+  allow_multigpu: False           # True = keep wandb under DDP (may deadlock)
   project: ai-rossby
   entity: null                    # wandb team/username; null = your default entity
   name: ${run_name}

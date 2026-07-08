@@ -28,8 +28,15 @@ dependencies = [
     "nvtx>=0.2.10",
     "treelib>=1.2.5",
     "numpy>=1.22.4",
-    "torch>=2.10.0",
-    "torchvision>=0.25.0a0",
+    # Pin below 2.11: torch 2.11.0 regressed multi-GPU DDP for the SFNO
+    # models — DistributedDataParallel.__init__ raises an int-overflow in
+    # _verify_params_across_processes and the reducer deadlocks mid-epoch.
+    # The ai-rossby SFNO-PlaSim single-node benchmark (4xA100) ran clean on
+    # torch 2.10.x; the floating ">=2.10.0" pin silently pulled 2.11.0 on a
+    # later `uv sync`. Keep the <2.11 ceiling (mirrored in the cu12/cu13/cu129
+    # extras below) until the DDP regression is resolved upstream.
+    "torch>=2.10.0,<2.11.0",
+    "torchvision>=0.25.0a0,<0.26.0",
     "tqdm>=4.60.0",
     "requests>=2.32.2",
     # urllib3 is a transitive dependency (via requests/botocore/etc.); pin to
@@ -263,8 +270,9 @@ dev = [
 # When neither is specified, torch comes from PyPI and no RAPIDS
 # packages are installed.
 cu13 = [
-    "torch>=2.10.0",
-    "torchvision>=0.25.0a0",
+    # <2.11 ceiling — see the torch pin note in [project].dependencies.
+    "torch>=2.10.0,<2.11.0",
+    "torchvision>=0.25.0a0,<0.26.0",
     "cuml-cu13>=26.2.0",
     "pylibraft-cu13>=26.2.0",
     # Avoid cupy 14.x: 14.0.0 ships a broken cuda13 wheel
@@ -275,8 +283,9 @@ cu13 = [
     "nvidia-dali-cuda130",
 ]
 cu12 = [
-    "torch>=2.10.0",
-    "torchvision>=0.25.0a0",
+    # <2.11 ceiling — see the torch pin note in [project].dependencies.
+    "torch>=2.10.0,<2.11.0",
+    "torchvision>=0.25.0a0,<0.26.0",
     "cuml-cu12>=26.2.0",
     "pylibraft-cu12>=26.2.0",
     # See cu13 note: cupy 14.x also interacts badly with torch>=2.11 on the
@@ -290,8 +299,9 @@ cu12 = [
 # not reusing its miniforge torch module).  RAPIDS deps are CUDA-12-generic and
 # shared with cu12.  Mutually exclusive with cu12/cu13 (see [tool.uv] conflicts).
 cu129 = [
-    "torch>=2.10.0",
-    "torchvision>=0.25.0a0",
+    # <2.11 ceiling — see the torch pin note in [project].dependencies.
+    "torch>=2.10.0,<2.11.0",
+    "torchvision>=0.25.0a0,<0.26.0",
     "cuml-cu12>=26.2.0",
     "pylibraft-cu12>=26.2.0",
     "cupy-cuda12x>=13.6.0,<14.0.0",
