@@ -38,7 +38,7 @@ comma and your TOTP code**, e.g. `mypassword,123456`. The `stampede3` SSH alias 
 |---|---|---|
 | `$HOME` | ~25 GB, backed up | dot-files only — never venvs or data |
 | `$WORK` / `$STOCKYARD` | ~1 TB, persistent, no purge | repo clone, venv, test fixtures |
-| `$SCRATCH` | ~10 TB, **purged after 90 days without access** | training data, converted Zarr, job logs |
+| `$SCRATCH` | ~100 TB, **purged after 90 days without access** | training data, converted Zarr, job logs |
 
 **Rule (all clusters):** repo clone + `.venv` + `$AI_ROSSBY_TEST_DATA` live on the persistent
 filesystem (`$WORK`); large Zarr archives and run outputs live on `$SCRATCH`.

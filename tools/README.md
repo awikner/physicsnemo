@@ -27,6 +27,17 @@ directly. The channel-group definitions inside each `pangu_h5_to_zarr.py`
 (`PANGU_<SOURCE>_CHANNELS`) **define** the variable ordering your model config
 must match.
 
+## `tools/data/` — multi-cluster data catalog (Phase 11)
+
+| Script | Purpose |
+|---|---|
+| `registry.py` | Read/maintain `hpc/data_registry.yaml` — `show` / `check` (gaps + at-risk copies) / `scan <cluster> --write` (update a cluster's copies) |
+| `sync_dataset.py` | `<dataset> --to <cluster>` — pull a dataset to a cluster via Globus before training; `--rehydrate <cluster>` restores purged copies from a peer |
+
+The registry records which converted Zarr exists on which clusters (master on
+Derecho scratch, second copy on Stampede3); the sync tool moves data between
+them. See `examples/weather/ai_rossby/DATA.md`.
+
 ## `tools/checkpoint_translation/` — foreign checkpoints → `.mdlus`
 
 Convert trained weights from the source stacks into PhysicsNeMo `.mdlus`:

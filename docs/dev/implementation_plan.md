@@ -1246,3 +1246,20 @@ internal/private release, mixed/collaborator-owned derived code, Pangu/SFNO
 supported + diffusion experimental + healda dropped, ship the `ai-rossby`
 branch as-is. Critical path: de-personalize → onboarding docs → correctness
 fixes. See the phase-10 doc's §0.
+
+## 9. Phase 11 — Data conversion completion + multi-cluster catalog → see `phase11_implementation_plan.md`
+
+Convert all remaining raw archives to the ai-rossby Zarr format (ERA5
+1979–2024, AMIP 1978–2024, E3SM 2015–2040, PLASIM-plev to match sigma, +
+PLASIM/AMIP norm stats → Zarr). Conversion runs **on Stampede3** (`spr` queue,
+`TG-ATM170020`) — raw H5 is Globus'd there, converted, and the Zarr copied to
+**Derecho scratch as the master** (campaign lacks the quota; the 60-day purge is
+accepted). Stampede3 keeps its copy as the second replica. A
+**multi-location registry** (`hpc/data_registry.yaml`) records every copy of
+each dataset plus its raw source, and a Globus `sync_dataset.py` (with a
+`--rehydrate` mode) moves data to any cluster before training and restores
+purged copies from a peer. Master on Derecho scratch; **second copy on
+Stampede3 scratch** (both volatile, independent purge clocks; Delta raw is the
+durable fallback). PLASIM-plev (79–104) converts on **Derecho** from a complete
+per-year `.h5` source with the existing converter — no enrichment needed.
+**Planned.**

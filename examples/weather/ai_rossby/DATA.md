@@ -25,6 +25,31 @@ export AI_ROSSBY_AMIP_CKPT=/my/amip-checkpoints     # amip diffusion checkpoints
 `e3sm/`, `plasim/`, `amip/`, `era5_sfno_s2s/`, `era5/`. Override any single
 path on the CLI, e.g. `dataset.zarr_path=/my/store.zarr`.
 
+## Getting the data onto a cluster (registry + Globus)
+
+The converted Zarr lives on several clusters; the master copy is on Derecho
+scratch, a second copy on Stampede3 (see `docs/dev/phase11_implementation_plan.md`).
+`hpc/data_registry.yaml` records **which datasets exist and on which clusters**,
+and two tools drive it:
+
+```bash
+# What exists and where (+ gaps / at-risk single copies):
+python tools/data/registry.py show
+python tools/data/registry.py check
+
+# Before training on a cluster, pull a dataset there if it isn't already:
+python tools/data/sync_dataset.py e3sm --to stampede3 --dry-run   # preview the Globus plan
+python tools/data/sync_dataset.py e3sm --to stampede3             # transfer (needs `globus` CLI + auth)
+
+# After a scratch purge, restore what should be on a cluster from a peer:
+python tools/data/sync_dataset.py --rehydrate derecho
+```
+
+`sync_dataset.py` transfers into that cluster's `AI_ROSSBY_DATA` root, so a
+subsequent run finds the data with no path edits. After a transfer, record it
+with `registry.py scan <cluster> --write`. (One-time: fill the
+`globus_collection` UUIDs in `hpc/data_registry.yaml`.)
+
 ## 2. Already-converted stores on Delta
 
 Under `/work/hdd/bdiu/awikner/physicsnemo-zarr/` (group-readable), so you can

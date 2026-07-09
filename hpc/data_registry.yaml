@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ai-rossby data-location registry (Phase 11).
+#
+# Source of truth for what converted Zarr exists and EVERY cluster it lives on,
+# so a lost copy (e.g. a scratch purge) can be re-transferred and so any cluster
+# can pull what it needs before training. Maintained by tools/data/registry.py
+# (`scan <cluster>` updates a cluster's `copies`; `check` reports gaps + at-risk
+# single copies) and consumed by tools/data/sync_dataset.py.
+#
+# Year ranges are compact strings: "2041-2049", "1981", or "1981,1983-1985".
+
+clusters:
+  delta:
+    data_root: /work/hdd/bdiu/awikner/physicsnemo-zarr
+    globus_collection: TODO-NCSA-DELTA-UUID   # look up once on globus.org
+    persistent: true                          # /work/hdd is not purged
+  deltaai:
+    alias_of: delta                           # shares Delta /work — physically the same data
+  derecho:
+    data_root: /glade/derecho/scratch/awikner/physicsnemo-zarr
+    globus_collection: TODO-NCAR-GLADE-UUID
+    volatile: true                            # scratch: 60-day purge
+    role: master
+  stampede3:
+    data_root: /scratch/09979/awikner/physicsnemo-zarr
+    globus_collection: TODO-TACC-UUID
+    volatile: true                            # scratch: 90-day purge
+    role: conversion + second copy
+  # midway3, dsi — add {data_root, globus_collection} when data is placed there.
+
+datasets:
+  e3sm:
+    subdir: e3sm
+    target_years: "2015-2049"
+    stats: [normalization_2015-2050.zarr, climatology_bias.zarr]
+    raw_source:
+      cluster: delta
+      path: /work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data
+    copies:
+      - {cluster: delta, years: "2041-2049"}
+
+  plasim:                                      # sigma-level PLASIM (sim52)
+    subdir: plasim
+    target_years: "12-104"
+    stats_nc:                                  # .nc — still to convert to .zarr (11a)
+      cluster: delta
+      path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data
+    raw_source:
+      cluster: delta
+      path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data
+    copies:
+      - {cluster: delta, years: "12-104"}
+
+  plasim_plev:                                 # pressure-level PLASIM (sim52)
+    subdir: plasim_plev
+    target_years: "12-104"                     # match sigma
+    raw_source:
+      cluster: derecho
+      path: /glade/derecho/scratch/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/plev_data
+    copies:
+      - {cluster: delta, years: "7-78"}
+
+  era5:                                        # full ERA5 archive
+    subdir: era5
+    target_years: "1979-2024"
+    stats: [normalization_pangu_s2s_mean.zarr, normalization_pangu_s2s_std.zarr]
+    raw_source:
+      cluster: delta
+      path: /work/hdd/bdiu/bgong1/data/h5data
+    copies: []                                 # no full-archive year stores converted yet
+
+  era5_sfno_s2s:                               # ERA5 Pangu-S2S benchmark subset
+    subdir: era5_sfno_s2s
+    target_years: "1981"
+    raw_source:
+      cluster: delta
+      path: /work/hdd/bdiu/bgong1/data/h5data
+    copies:
+      - {cluster: delta, years: "1981"}
+
+  amip:
+    subdir: amip
+    target_years: "1978-2024"
+    stats_nc:                                  # .nc — still to convert to .zarr (11a)
+      cluster: delta
+      path: /work/hdd/bdiu/awikner/AMIP/h5
+    raw_source:
+      cluster: delta
+      path: /work/hdd/bdiu/awikner/AMIP/h5
+    copies:
+      - {cluster: delta, years: "1981"}
