@@ -27,6 +27,7 @@ clusters:
     role: master
   stampede3:
     data_root: /scratch/09979/awikner/physicsnemo-zarr
+    raw_root: /scratch/09979/awikner/raw       # staged raw h5 for on-cluster conversion
     globus_collection: TODO-TACC-UUID
     volatile: true                            # scratch: 90-day purge
     role: conversion + second copy
@@ -71,6 +72,7 @@ datasets:
     raw_source:
       cluster: delta
       path: /work/hdd/bdiu/bgong1/data/h5data
+    stage_dest: era5/h5data                     # raw dest under a conversion cluster's raw_root
     copies: []                                 # no full-archive year stores converted yet
 
   era5_sfno_s2s:                               # ERA5 Pangu-S2S benchmark subset
@@ -91,5 +93,6 @@ datasets:
     raw_source:
       cluster: delta
       path: /work/hdd/bdiu/awikner/AMIP/h5
+    stage_dest: amip                            # AMIP converter reads raw/amip/*.h5 directly
     copies:
       - {cluster: delta, years: "1981"}

@@ -53,6 +53,13 @@ larger — plan multi-hour Globus transfers.
 
 ## Sub-phase 11a — Convert on Stampede3 (`spr`), copy to Derecho
 
+> **Execution status.** Two of the four remaining sources turned out to have
+> their raw already on **Derecho**, so they convert there (128-core PBS,
+> validated) straight into the master — no Globus: **PLASIM-plev** `12-104`
+> (job `6681544`) and **E3SM** `2015-2049` (job `6681752`). Only **ERA5** and
+> **AMIP** genuinely need Globus (correct raw only on Delta). The paste-and-go
+> checklist for those two is **[`hpc/phase11_globus_runbook.md`](../../hpc/phase11_globus_runbook.md)**.
+
 Conversion runs on **Stampede3** (`-p spr -A TG-ATM170020`; repo/venv on `$WORK`
 per `hpc/stampede3.md`), writing Zarr to `$SCRATCH`; finished stores are copied
 to Derecho (11b/11d) and kept on Stampede3 as the second replica.

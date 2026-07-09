@@ -41,6 +41,9 @@ python tools/data/registry.py check
 python tools/data/sync_dataset.py e3sm --to stampede3 --dry-run   # preview the Globus plan
 python tools/data/sync_dataset.py e3sm --to stampede3             # transfer (needs `globus` CLI + auth)
 
+# Ship a dataset's *raw* h5 to a cluster so it can be converted there:
+python tools/data/sync_dataset.py era5 --to stampede3 --stage-raw
+
 # After a scratch purge, restore what should be on a cluster from a peer:
 python tools/data/sync_dataset.py --rehydrate derecho
 ```
@@ -49,6 +52,10 @@ python tools/data/sync_dataset.py --rehydrate derecho
 subsequent run finds the data with no path edits. After a transfer, record it
 with `registry.py scan <cluster> --write`. (One-time: fill the
 `globus_collection` UUIDs in `hpc/data_registry.yaml`.)
+
+To bring up the two datasets that still need Globus (ERA5 + AMIP, whose correct
+raw only exists on Delta), follow the step-by-step
+[`hpc/phase11_globus_runbook.md`](../../../hpc/phase11_globus_runbook.md).
 
 ## 2. Already-converted stores on Delta
 

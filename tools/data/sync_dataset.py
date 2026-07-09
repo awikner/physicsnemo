@@ -10,6 +10,10 @@
         Ensure <dataset> (or the given year range) is on <cluster>; if not, pull
         the missing year-stores from a peer that has them (Globus).
 
+    sync_dataset.py <dataset> --to <cluster> --stage-raw [--dry-run]
+        Ship <dataset>'s raw h5 (from its raw_source) to <cluster> so the
+        convert_*_<cluster> job can run there. Dest = cluster.raw_root/stage_dest.
+
     sync_dataset.py --rehydrate <cluster> [--dry-run]
         Restore everything the registry says should live on <cluster> but that a
         scan shows missing (e.g. after a scratch purge), pulling from peers.
@@ -135,6 +139,48 @@ def render_and_maybe_run(reg: dict, plan: dict, dry_run: bool) -> None:
         print(f"\nAfter transfers complete, run: registry.py scan {tgt} --write")
 
 
+def stage_raw(reg: dict, dataset: str, to_cluster: str, dry_run: bool) -> None:
+    """Ship a dataset's raw h5 from its raw_source to a conversion cluster (Globus).
+
+    Unlike the Zarr sync above (which moves converted year-stores between
+    ``copies``), this moves the *raw* archive so the target can run the
+    ``convert_*_<cluster>`` job in place. The destination matches what those
+    scripts expect: ``<cluster.raw_root>/<dataset.stage_dest>``.
+    """
+    if dataset not in reg["datasets"]:
+        raise SystemExit(f"unknown dataset {dataset!r} (known: {', '.join(reg['datasets'])})")
+    ds = reg["datasets"][dataset]
+    rs = ds.get("raw_source")
+    if not rs:
+        raise SystemExit(f"{dataset} has no raw_source in the registry.")
+    stage_dest = ds.get("stage_dest")
+    if not stage_dest:
+        raise SystemExit(f"{dataset} has no stage_dest — add it (raw path under a cluster's raw_root).")
+    tgt_canon, tgt = R.resolve_cluster(reg, to_cluster)
+    raw_root = tgt.get("raw_root")
+    if not raw_root:
+        raise SystemExit(f"cluster {tgt_canon} has no raw_root — add it before staging raw.")
+
+    src_col, dst_col = _collection(reg, rs["cluster"]), _collection(reg, tgt_canon)
+    src_path, dst_path = rs["path"], f"{raw_root}/{stage_dest}"
+    label = f"ai-rossby {dataset} raw {rs['cluster']}->{tgt_canon}"
+    cmd = ["globus", "transfer", f"{src_col}:{src_path}", f"{dst_col}:{dst_path}",
+           "--recursive", "--label", label, "--sync-level", "checksum"]
+    print(f"{dataset} raw → {tgt_canon}: {rs['cluster']}:{src_path}")
+    print("  " + " ".join(cmd))
+    if "TODO-" in src_col or "TODO-" in dst_col:
+        print("  ⚠ fill the globus_collection UUIDs in the registry before running.")
+        return
+    if dry_run:
+        return
+    if not shutil.which("globus"):
+        print("  ⚠ `globus` CLI not found on PATH — skipping actual transfer.")
+        return
+    print("  running globus transfer …")
+    subprocess.run(cmd, check=True)
+    print(f"  then convert on {tgt_canon}, and: registry.py scan {tgt_canon} --write")
+
+
 def rehydrate(reg: dict, cluster: str, dry_run: bool) -> None:
     canon, _ = R.resolve_cluster(reg, cluster)
     print(f"rehydrating {canon} …")
@@ -160,6 +206,8 @@ def main(argv=None) -> int:
     p.add_argument("--to", dest="to_cluster", help="target cluster")
     p.add_argument("--years", default=None, help='year range, e.g. "2015-2049"')
     p.add_argument("--rehydrate", metavar="CLUSTER", help="restore missing datasets on CLUSTER")
+    p.add_argument("--stage-raw", action="store_true",
+                   help="ship the dataset's raw h5 to --to for on-cluster conversion")
     p.add_argument("--registry", type=Path, default=R.REGISTRY_PATH)
     p.add_argument("--dry-run", action="store_true", help="print the plan, do not transfer")
     args = p.parse_args(argv)
@@ -170,6 +218,9 @@ def main(argv=None) -> int:
         return 0
     if not args.dataset or not args.to_cluster:
         p.error("give <dataset> and --to <cluster>, or use --rehydrate <cluster>")
+    if args.stage_raw:
+        stage_raw(reg, args.dataset, args.to_cluster, args.dry_run)
+        return 0
     plan = plan_transfer(reg, args.dataset, args.to_cluster, args.years)
     render_and_maybe_run(reg, plan, args.dry_run)
     return 0
