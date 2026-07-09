@@ -1,0 +1,58 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Convert the E3SM archive (2015-2049) on NCAR Derecho (CPU, UCHI0014). The E3SM
+# raw is already on Derecho scratch (same E3SMv3_.../h5/sigma_data source the
+# Delta converter used), so this converts in-place into the master — no Globus.
+# skip-if-exists. YEARS_LO/YEARS_HI override the default 2015-2049.
+#
+# Submit:  qsub hpc/scripts/convert_e3sm_derecho.pbs
+# 1-year test:  qsub -q main -l walltime=00:40:00 -v YEARS_LO=2015,YEARS_HI=2015 ...
+
+#PBS -A UCHI0014
+#PBS -q main
+#PBS -l select=1:ncpus=128:mpiprocs=1:ompthreads=128
+#PBS -l walltime=12:00:00
+#PBS -N pn-conv-e3sm
+#PBS -j oe
+
+set -euo pipefail
+cd /glade/work/awikner/physicsnemo
+source .venv/bin/activate
+export SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-${OMP_NUM_THREADS:-128}}
+
+YEARS_LO=${YEARS_LO:-2015}
+YEARS_HI=${YEARS_HI:-2049}
+E=${E:-/glade/derecho/scratch/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101}
+H5_DIR="$E/h5/sigma_data"
+OUT_ROOT=${OUT_ROOT:-/glade/derecho/scratch/awikner/physicsnemo-zarr/e3sm}
+mkdir -p "$OUT_ROOT"
+
+echo "[$(date)] E3SM ${YEARS_LO}-${YEARS_HI} on $(hostname), $(nproc) cores"
+for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
+    OUT_PATH="$OUT_ROOT/${YEAR}.zarr"
+    if [ -d "$OUT_PATH" ]; then echo "[$(date)] skip $YEAR (exists)"; continue; fi
+    echo "[$(date)] converting E3SM year $YEAR ..."
+    python tools/data/e3sm/pangu_h5_to_zarr.py \
+        --input-dir "$H5_DIR" --year "$YEAR" --output "$OUT_PATH"
+done
+
+# Normalization + climatology/bias (only if the source files are present).
+STATS_DIR="$H5_DIR"
+if ls "$STATS_DIR"/data_*_mean.nc >/dev/null 2>&1; then
+    echo "[$(date)] building E3SM normalization Zarr ..."
+    python tools/data/e3sm/build_normalization_zarr.py \
+        --source-dir "$STATS_DIR" --output "$OUT_ROOT/normalization_2015-2050.zarr" --overwrite || true
+fi
+CLIM="$E/sigma_data/climatology.nc"
+if [ -f "$CLIM" ] && [ -d "$E/bias" ]; then
+    echo "[$(date)] building E3SM climatology+bias Zarr ..."
+    python tools/data/e3sm/build_climatology_zarr.py \
+        --climatology "$CLIM" --bias-dir "$E/bias" \
+        --output "$OUT_ROOT/climatology_bias.zarr" --overwrite || true
+fi
+
+echo "[$(date)] done. e3sm stores: $(ls "$OUT_ROOT" | grep -c '\.zarr$')"

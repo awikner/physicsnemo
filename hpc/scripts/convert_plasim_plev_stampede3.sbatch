@@ -19,6 +19,7 @@
 #SBATCH -A TG-ATM170020
 #SBATCH -N 1
 #SBATCH -n 1
+#SBATCH -c 112
 #SBATCH -t 24:00:00
 #SBATCH -J pn-conv-plev
 #SBATCH -o convert-plasim-plev-%j.out
@@ -26,6 +27,11 @@
 set -euo pipefail
 cd "$WORK/physicsnemo"
 source .venv/bin/activate
+
+# Size the per-file H5 reader pool to the whole node (TACC allocates
+# whole nodes; without this the pool can bind to a single core).
+export SLURM_CPUS_PER_TASK=$(nproc)
+echo "[$(date)] $(hostname): $(nproc) cores"
 
 H5_DIR=${H5_DIR:-$SCRATCH/raw/plasim_plev/plev_data}
 OUT_ROOT=${OUT_ROOT:-$SCRATCH/physicsnemo-zarr/plasim_plev}

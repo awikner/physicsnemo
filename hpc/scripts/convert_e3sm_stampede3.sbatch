@@ -18,6 +18,7 @@
 #SBATCH -A TG-ATM170020
 #SBATCH -N 1
 #SBATCH -n 1
+#SBATCH -c 112
 #SBATCH -t 24:00:00
 #SBATCH -J pn-conv-e3sm
 #SBATCH -o convert-e3sm-%j.out
@@ -25,6 +26,11 @@
 set -euo pipefail
 cd "$WORK/physicsnemo"
 source .venv/bin/activate
+
+# Size the per-file H5 reader pool to the whole node (TACC allocates
+# whole nodes; without this the pool can bind to a single core).
+export SLURM_CPUS_PER_TASK=$(nproc)
+echo "[$(date)] $(hostname): $(nproc) cores"
 
 RAW=${RAW:-$SCRATCH/raw/e3sm}
 H5_DIR="$RAW/h5/sigma_data"

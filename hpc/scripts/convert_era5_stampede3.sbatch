@@ -16,6 +16,7 @@
 #SBATCH -A TG-ATM170020
 #SBATCH -N 1
 #SBATCH -n 1
+#SBATCH -c 112
 #SBATCH -t 36:00:00
 #SBATCH -J pn-conv-era5
 #SBATCH -o convert-era5-%j.out
@@ -23,6 +24,11 @@
 set -euo pipefail
 cd "$WORK/physicsnemo"
 source .venv/bin/activate
+
+# Size the per-file H5 reader pool to the whole node (TACC allocates
+# whole nodes; without this the pool can bind to a single core).
+export SLURM_CPUS_PER_TASK=$(nproc)
+echo "[$(date)] $(hostname): $(nproc) cores"
 
 RAW=${RAW:-$SCRATCH/raw/era5/h5data}
 OUT_ROOT=${OUT_ROOT:-$SCRATCH/physicsnemo-zarr/era5}
