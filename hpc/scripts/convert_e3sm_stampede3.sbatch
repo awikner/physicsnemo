@@ -9,8 +9,12 @@
 # so re-submitting fills gaps (2041-2049 already exist elsewhere; this converts
 # 2015-2040). Copy the output to Derecho (master) afterward — see phase-11 §11b.
 #
-# Prereq: raw H5 staged to $RAW (Globus from Delta), preserving the source layout
-#   $RAW/h5/sigma_data/{year}_{idx:04d}.h5 , $RAW/sigma_data/climatology.nc , $RAW/bias/
+# The complete E3SM archive (all 35 years 2015-2049, 51100 h5 + climatology.nc +
+# norm stats + bias/) already lives on Stampede3 scratch under a collaborator's
+# allocation (jwan4), so no Globus is needed — RAW points straight at it. The
+# Derecho ".../E3SMv3_.../h5/sigma_data" holds only a 2-year subset (2015, 2045).
+# Override RAW= if the archive moves. Layout: $RAW/h5/sigma_data/{year}_NNNN.h5
+# + $RAW/h5/sigma_data/climatology.nc + $RAW/bias/.
 #
 # Submit:  sbatch hpc/scripts/convert_e3sm_stampede3.sbatch
 
@@ -32,7 +36,7 @@ source .venv/bin/activate
 export SLURM_CPUS_PER_TASK=$(nproc)
 echo "[$(date)] $(hostname): $(nproc) cores"
 
-RAW=${RAW:-$SCRATCH/raw/e3sm}
+RAW=${RAW:-/scratch/11095/jwan4/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101}
 H5_DIR="$RAW/h5/sigma_data"
 STATS_DIR="$H5_DIR"
 CLIM_PATH="$H5_DIR/climatology.nc"           # climatology.nc lives inside h5/sigma_data/

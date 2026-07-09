@@ -38,10 +38,10 @@ datasets:
     subdir: e3sm
     target_years: "2015-2049"
     stats: [normalization_2015-2050.zarr, climatology_bias.zarr]
-    raw_source:                                 # whole archive root — h5/sigma_data (130G, holds
-      cluster: derecho                          # the .h5 + climatology.nc + norm stats) + bias.
-      path: /glade/derecho/scratch/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101
-    stage_dest: e3sm                            # recursive; +4.3G boundary_data tags along (unused)
+    raw_source:                                 # COMPLETE archive (all 35 yrs 2015-2049, 51100 h5
+      cluster: stampede3                        # + climatology.nc + norm stats + bias) already on
+      path: /scratch/11095/jwan4/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101   # Stampede3 — no staging.
+    # NB: Derecho/Delta ".../h5/sigma_data" hold only a 2-year subset (2015, 2045); do not use.
     copies:
       - {cluster: delta, years: "2041-2049"}
 

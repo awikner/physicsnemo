@@ -49,10 +49,10 @@ stage_and_convert \
     "$TACC:/scratch/09979/awikner/raw/plasim_plev/plev_data" \
     "ai-rossby plev raw" convert_plasim_plev_stampede3.sbatch &
 
-stage_and_convert \
-    "$DERE:/glade/derecho/scratch/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101" \
-    "$TACC:/scratch/09979/awikner/raw/e3sm" \
-    "ai-rossby e3sm raw" convert_e3sm_stampede3.sbatch &
+# E3SM: the complete archive already lives on Stampede3 (jwan4 scratch, the
+# sbatch's default RAW) — no transfer needed, submit the conversion directly.
+( echo "[$(date)] e3sm raw is local (jwan4) — sbatch directly"
+  cd "$REPO" && sbatch hpc/scripts/convert_e3sm_stampede3.sbatch ) &
 
 stage_and_convert \
     "$DELTA:/work/hdd/bdiu/bgong1/data/h5data" \
