@@ -35,7 +35,7 @@ echo "[$(date)] $(hostname): $(nproc) cores"
 RAW=${RAW:-$SCRATCH/raw/e3sm}
 H5_DIR="$RAW/h5/sigma_data"
 STATS_DIR="$H5_DIR"
-CLIM_PATH="$RAW/sigma_data/climatology.nc"
+CLIM_PATH="$H5_DIR/climatology.nc"           # climatology.nc lives inside h5/sigma_data/
 BIAS_DIR="$RAW/bias"
 OUT_ROOT=${OUT_ROOT:-$SCRATCH/physicsnemo-zarr/e3sm}
 mkdir -p "$OUT_ROOT"
@@ -54,18 +54,28 @@ for YEAR in $(seq 2015 2049); do
         --output "$OUT_PATH"
 done
 
-# 2. Normalization + 3. climatology/bias Zarr.
-echo "[$(date)] building E3SM normalization Zarr ..."
-python tools/data/e3sm/build_normalization_zarr.py \
-    --source-dir "$STATS_DIR" \
-    --output "$OUT_ROOT/normalization_2015-2050.zarr" \
-    --overwrite
-echo "[$(date)] building E3SM climatology+bias Zarr ..."
-python tools/data/e3sm/build_climatology_zarr.py \
-    --climatology "$CLIM_PATH" \
-    --bias-dir    "$BIAS_DIR" \
-    --output      "$OUT_ROOT/climatology_bias.zarr" \
-    --overwrite
+# 2. Normalization Zarr (only if the source stats were staged).
+if ls "$STATS_DIR"/data_*_mean.nc >/dev/null 2>&1; then
+    echo "[$(date)] building E3SM normalization Zarr ..."
+    python tools/data/e3sm/build_normalization_zarr.py \
+        --source-dir "$STATS_DIR" \
+        --output "$OUT_ROOT/normalization_2015-2050.zarr" \
+        --overwrite
+else
+    echo "[$(date)] WARN: no data_*_mean.nc under $STATS_DIR — skipping normalization Zarr"
+fi
+
+# 3. Climatology + bias Zarr (only if both were staged).
+if [ -f "$CLIM_PATH" ] && [ -d "$BIAS_DIR" ]; then
+    echo "[$(date)] building E3SM climatology+bias Zarr ..."
+    python tools/data/e3sm/build_climatology_zarr.py \
+        --climatology "$CLIM_PATH" \
+        --bias-dir    "$BIAS_DIR" \
+        --output      "$OUT_ROOT/climatology_bias.zarr" \
+        --overwrite
+else
+    echo "[$(date)] WARN: missing $CLIM_PATH or $BIAS_DIR — skipping climatology Zarr"
+fi
 
 echo "[$(date)] E3SM conversion complete."
 ls -la "$OUT_ROOT"

@@ -38,9 +38,10 @@ datasets:
     subdir: e3sm
     target_years: "2015-2049"
     stats: [normalization_2015-2050.zarr, climatology_bias.zarr]
-    raw_source:
-      cluster: delta
-      path: /work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data
+    raw_source:                                 # whole archive root — h5/sigma_data (130G, holds
+      cluster: derecho                          # the .h5 + climatology.nc + norm stats) + bias.
+      path: /glade/derecho/scratch/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101
+    stage_dest: e3sm                            # recursive; +4.3G boundary_data tags along (unused)
     copies:
       - {cluster: delta, years: "2041-2049"}
 
@@ -62,6 +63,7 @@ datasets:
     raw_source:
       cluster: derecho
       path: /glade/derecho/scratch/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/plev_data
+    stage_dest: plasim_plev/plev_data           # stage → Stampede3 (raw is 565G / 184k files)
     copies:
       - {cluster: delta, years: "7-78"}
 

@@ -53,8 +53,9 @@ subsequent run finds the data with no path edits. After a transfer, record it
 with `registry.py scan <cluster> --write`. (One-time: fill the
 `globus_collection` UUIDs in `hpc/data_registry.yaml`.)
 
-To bring up the two datasets that still need Globus (ERA5 + AMIP, whose correct
-raw only exists on Delta), follow the step-by-step
+To bring up the datasets that still need converting (ERA5, AMIP, PLASIM-plev,
+E3SM — all staged to Stampede3 and converted on the `spr` queue, then replicated
+to the Derecho master), follow the step-by-step
 [`hpc/phase11_globus_runbook.md`](../../../hpc/phase11_globus_runbook.md).
 
 ## 2. Already-converted stores on Delta

@@ -37,13 +37,18 @@ H5_DIR=${H5_DIR:-$SCRATCH/raw/plasim_plev/plev_data}
 OUT_ROOT=${OUT_ROOT:-$SCRATCH/physicsnemo-zarr/plasim_plev}
 mkdir -p "$OUT_ROOT"
 
-# Discover {year}_{idx:04d}.h5 → distinct year prefixes.
-mapfile -t YEARS < <(ls "$H5_DIR" 2>/dev/null | awk -F_ 'NF==2{print $1}' | sort -u -n)
+# Discover {year}_{idx:04d}.h5 → distinct year prefixes, clamped to [YEARS_LO,YEARS_HI].
+# Default 12-104 matches the sigma set; the raw holds 7-132, so set YEARS_LO=7
+# YEARS_HI=132 to convert everything staged.
+YEARS_LO=${YEARS_LO:-12}
+YEARS_HI=${YEARS_HI:-104}
+mapfile -t YEARS < <(ls "$H5_DIR" 2>/dev/null | awk -F_ 'NF==2{print $1}' | sort -u -n \
+    | awk -v lo="$YEARS_LO" -v hi="$YEARS_HI" '$1>=lo && $1<=hi')
 if (( ${#YEARS[@]} == 0 )); then
-    echo "[ERROR] no {year}_NNNN.h5 files under $H5_DIR" >&2
+    echo "[ERROR] no {year}_NNNN.h5 files in [$YEARS_LO,$YEARS_HI] under $H5_DIR" >&2
     exit 1
 fi
-echo "[$(date)] discovered ${#YEARS[@]} year(s): ${YEARS[*]}"
+echo "[$(date)] converting ${#YEARS[@]} year(s) in [$YEARS_LO,$YEARS_HI]: ${YEARS[*]}"
 
 for YEAR in "${YEARS[@]}"; do
     OUT_PATH="$OUT_ROOT/${YEAR}.zarr"
