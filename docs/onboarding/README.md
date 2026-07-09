@@ -18,10 +18,10 @@ npx --yes @marp-team/marp-cli onboarding.md --pdf --allow-local-files -o onboard
 
 `make onboarding.html` produces an HTML variant if you don't want a PDF.
 
-> The built `onboarding.pdf` is **not committed** — build it once (it needs a
-> Node + browser toolchain not present in every environment) and commit it, or
-> regenerate it on demand. Speaker detail is in the HTML-comment presenter
-> notes on each slide.
+> A built `onboarding.pdf` is committed for convenience; regenerate it with
+> `make onboarding.pdf` after editing `onboarding.md` (needs a Node + browser
+> toolchain). Speaker detail is in the HTML-comment presenter notes on each
+> slide.
 
 ## Before presenting
 
