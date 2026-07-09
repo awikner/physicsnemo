@@ -1,0 +1,57 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Convert PLASIM pressure-level (sim52 plev) H5 -> Zarr on NCAR Derecho (CPU,
+# UCHI0014). The plev raw .h5 is already on Derecho scratch and the output is the
+# Derecho master, so this avoids a Globus round-trip (see phase-11 §11a routing
+# note). skip-if-exists. YEARS_LO/YEARS_HI override the default 12-104 (= sigma).
+#
+# Submit:  qsub hpc/scripts/convert_plasim_plev_derecho.pbs
+# 1-year test:  qsub -q cpudev -l walltime=00:30:00 -v YEARS_LO=12,YEARS_HI=12 ...
+
+#PBS -A UCHI0014
+#PBS -q main
+#PBS -l select=1:ncpus=128:mpiprocs=1:ompthreads=128
+#PBS -l walltime=12:00:00
+#PBS -N pn-conv-plev
+#PBS -j oe
+
+set -euo pipefail
+cd /glade/work/awikner/physicsnemo
+source .venv/bin/activate
+
+# The per-file H5 reader sizes its pool from SLURM_CPUS_PER_TASK; on PBS give it
+# the whole node (ompthreads/OMP_NUM_THREADS is set to 128 by the select above).
+export SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-${OMP_NUM_THREADS:-128}}
+
+YEARS_LO=${YEARS_LO:-12}
+YEARS_HI=${YEARS_HI:-104}
+H5_DIR=${H5_DIR:-/glade/derecho/scratch/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/plev_data}
+OUT_ROOT=${OUT_ROOT:-/glade/derecho/scratch/awikner/physicsnemo-zarr/plasim_plev}
+mkdir -p "$OUT_ROOT"
+
+echo "[$(date)] plev conversion ${YEARS_LO}-${YEARS_HI} on $(hostname), $(nproc) cores"
+n_ok=0; n_skip=0; n_fail=0
+for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
+    OUT_PATH="$OUT_ROOT/${YEAR}.zarr"
+    if [ -d "$OUT_PATH" ]; then
+        echo "[$(date)] skip $YEAR (exists)"; n_skip=$((n_skip+1)); continue
+    fi
+    echo "[$(date)] converting plev year $YEAR ..."
+    if python tools/data/plasim/pangu_h5_to_zarr.py \
+            --config tools/data/plasim/configs/sim52_plev_full.yaml \
+            --config-key PLASIM \
+            --input-dir "$H5_DIR" \
+            --year "$YEAR" \
+            --output "$OUT_PATH" \
+            --time-chunk 1; then
+        n_ok=$((n_ok+1))
+    else
+        echo "[$(date)] year $YEAR FAILED"; n_fail=$((n_fail+1))
+    fi
+done
+echo "[$(date)] done: converted=$n_ok skipped=$n_skip failed=$n_fail"
+echo "[$(date)] plev stores now: $(ls "$OUT_ROOT" | grep -c '\.zarr$')"

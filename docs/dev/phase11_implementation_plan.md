@@ -59,9 +59,12 @@ to Derecho (11b/11d) and kept on Stampede3 as the second replica.
 
 1. **Ship raw H5 → Stampede3 `$SCRATCH/raw/<source>/`** via Globus (11d):
    - **E3SM / ERA5 / AMIP** raw from Delta `/work/hdd` (gap table).
-   - **PLASIM-plev** raw `.h5` is on **Derecho** already — either ship it to
-     Stampede3 too, or (more efficient — avoids a round-trip) convert plev
-     **in-place on Derecho** since its raw is local. *(Small routing choice.)*
+   - **PLASIM-plev** raw `.h5` is on **Derecho** already (years 7–132), so plev
+     converts **in-place on Derecho** — no Globus round-trip. Script:
+     `hpc/scripts/convert_plasim_plev_derecho.pbs` (PBS, `-A UCHI0014`, `main`
+     queue, 128 cores; `YEARS_LO..YEARS_HI` default 12–104 to match sigma).
+     Output lands directly on the Derecho master; copy to Stampede3 for the
+     second copy. **[in progress — job running on Derecho]**
 2. **Port the converters to Stampede3 SLURM.** The existing
    `hpc/scripts/convert_*_full_archive.sbatch` (per-year loop + skip-if-exists)
    become `convert_*_stampede3.sbatch` (`-p spr -A TG-ATM170020`, `$SCRATCH`
