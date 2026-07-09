@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -63,6 +64,7 @@ from physicsnemo.utils.logging import LaunchLogger, PythonLogger
 
 from typing import Optional
 
+from data_staging import _STAGEABLE_KEYS, resolve_stage_root, stage_store
 from ema import ModelEMA
 from loss import PanguPlasimLoss
 from train_loop import (
@@ -83,6 +85,65 @@ from validate import (
 
 def _resolve_path(p: str | None) -> str | None:
     return to_absolute_path(p) if p else None
+
+
+def _maybe_stage_data(cfg: DictConfig, *, dist, logger) -> None:
+    """Stage the dataset's Zarr stores to node-local disk (once per node).
+
+    Gated by ``cfg.dataset.stage_to_local`` (default ``False``). When on,
+    ``local_rank == 0`` on each node copies every configured store
+    (``zarr_path`` / ``val_zarr_path`` / normalization stats / boundary
+    stores) into a node-local directory in parallel (see
+    :mod:`data_staging`); then *all* ranks rewrite their dataset paths to the
+    local copies. A global barrier holds the non-copying ranks until every
+    node's copy is complete, so no rank reads a store mid-copy.
+
+    The local path is a pure function of ``(stage_root, store basename)``, so
+    every rank computes the same rewritten path without any communication —
+    the barrier is the only synchronization needed.
+    """
+    data = cfg.dataset
+    if not bool(data.get("stage_to_local", False)):
+        return
+
+    stage_root = resolve_stage_root(data.get("stage_dir", None))
+    num_workers = int(data.get("stage_num_workers", 256))
+
+    # Deterministic, de-duplicated set of source stores. mean_path/std_path
+    # usually resolve to the SAME normalization store — copy it once.
+    srcs: list[str] = []
+    for key in _STAGEABLE_KEYS:
+        raw = data.get(key, None)
+        if not raw:
+            continue
+        src = _resolve_path(raw)
+        if src not in srcs:
+            srcs.append(src)
+    if not srcs:
+        return
+
+    def _local_of(src: str) -> str:
+        return str(stage_root / Path(src).name)
+
+    if dist.local_rank == 0:
+        logger.info(
+            f"[stage] staging {len(srcs)} store(s) to {stage_root} "
+            f"({num_workers} concurrent copies)"
+        )
+        prefix = (lambda m: logger.info(f"[stage r{dist.rank}] {m}"))
+        for src in srcs:
+            stage_store(src, stage_root, num_workers=num_workers, log=prefix)
+
+    if dist.world_size > 1:
+        torch.distributed.barrier()
+
+    # All ranks rewrite their dataset paths to the local copies.
+    for key in _STAGEABLE_KEYS:
+        raw = data.get(key, None)
+        if not raw:
+            continue
+        data[key] = _local_of(_resolve_path(raw))
+    logger.info(f"[stage] dataset paths rewritten to node-local {stage_root}")
 
 
 def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
@@ -507,6 +568,11 @@ def main(cfg: DictConfig) -> None:
     wandb_active = _maybe_init_wandb(cfg, dist=dist)
     LaunchLogger.initialize(use_wandb=wandb_active)
 
+    # --- Optional: stage data to node-local disk --------------------------
+    # Must run before build_datapipe so the datapipe opens the local copies.
+    # No-op unless dataset.stage_to_local=True.
+    _maybe_stage_data(cfg, dist=dist, logger=logger)
+
     # --- Data -------------------------------------------------------------
     datapipe = build_datapipe(
         cfg,
@@ -586,9 +652,10 @@ def main(cfg: DictConfig) -> None:
         # regressed DDP for the SFNO models — DDP.__init__ raises an
         # int-overflow in _verify_params_across_processes, and the reducer
         # deadlocks mid-epoch. On 2.10.x this standard wrap matches the
-        # working SFNO-PlaSim benchmark. Separately, wandb is auto-disabled
-        # under DDP (see _maybe_init_wandb) — its rank-0 background threads
-        # otherwise stall NCCL and deadlock training.
+        # working SFNO-PlaSim benchmark. Separately, wandb is initialized on
+        # every rank (see _maybe_init_wandb) — running it on rank 0 alone
+        # desyncs the ranks and its background threads stall NCCL, deadlocking
+        # training; all-rank init keeps the GIL/CUDA jitter symmetric.
         bucket_cap_mb = cfg_train.get("ddp_bucket_cap_mb", None)
         ddp_kwargs = {}
         if bucket_cap_mb is not None:

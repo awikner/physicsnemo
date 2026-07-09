@@ -26,9 +26,14 @@
 # Other levers tried and NOT adopted:
 #   - CUDA graphs (training.use_static_capture=True): physicsnemo detects
 #     SfnoPlasim doesn't support graph capture and auto-disables it (no-op).
-#   - NVMe data staging: a naive `cp -r` of the chunked Zarr store (thousands
-#     of small chunk files) didn't finish within a 25-min budget; moot anyway
-#     since nsys profiling showed this model is compute-bound, not I/O-bound.
+#   - NVMe data staging: a naive `cp -r` of the chunked Zarr store (~17.5k
+#     chunk files / 30 GB per year) didn't finish within a 25-min budget. This
+#     is now a fast, parallel option — `dataset.stage_to_local=True` copies
+#     every store to node-local /tmp with a 256-way sendfile thread pool
+#     (write-bound at ~2.2 GB/s to /tmp; see data_staging.py). It stays OFF
+#     here because nsys profiling showed this model is compute-bound, not
+#     I/O-bound, so local staging buys nothing for THIS config. Enable it for
+#     data-bound runs.
 #   - DDP bucket_cap_mb / static_graph tuning (makani + PanguWeather-e3sm
 #     inspired): within measurement noise at this 303.9M-param / batch-16 scale.
 #   - torch.compile (training.jit_compile=True): the SHT/complex island is now
