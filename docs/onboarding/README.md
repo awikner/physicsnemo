@@ -25,6 +25,7 @@ npx --yes @marp-team/marp-cli onboarding.md --pdf --allow-local-files -o onboard
 
 ## Before presenting
 
-- Fill in the **group contact / channel** on the "Where to get help" slide.
+- Contact on the "Where to get help" slide: Alexander Wikner
+  (awikner@uchicago.edu) — update if it changes.
 - Update the supported-model status if the AMIP diffusion path graduates from
   experimental.

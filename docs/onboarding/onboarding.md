@@ -187,9 +187,9 @@ python validate_cli.py dataset=e3sm \
 - **Start:** top-level [`README.md`](../../README.md) → recipe [`README.md`](../../examples/weather/ai_rossby/README.md)
 - Data: [`DATA.md`](../../examples/weather/ai_rossby/DATA.md) · Porting: `PANGUWEATHER_MIGRATION.md`
 - Tools: [`tools/README.md`](../../tools/README.md) · History: `docs/dev/`
-- **Ask:** _<add group contact / channel here>_
+- **Ask:** Alexander Wikner — awikner@uchicago.edu
 
-<!-- notes: The docs cover the mechanics; ping the group channel for the rest. Fill in the contact before presenting. -->
+<!-- notes: The docs cover the mechanics; email Alexander for the rest. -->
 
 ---
 
