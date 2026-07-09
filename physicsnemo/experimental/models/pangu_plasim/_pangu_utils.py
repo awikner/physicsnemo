@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -366,10 +367,8 @@ class SubPixelConvICNR_2D(nn.Module):
     def forward(self, x):
         x_padded = self.pad_poles(self.pad_circular(x))
         output = self.conv(x_padded)
-        #print(output.shape)
 
         output = self.pixelshuffle(output)
-        #print(output.shape)
 
         _, _, H, W = output.shape
         h_pad = H - self.img_size[0]
@@ -513,10 +512,8 @@ class SubPixelConvICNR_2D_wHead(nn.Module):
     def forward(self, x):
         x_padded = self.pad_poles(self.pad_circular(x))
         x_upsample = self.conv(x_padded)
-        #print(output.shape)
 
         x_upsample = self.pixelshuffle(x_upsample)
-        #print(output.shape)
 
         _, _, H, W = x_upsample.shape
         h_pad = H - self.img_size[0]
@@ -573,7 +570,6 @@ class SubPixelConvICNR_3D(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # first, split in dimension
-        # print(x.shape)
         x_padded = self.pad_poles(self.pad_circular(x))
         x_padded = x_padded.reshape(x_padded.shape[0], x_padded.shape[1]//2, 2, *x_padded.shape[2:])
         x_padded = x_padded.flatten(2, 3)
@@ -688,7 +684,6 @@ class SubPixelConvICNR_3D_wHead(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # first, split in dimension
-        # print(x.shape)
         x_padded = self.pad_poles(self.pad_circular(x))
         x_padded = x_padded.reshape(x_padded.shape[0], x_padded.shape[1]//2, 2, *x_padded.shape[2:])
         x_padded = x_padded.flatten(2, 3)
@@ -732,19 +727,9 @@ class PatchRecovery5(nn.Module):
     def __init__(self, img_size, patch_size, num_levels, in_chans, out_chans, hidden_dim = 96,
                  padded_front = False, polar_pad = True, num_lat = None,
                  grid_has_poles = False, downfactor = 4):
-        #def __init__(self,
-        #             input_dim=None,
-        #             dim=192,
-        #             downfactor=4,
-        #             hidden_dim=96,
-        #             output_dim=69,
-        #             n_level_variables=5):
-        # input dim equals input_dim*z since we will be flattening stuff ?
         super().__init__()
         self.downfactor = downfactor
         self.num_levels = num_levels
-        #if input_dim is None:
-        #    input_dim = 8*dim
 
         self.img_size = img_size
         self.padded_front = padded_front
@@ -756,7 +741,6 @@ class PatchRecovery5(nn.Module):
                 nn.Conv2d(in_chans//2, out_chans*patch_size[1]**2, kernel_size=3, stride=1, padding=0, bias=0),
                 nn.PixelShuffle(patch_size[1])
             )
-            nn.Conv2d(in_chans, num_levels*hidden_dim, kernel_size=1, stride=1, padding=0)
             self.head = nn.Sequential(
                 PolarPad3d((1, 1), num_lat = num_lat, grid_has_poles=grid_has_poles),
                 nn.CircularPad3d((1, 1, 0, 0, 0, 0)),
@@ -845,20 +829,17 @@ class PolarPad2d(nn.Module):
         self.pad_top = pad[0]
         self.pad_bottom = pad[1]
         self.num_lat = num_lat if num_lat is not None else 64
+        self.grid_has_poles = grid_has_poles
         if not grid_has_poles:
             self.pad_idxs = torch.cat((torch.arange(self.pad_top), torch.arange(self.pad_top+1, self.num_lat+self.pad_top+1),
                                        torch.arange(self.num_lat+self.pad_top+2, self.num_lat+self.pad_top+self.pad_bottom+2))).long()
             self.pad_idxs.requires_grad_(requires_grad = False)
 
     def forward(self, x):
-        try:
-            assert x.shape[-2] == self.num_lat
-        except:
+        if x.shape[-2] != self.num_lat:
             raise ValueError(f'Number of latitude grid points must equal {self.num_lat}.')
-        try:
-            assert x.shape[-1] % 2 == 0
-        except:
-            raise ValueError('Input to PolarPadding2D must have an even number of longitude grid points.')
+        if x.shape[-1] % 2 != 0:
+            raise ValueError('PolarPad2d input must have an even number of longitude grid points.')
         if not self.grid_has_poles:
             padded_x = nn.functional.pad(nn.functional.pad(x, (0, 0, 1, 1), mode = 'constant', value = 0.),
                                         (0, 0, self.pad_top, self.pad_bottom), mode = 'reflect')[..., self.pad_idxs, :]
@@ -881,20 +862,17 @@ class PolarPad3d(nn.Module):
         self.pad_top = pad[0]
         self.pad_bottom = pad[1]
         self.num_lat = num_lat if num_lat is not None else 64
+        self.grid_has_poles = grid_has_poles
         if not grid_has_poles:
             self.pad_idxs = torch.cat((torch.arange(self.pad_top), torch.arange(self.pad_top+1, self.num_lat+self.pad_top+1),
                                        torch.arange(self.num_lat+self.pad_top+2, self.num_lat+self.pad_top+self.pad_bottom+2))).long()
             self.pad_idxs.requires_grad_(requires_grad = False)
 
     def forward(self, x):
-        try:
-            assert x.shape[-2] == self.num_lat
-        except:
+        if x.shape[-2] != self.num_lat:
             raise ValueError(f'Number of latitude grid points must equal {self.num_lat}.')
-        try:
-            assert x.shape[-1] % 2 == 0
-        except:
-            raise ValueError('Input to PolarPadding2D must have an even number of longitude grid points.')
+        if x.shape[-1] % 2 != 0:
+            raise ValueError('PolarPad3d input must have an even number of longitude grid points.')
         if not self.grid_has_poles:
             padded_x = nn.functional.pad(nn.functional.pad(x, (0, 0, 1, 1, 0, 0), mode = 'constant', value = 0.),
                                         (0, 0, self.pad_top, self.pad_bottom, 0, 0), mode = 'reflect')[..., self.pad_idxs, :]

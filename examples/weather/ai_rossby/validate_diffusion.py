@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -108,10 +109,11 @@ class StreamingLatWeightedSpread:
         if ensemble_size <= 1:
             return
         rest = pred_ensemble.shape[1:]
-        assert pred_ensemble.shape[0] % ensemble_size == 0, (
-            f"batch dim {pred_ensemble.shape[0]} not divisible by "
-            f"ensemble_size {ensemble_size}"
-        )
+        if pred_ensemble.shape[0] % ensemble_size != 0:
+            raise ValueError(
+                f"batch dim {pred_ensemble.shape[0]} not divisible by "
+                f"ensemble_size {ensemble_size}"
+            )
         n_ic = pred_ensemble.shape[0] // ensemble_size
         var = (
             pred_ensemble.float()
