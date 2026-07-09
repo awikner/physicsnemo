@@ -1228,3 +1228,21 @@ Remaining:
     for SFNO. Would also need to re-validate loss parity since PanguWeather defaults to bf16.
   - Optional FlashAttention / Mamba-style attention swaps inside the SFNO MLP blocks where applicable.
   - ZeRO-1 optimizer sharding (already a config key, factory pending).
+
+## 7. Phase 9 — Multi-cluster dev setup → see `phase9_implementation_plan.md`
+
+Six-cluster development workflow (SSH/ControlMaster, per-cluster install, env
+propagation, Nsight/CUDA alignment, smoke validation). **Done** (see §6.3).
+
+## 8. Phase 10 — Release preparation → see `phase10_implementation_plan.md`
+
+Getting the fork ready to hand to other group members: onboarding docs
+(README + recipe README + data-acquisition guide) plus an onboarding PDF
+presentation (Marp text-source → PDF), de-personalizing hardcoded
+config/argparse defaults so a fresh checkout runs, licensing/attribution
+(NOTICE + amip/PanguWeather provenance + copyright headers), a focused code
+cleanup, and repo/CI hygiene. **Planned; scope decisions locked 2026-07-09:**
+internal/private release, mixed/collaborator-owned derived code, Pangu/SFNO
+supported + diffusion experimental + healda dropped, ship the `ai-rossby`
+branch as-is. Critical path: de-personalize → onboarding docs → correctness
+fixes. See the phase-10 doc's §0.

@@ -191,6 +191,20 @@ converted equivalent; the `PlasimNormalizer.from_dataset(...)` call in
 For large conversions on an HPC cluster, the repo ships CPU-job skills
 (`delta-cpu-job`, `derecho-cpu-job`, `midway3-cpu-job`, `stampede3-cpu-job`).
 
+> **Where the E3SM Zarr already lives on Delta.** The converted stores are
+> checked into `conf/dataset/e3sm.yaml`, so you don't need to re-convert on
+> Delta — just point the run at them (they are the default paths):
+>
+> | Purpose | Path on Delta |
+> |---|---|
+> | Training split (year 2041) | `/work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2041.zarr` |
+> | Validation split (year 2045) | `/work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2045.zarr` |
+> | Normalization stats (mean+std, 2015–2050) | `/work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/normalization_2015-2050.zarr` |
+>
+> These sit on Delta's `/work/hdd` (the `bdiu` project's hardened-disk
+> allocation). On other clusters, convert your own copy and override the four
+> `dataset.*_path` keys as in §4.1.
+
 ---
 
 ## 3. Converting a trained checkpoint (`.tar`/`.pt` → `.mdlus`)
@@ -298,6 +312,32 @@ DDP is set up automatically when `world_size > 1`. Optional throughput knobs
 `training.ddp_bucket_cap_mb`, `training.ddp_static_graph`,
 `training.jit_compile`, `training.use_static_capture`, `training.amp`.
 
+> **SFNO under DDP requires `torch<2.11`.** torch 2.11 regressed DDP for the
+> SFNO models: `DistributedDataParallel.__init__` raises an int-overflow in
+> `_verify_params_across_processes` on the SFNO parameter set. The recipe
+> pins `torch>=2.10.0,<2.11.0` (and matching torchvision) in `pyproject.toml`
+> for exactly this reason — the checked-in `uv.lock` resolves to torch 2.10.0
+> / NCCL 2.27.5, which matches the validated 4×A100 SFNO benchmark. When
+> re-syncing an environment, keep the pin; a floating `torch>=2.10` will pull
+> 2.11 and break multi-GPU SFNO. The Pangu family is unaffected by the 2.11
+> bug.
+
+> **wandb is initialized on *every* rank under DDP** (only rank 0 logs
+> metrics). This is deliberate: wandb's background threads (service IPC /
+> console capture / GPU monitor) grab the GIL inside CUDA calls, and running
+> wandb on rank 0 alone desyncs the ranks and deadlocks the gradient
+> all-reduce mid-epoch. Initializing wandb on all ranks makes that jitter
+> symmetric, keeping NCCL collectives in lockstep — mirroring the
+> PanguWeather reference trainer. This is handled automatically in
+> `_maybe_init_wandb`; no flag needed. See §5.4.
+
+> **When re-syncing with `uv sync`, include the recipe's optional extras**
+> (`sfno-extras`, `utils-extras`, `datapipes-extras`). Without them `uv sync`
+> prunes torch-harmonics/tensorly (SFNO), wandb/mlflow, and
+> zarr/xarray/netCDF4/dask, which silently breaks SFNO training. The
+> `hpc/scripts/sync-all-clusters.sh` helper already passes these on every
+> cluster.
+
 ### 4.3 Multi-node
 
 Launch `torchrun` per node with a shared rendezvous (`--nnodes`,
@@ -321,6 +361,66 @@ sbatch files in `hpc/scripts/`. Cluster-specific setup is documented in
 | Change checkpoint cadence | `checkpoint_save_interval=5` |
 | Resume | just relaunch with the same `run_name` — it reloads `./checkpoints` |
 | Per-batch loss TSV (bench) | `bench.per_batch_tsv=/path/loss.tsv` |
+| Stage data to node-local disk | `dataset.stage_to_local=True` (see §4.5) |
+
+### 4.5 Staging data to node-local disk (fast)
+
+On clusters where the Zarr stores live on a shared parallel filesystem (Delta
+keeps the E3SM stores on Lustre `/work/hdd`), a data-bound run can pay an I/O
+tax reading chunks over the network while every rank and every concurrent job
+contends on the same filesystem. `dataset.stage_to_local=True` copies the
+stores to fast **node-local disk** (`/tmp`) once at startup, then rewrites the
+dataset paths to the local copies:
+
+```bash
+torchrun --standalone --nproc-per-node=4 train.py \
+    model=sfno_e3sm dataset=e3sm training=sfno_plasim \
+    dataset.stage_to_local=True
+```
+
+How it works (`data_staging.py`):
+
+- **Once per node.** `local_rank 0` on each node does the copy; a global
+  barrier holds the other ranks until every node's copy is complete, so no
+  rank reads a store mid-copy. Each node stages to its own `/tmp`.
+- **Fast.** A Zarr store is thousands of independent chunk files (one E3SM
+  year ≈ 17.5k files / 30 GB). A serial `cp -r` pays one Lustre round-trip
+  per file, serialized — that is what overran an earlier 25-min budget.
+  Staging instead issues **many concurrent copies** (default 256) via a
+  thread pool over kernel `sendfile` (zero-copy). No extra package is needed —
+  stdlib `shutil.copyfile` + threads is optimal here, confirmed by
+  measurement (below); `mpifileutils`/`dcp` isn't even installed on Delta.
+- **Idempotent.** A completed copy drops a `<store>.stage_complete` marker;
+  a requeued job landing on the same node skips re-copying. A killed job's
+  partial copy (no marker) is removed and re-staged, never read as valid.
+- **De-duplicated.** `mean_path` and `std_path` usually point at the same
+  normalization store — it is copied once.
+
+**Where the time goes (measured on Delta, one E3SM year → node-local `/tmp`):**
+the copy against a *warm* cache is **write-bound at ~2.2 GB/s** to `/tmp` —
+identical for `shutil.copyfile` vs a raw `sendfile` loop, and flat from 64 to
+512 workers, so there is nothing to gain from a fancier copy primitive. The
+Lustre **read** side scales hard with concurrency (~1.6 GB/s at 128 readers →
+~12 GB/s at 512), so the worker count's real job is to hide *cold*-read
+latency. That is decisive: a full **cold** year (30 GB / 17.5k files, source
+untouched) stages in **~47 s at 256 workers** (0.64 GB/s) versus ~2 min at 64
+workers and ~7.7 min extrapolated for a serial `cp` — a ~10× speedup that is
+why the default is 256, not a token handful. Bump to 512 for even more
+cold-read concurrency if your source filesystem is under heavy contention.
+
+Knobs (all in `conf/dataset/e3sm.yaml`, overridable on the CLI):
+
+| Goal | Override |
+|---|---|
+| Enable staging | `dataset.stage_to_local=True` |
+| Custom local dir (default `$SLURM_TMPDIR`/`$TMPDIR`/`/tmp`) | `dataset.stage_dir=/local/nvme` |
+| Copy concurrency (default 256) | `dataset.stage_num_workers=512` |
+
+> **When it helps.** Staging is a win only when the run is **I/O-bound** and
+> node-local disk has room (≈60 GB for E3SM train+val+norm; Delta `/tmp` is
+> ~1.3 TB). For the compute-bound SFNO-E3SM speed benchmark it buys nothing,
+> so it is **off by default**. Enable it for data-bound configs or when many
+> jobs hammer the same shared store.
 
 ---
 
@@ -409,9 +509,18 @@ Common controls (all overridable on the CLI):
 | Disable wandb entirely | `wandb.enabled=False` |
 | Upload an offline run afterwards | `wandb sync ./outputs/<run_name>/wandb/<run>` |
 
-Only rank 0 logs to wandb (single-process); other ranks stay console-only. If
-the `wandb` package isn't installed, the trainer prints one warning and falls
-back to console logging — no crash.
+**Multi-GPU:** wandb is created on *every* rank, but only rank 0 routes
+`LaunchLogger` metrics to it — the other ranks' runs stay empty. Running
+wandb on all ranks (rather than rank 0 alone) is required for DDP: its
+background threads grab the GIL inside CUDA calls, and doing so on one rank
+only desyncs the ranks and deadlocks the gradient all-reduce. Initializing on
+all ranks makes the jitter symmetric so NCCL stays in lockstep. `physicsnemo`'s
+`initialize_wandb` names the per-rank runs (`..._Process_<rank>_...`) and gives
+them a shared DDP group tag, so they group cleanly in the wandb UI. No flag is
+needed — this is automatic (`_maybe_init_wandb` in `train.py`).
+
+If the `wandb` package isn't installed, the trainer prints one warning and
+falls back to console logging — no crash.
 
 > **Migrating dashboards from MLflow.** The metric *names* differ from
 > PanguWeather (`val_loss` / `rmse_step*` vs. MLflow's `Validation error`),

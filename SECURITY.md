@@ -1,3 +1,5 @@
+> **Upstream NVIDIA PhysicsNeMo document.** Inherited from upstream; it describes NVIDIA's project, not the ai-rossby fork. For this fork see the top-level [README](README.md) and `examples/weather/ai_rossby/`.
+
 # Security
 
 NVIDIA is dedicated to the security and trust of our software products and

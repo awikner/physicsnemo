@@ -1,3 +1,21 @@
+<!-- ai-rossby fork note -------------------------------------------------- -->
+> **Contributing to the ai-rossby fork (internal research group).**
+> This is a fork of NVIDIA PhysicsNeMo for the group's weather/climate
+> emulation work. For contributions to the **ai-rossby code**
+> (`examples/weather/ai_rossby/`, `tools/`, the added experimental
+> models/datapipes, `hpc/`), the NVIDIA CLA / upstream process below does **not**
+> apply — instead:
+> - Branch from `ai-rossby`, open a PR against `ai-rossby`, and have one other
+>   group member review it.
+> - Keep the SPDX headers intact (the `license` pre-commit hook checks them);
+>   add a University of Chicago copyright line to new files you author.
+> - Run the recipe's smoke tests (see `hpc/<cluster>.md`) before requesting review.
+>
+> The guide below is the **upstream NVIDIA** contribution process; follow it only
+> if you intend to contribute back to NVIDIA PhysicsNeMo itself.
+
+<!-- ----------------------------------------------------------------------- -->
+
 # PhysicsNeMo Contribution Guide
 
 ## Introduction

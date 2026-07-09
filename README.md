@@ -1,3 +1,55 @@
+# ai-rossby — weather & climate emulators on PhysicsNeMo
+
+**This is a fork of [NVIDIA PhysicsNeMo](#nvidia-physicsnemo) maintained by the
+group for training deep-learning weather and climate emulators.** It adds a
+training recipe, data tooling, and multi-cluster HPC setup on top of the
+PhysicsNeMo framework. If you are a new group member, start here — not with the
+upstream README further down.
+
+## What's in this fork
+
+| Model family | What it is | Status |
+|---|---|---|
+| **PanguPlasim / PanguPlasimLegacy** | PanguWeather-style deterministic transformer (PLASIM, ERA5-S2S, E3SM) | Supported |
+| **SfnoPlasim / SFNO-E3SM** | Spherical Fourier Neural Operator | Supported |
+| **AMIP diffusion** (SI / SI_X / EDM / ERDM / RFM) | Stochastic-interpolant latent diffusion | ⚠️ Experimental |
+
+The recipe lives in [`examples/weather/ai_rossby/`](examples/weather/ai_rossby/);
+data converters in [`tools/`](tools/); per-cluster setup in [`hpc/`](hpc/).
+
+## Quickstart (new group member)
+
+1. **Set up the environment on a cluster** — follow
+   [`hpc/install.md`](hpc/install.md) (portable) or the per-cluster recipe
+   ([`hpc/delta.md`](hpc/delta.md), `hpc/deltaai.md`, …).
+2. **Get the data** — see the
+   [**data-acquisition guide**](examples/weather/ai_rossby/DATA.md). On Delta the
+   converted Zarr stores already exist; point `AI_ROSSBY_DATA` at them (or use
+   the built-in Delta fallback).
+3. **Train a model** — see the
+   [**recipe README**](examples/weather/ai_rossby/README.md). Minimal run:
+   ```bash
+   cd examples/weather/ai_rossby
+   python train.py model=sfno_e3sm dataset=e3sm training=sfno_plasim run_name=my_first_run
+   ```
+4. **Evaluate** — `inference.py` → `validate_cli.py` (recipe README §5).
+
+## Key docs
+
+- [`examples/weather/ai_rossby/README.md`](examples/weather/ai_rossby/README.md) — the recipe: configs, training, evaluation.
+- [`examples/weather/ai_rossby/DATA.md`](examples/weather/ai_rossby/DATA.md) — where the data comes from and how to convert it.
+- [`examples/weather/ai_rossby/PANGUWEATHER_MIGRATION.md`](examples/weather/ai_rossby/PANGUWEATHER_MIGRATION.md) — porting a PanguWeather model/config/checkpoint into this recipe.
+- [`tools/README.md`](tools/README.md) — data-conversion + checkpoint-translation tools.
+- [`hpc/`](hpc/) — per-cluster install & run docs; [`docs/dev/`](docs/dev/) — internal development history/plans.
+- [`NOTICE`](NOTICE) — licensing & provenance (this fork derives from PanguWeather and amip).
+
+> **Relationship to upstream.** Everything below this line is the unmodified
+> upstream NVIDIA PhysicsNeMo README, kept for reference. Its CI badges,
+> install instructions, and contribution process refer to NVIDIA's project, not
+> this fork.
+
+---
+
 # NVIDIA PhysicsNeMo
 
 <!-- markdownlint-disable -->
