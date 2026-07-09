@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -44,10 +45,10 @@ Usage
 ::
 
     python tools/data/plasim/pangu_h5_to_zarr.py \\
-      --config /work/nvme/bdiu/awikner/PanguWeather/v2.0/config/SFNO_PLASIM_H5_DERECHO_5412.yaml \\
+      --config /path/to/PanguWeather/v2.0/config/SFNO_PLASIM_H5_DERECHO_5412.yaml \\
       --config-key PLASIM \\
       --year 100 --sample-range 0 120 \\
-      --output /work/nvme/bdiu/awikner/physicsnemo_test_data/plasim/smoke_month.zarr
+      --output /path/to/physicsnemo_test_data/plasim/smoke_month.zarr
 """
 
 from __future__ import annotations

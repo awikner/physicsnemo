@@ -4,7 +4,7 @@
 
 """AMIP stochastic-interpolant / rolling-diffusion backbones (Phase 8a).
 
-Three backbones vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+Three backbones vendored from the amip repo @ commit 497827e
 with imports rewritten to the local ``layers/`` package and wrapped in
 :class:`physicsnemo.Module`:
 

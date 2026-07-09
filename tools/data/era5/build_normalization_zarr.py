@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Convert ERA5 PanguWeather mean+std NetCDFs to one normalization Zarr.
 
 The ERA5 source dir
-(``/work/hdd/bdiu/bgong1/data/h5data/``) ships **per-variant** normalization
+(``/path/to/era5/h5data/``) ships **per-variant** normalization
 files. Each variant has its own naming convention:
 
 * ``pangu_s2s`` (default): ``pangu_s2s_1979-2018_mean.nc`` (upper-air, Z) +
@@ -28,9 +29,9 @@ ERA5 has no sigma coord — only pressure levels. The shared
 Usage::
 
     python tools/data/era5/build_normalization_zarr.py \\
-      --source-dir /work/hdd/bdiu/bgong1/data/h5data \\
+      --source-dir /path/to/era5/h5data \\
       --variant pangu_s2s \\
-      --output /work/nvme/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s.zarr
+      --output $AI_ROSSBY_DATA/era5/normalization_pangu_s2s.zarr
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--source-dir",
         type=Path,
-        default=Path("/work/hdd/bdiu/bgong1/data/h5data"),
+        required=True,
         help="Dir containing the per-variant ERA5 mean/std NetCDFs.",
     )
     p.add_argument(

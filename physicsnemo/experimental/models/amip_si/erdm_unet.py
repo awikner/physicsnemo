@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/models/ERDM.py) for Phase 8a. The two helpers ``ResBlock``
 # and ``AttentionBlock`` (originally in upstream ``modules.models.Unet``)
 # are vendored in :mod:`._unet_blocks` — only the two helpers are

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/diffusion/rfm.py) for Phase 8a.
 
 import logging

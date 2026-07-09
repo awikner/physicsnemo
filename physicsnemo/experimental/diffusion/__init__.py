@@ -4,7 +4,7 @@
 
 """AMIP diffusion / stochastic-interpolant schedulers (Phase 8a).
 
-Five schedulers vendored from /work/nvme/bdiu/awikner/amip @ commit
+Five schedulers vendored from the amip repo @ commit
 497827e with imports rewritten to a local ``_utils`` module:
 
 * :class:`DriftScheduler` — stochastic interpolant baseline (SI variant).

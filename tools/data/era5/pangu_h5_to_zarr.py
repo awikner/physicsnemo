@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Convert PanguWeather-style per-timestep ERA5 HDF5 files to one Zarr store.
 
 The source layout
-(``/work/hdd/bdiu/bgong1/data/h5data/{year}_{idx:04d}.h5``) carries one
+(``/path/to/era5/h5data/{year}_{idx:04d}.h5``) carries one
 sample per file with flat ``input/<varname>[_<pressure>]`` keys. Pressure-level
 vars use a numeric suffix in **hPa** (``temperature_500.0``); surface vars are
 flat (``2m_temperature``); single-level "boundary-like" vars (e.g.
@@ -35,7 +36,7 @@ Usage::
 
     python tools/data/era5/pangu_h5_to_zarr.py \\
       --year 1979 --sample-range 0 1460 \\
-      --output /work/nvme/bdiu/awikner/physicsnemo-zarr/era5/1979.zarr
+      --output $AI_ROSSBY_DATA/era5/1979.zarr
 
 cftime decoding is forced everywhere for consistency with the PLASIM
 converter; the per-sample ``input/time`` scalar is parsed and reattached as a
@@ -133,7 +134,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("/work/hdd/bdiu/bgong1/data/h5data"),
+        required=True,
         help="Dir containing ERA5 {year}_{idx:04d}.h5 per-timestep files.",
     )
     p.add_argument("--year", type=int, required=True, help="Year to convert.")

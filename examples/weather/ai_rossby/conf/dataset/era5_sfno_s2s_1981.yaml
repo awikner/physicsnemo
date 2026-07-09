@@ -6,10 +6,11 @@
 # (17 pressure levels, 9 surface vars, 2 diag, 2 const, 1 varying).
 # Pairs with conf/model/sfno_plasim_s2s.yaml.
 
-zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5_sfno_s2s/1981.zarr
+# All stores resolve under $AI_ROSSBY_DATA (fallback: shared Delta location).
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5_sfno_s2s/1981.zarr
 val_zarr_path: null
-mean_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_mean.zarr
-std_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_std.zarr
+mean_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5/normalization_pangu_s2s_mean.zarr
+std_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5/normalization_pangu_s2s_std.zarr
 delta_std_path: null
 boundary_zarr_path: null
 yearly_repeating_boundary: False

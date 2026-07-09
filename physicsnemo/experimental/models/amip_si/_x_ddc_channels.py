@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (common/utils.py:assemble_input / disassemble_input) for Phase 8f (F6).
 #
 # Upstream's x_DDC channel order is ``(surface, diagnostic, multilevel)``

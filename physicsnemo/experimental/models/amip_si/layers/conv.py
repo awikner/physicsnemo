@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/layers/conv.py) for Phase 8a. Exports SphereConv2d,
 # DCUpsample, DCDownsample, ResnetBlock + a `nonlinearity` helper.
 # Pure-PyTorch — no upstream-private imports.

@@ -4,7 +4,7 @@
 
 """Vendored building blocks for the AMIP diffusion backbones.
 
-Sourced from /work/nvme/bdiu/awikner/amip @ commit 497827e
+Sourced from the amip repo @ commit 497827e
 (modules/layers/*.py) and lightly edited to drop upstream-private
 imports (``modules.layers.old.*``) and adopt local relative imports.
 """

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -23,8 +24,8 @@ with ``bias_groups={}`` and both ``climatology_ds`` (mean) and
 Usage::
 
     python tools/data/era5/build_climatology_zarr.py \\
-      --source-dir /work/hdd/bdiu/bgong1/data/h5data \\
-      --output /work/nvme/bdiu/awikner/physicsnemo-zarr/era5/climatology_bias.zarr
+      --source-dir /path/to/era5/h5data \\
+      --output $AI_ROSSBY_DATA/era5/climatology_bias.zarr
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--source-dir",
         type=Path,
-        default=Path("/work/hdd/bdiu/bgong1/data/h5data"),
+        required=True,
         help="Dir containing the ERA5 climatology mean+std NetCDFs.",
     )
     p.add_argument(

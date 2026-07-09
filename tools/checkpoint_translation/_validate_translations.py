@@ -1,8 +1,21 @@
 #!/usr/bin/env python
-"""Translate + load + forward-check all three user-provided PanguWeather checkpoints."""
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Dev harness: translate + load + forward-check PanguWeather checkpoints.
+
+Loads each PanguWeather ``.tar`` checkpoint, translates it to the ai-rossby
+wrapper layout, instantiates the target model from its committed model YAML,
+loads the weights, and runs a forward pass to sanity-check missing/unexpected
+keys and output finiteness. This is a *developer* validation harness, not part
+of the supported recipe — point the ``VALIDATE_*_CKPT`` env vars at your own
+PanguWeather checkpoints; cases whose env var is unset are skipped.
+"""
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import warnings
@@ -13,33 +26,37 @@ import torch
 # silence the experimental-namespace warning during the heavy imports
 warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
 
-sys.path.insert(0, "/work/nvme/bdiu/awikner/physicsnemo/tools/checkpoint_translation")
+# Import the sibling translators from this script's own directory.
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
 import pangu_plasim as pp_trans
 import sfno_plasim as sfno_trans
 
+# Model YAMLs live in the repo; checkpoints are user-supplied via env vars.
+_MODEL_CONF = _HERE.parents[1] / "examples/weather/ai_rossby/conf/model"
 
 CASES = [
     {
-        "label": "PanguPlasimLegacy (PLASIM 0515)",
+        "label": "PanguPlasimLegacy (PLASIM)",
         "translator": pp_trans,
-        "ckpt": "/work/nvme/bdiu/awikner/PanguWeather/v2.0/results/PLASIM/0515/checkpoints/ckpt_epoch_99.tar",
-        "yaml": "/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/conf/model/pangu_plasim_legacy.yaml",
+        "ckpt": os.environ.get("VALIDATE_PLASIM_CKPT"),
+        "yaml": str(_MODEL_CONF / "pangu_plasim_legacy.yaml"),
         "target_class": "PanguPlasimLegacy",
         # 13 pressure levels × 5 upper-air vars, 64x128
     },
     {
-        "label": "PanguPlasimLegacy (S2S, mapped from user's 'PanguPlasim' label)",
+        "label": "PanguPlasimLegacy (S2S)",
         "translator": pp_trans,
-        "ckpt": "/work/hdd/bdiu/awikner/PanguWeather-rajatm2/v2.0/results/S2S/2000/training_checkpoints/best_ckpt.tar",
-        "yaml": "/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/conf/model/pangu_plasim_s2s.yaml",
+        "ckpt": os.environ.get("VALIDATE_S2S_CKPT"),
+        "yaml": str(_MODEL_CONF / "pangu_plasim_s2s.yaml"),
         "target_class": "PanguPlasimLegacy",
         # 17 pressure levels × 5 upper-air vars, 180x360
     },
     {
         "label": "SfnoPlasim (PLASIM 5412)",
         "translator": sfno_trans,
-        "ckpt": "/work/nvme/bdiu/awikner/PanguWeather/v2.0/results/SFNO/5412/checkpoints/ckpt_epoch_25.tar",
-        "yaml": "/work/nvme/bdiu/awikner/physicsnemo/examples/weather/ai_rossby/conf/model/sfno_plasim_5412.yaml",
+        "ckpt": os.environ.get("VALIDATE_SFNO_CKPT"),
+        "yaml": str(_MODEL_CONF / "sfno_plasim_5412.yaml"),
         "target_class": "SfnoPlasim",
         # 10 levels, 64x128
     },
@@ -195,6 +212,9 @@ def main():
     print(f"running on {device}")
     results = []
     for case in CASES:
+        if not case["ckpt"]:
+            print(f"SKIP {case['label']}: set its VALIDATE_*_CKPT env var to run it")
+            continue
         try:
             results.append(run_one(case, device))
         except Exception as e:

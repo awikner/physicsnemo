@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/diffusion/edm.py) for Phase 8a. Implementation is largely
 # based on the code at https://github.com/yuanzhi-zhu/mini_edm.
 #

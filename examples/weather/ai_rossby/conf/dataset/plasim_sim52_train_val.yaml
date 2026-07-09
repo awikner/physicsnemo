@@ -6,10 +6,13 @@
 # Use with training configs that enable validation/rollout to score rollouts
 # on the held-out year.
 
-zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/12.zarr
-val_zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/13.zarr
-mean_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_mean_sigma.nc
-std_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_std_sigma.nc
+# Zarr stores resolve under $AI_ROSSBY_DATA; the PLASIM sigma-stats (.nc, on a
+# separate tree) under $AI_ROSSBY_PLASIM_STATS. Both fall back to the shared
+# Delta locations if the env vars are unset. See the data-acquisition guide.
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/plasim/12.zarr
+val_zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/plasim/13.zarr
+mean_path: ${oc.env:AI_ROSSBY_PLASIM_STATS,/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data}/data_12-132_mean_sigma.nc
+std_path: ${oc.env:AI_ROSSBY_PLASIM_STATS,/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data}/data_12-132_std_sigma.nc
 delta_std_path: null
 boundary_zarr_path: null
 yearly_repeating_boundary: False

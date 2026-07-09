@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Convert E3SM PanguWeather mean+std NetCDFs to one normalization Zarr.
 
 The E3SM source dir
-(``/work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data/``)
+(``/path/to/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data/``)
 contains:
 
 * ``data_2015-2050_mean.nc`` — per-variable mean, with multi-level vars
@@ -21,8 +22,8 @@ the user's E3SM convention answer #6).
 Usage::
 
     python tools/data/e3sm/build_normalization_zarr.py \\
-      --source-dir /work/hdd/bdiu/awikner/E3SM/.../h5/sigma_data \\
-      --output /work/nvme/bdiu/awikner/physicsnemo-zarr/e3sm/normalization_2015-2050.zarr
+      --source-dir /path/to/E3SM/.../h5/sigma_data \\
+      --output $AI_ROSSBY_DATA/e3sm/normalization_2015-2050.zarr
 """
 
 from __future__ import annotations
@@ -52,9 +53,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--source-dir",
         type=Path,
-        default=Path(
-            "/work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data"
-        ),
+        required=True,
     )
     p.add_argument("--mean", type=str, default="data_2015-2050_mean.nc")
     p.add_argument("--std", type=str, default="data_2015-2050_std.nc")

@@ -6,10 +6,12 @@
 # Pairs with conf/model/sfno_plasim_5412.yaml or conf/model/pangu_plasim.yaml
 # (matching sigma+pressure level layout). Used by the SFNO_PLASIM benchmark.
 
-zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/plasim/12.zarr
+# Zarr stores resolve under $AI_ROSSBY_DATA; PLASIM sigma-stats under
+# $AI_ROSSBY_PLASIM_STATS. Both fall back to the shared Delta locations.
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/plasim/12.zarr
 val_zarr_path: null
-mean_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_mean_sigma.nc
-std_path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data/data_12-132_std_sigma.nc
+mean_path: ${oc.env:AI_ROSSBY_PLASIM_STATS,/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data}/data_12-132_mean_sigma.nc
+std_path: ${oc.env:AI_ROSSBY_PLASIM_STATS,/work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data}/data_12-132_std_sigma.nc
 delta_std_path: null
 boundary_zarr_path: null
 yearly_repeating_boundary: False

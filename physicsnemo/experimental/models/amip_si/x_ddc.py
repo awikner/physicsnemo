@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/models/Unet.py, class ``UNet``) for Phase 8f (F6). Renamed
 # ``XDDCUNet`` here to disambiguate from a bare ``UNet`` name and to
 # pair with :class:`~.wrappers.XDDCWrapper`. The two building blocks

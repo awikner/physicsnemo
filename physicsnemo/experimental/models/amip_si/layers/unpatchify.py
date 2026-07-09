@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/layers/unpatchify.py) for Phase 8a of the ai-rossby plan.
 # Imports rewritten to local layer modules; ``modulate_fused`` is
 # inlined from modules/layers/old/fa_basics.py (a jit-scripted

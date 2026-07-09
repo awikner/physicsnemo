@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/layers/cross_attention.py) for Phase 8a. The upstream's
 # `CrossAttentionBlock` (which depended on the `modules.layers.old.MLP`
 # helper) is dropped — only `CrossAttention` is consumed by our 3

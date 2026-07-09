@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 r"""Translate upstream amip Lightning ``.ckpt`` blobs to ``.mdlus``.
 
-Upstream amip (``/work/nvme/bdiu/awikner/amip``, commit ``497827e``)
+Upstream amip (``$AI_ROSSBY_AMIP_REPO``, commit ``497827e``)
 trains the SI / SI_X / ERDM / RFM / EDM diffusion families with
 PyTorch Lightning. Their checkpoint payload follows the standard
 Lightning layout *plus* a ``WeightAveraging`` callback that splits the
@@ -27,7 +28,7 @@ PhysicsNeMo wrapper checkpoint (``.mdlus``):
 1. Load the Lightning ``.ckpt`` (``weights_only=False`` since the
    pickle still references upstream amip's pickled ``GetDataset``
    normalizer — the translator only needs a sys.path entry to
-   ``/work/nvme/bdiu/awikner/amip``).
+   ``$AI_ROSSBY_AMIP_REPO``).
 2. Read ``hyper_parameters.config.model.model_name`` and cross-check
    it against the supplied wrapper YAML's class name.
 3. Pick the source state dict — ``state_dict`` (EMA-averaged, default)
@@ -70,15 +71,16 @@ Usage
 ::
 
     python tools/checkpoint_translation/amip_si.py \\
-        --source /work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/SI_X_AIMIP_interp_gaussian_42_2026-05-28T09-27-49/last.ckpt \\
+        --source $AI_ROSSBY_AMIP_CKPT/SI_X_AIMIP_interp_gaussian_42_2026-05-28T09-27-49/last.ckpt \\
         --model-config examples/weather/ai_rossby/conf/model/amip_si_x.yaml \\
-        --output /work/nvme/bdiu/awikner/checkpoints/amip/si_x_aimip_interp_gaussian.mdlus
+        --output /path/to/checkpoints/amip/si_x_aimip_interp_gaussian.mdlus
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -174,11 +176,14 @@ def load_lightning_ckpt(
     ``data.amip_new``) inside the ckpt's ``hyper_parameters`` block, so
     Python needs ``amip_repo`` on ``sys.path`` before
     :func:`torch.load` unpickles. Pass the upstream repo root via
-    ``amip_repo`` (defaults to ``/work/nvme/bdiu/awikner/amip``, which
-    is where it lives on Delta — override only if the upstream tree
-    moved).
+    ``amip_repo``; if omitted it falls back to the ``AI_ROSSBY_AMIP_REPO``
+    env var, then to the shared Delta location. Override if the upstream
+    ``amip`` tree lives elsewhere.
     """
-    repo = Path(amip_repo) if amip_repo else Path("/work/nvme/bdiu/awikner/amip")
+    repo = Path(
+        amip_repo
+        or os.environ.get("AI_ROSSBY_AMIP_REPO", "/work/nvme/bdiu/awikner/amip")
+    )
     if repo.exists() and str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
     blob = torch.load(source, map_location="cpu", weights_only=False)
@@ -279,9 +284,9 @@ def detect_model_name(blob: dict) -> str:
     if name in _UNSUPPORTED_MODEL_NAMES:
         raise NotImplementedError(
             f"source model_name={name!r} is not supported by this "
-            f"translator — see phase8e_midway3_checkpoint_inventory.md "
-            f"for why (Combined has no standalone checkpoint; compose "
-            f"it at runtime from a translated forecaster + x_DDC pair)."
+            f"translator: Combined has no standalone checkpoint. Compose "
+            f"it at runtime from a translated forecaster + x_DDC pair "
+            f"(see CombinedModule)."
         )
     if name not in _MODEL_NAME_TO_WRAPPER:
         raise ValueError(
@@ -360,8 +365,7 @@ def _xddc_wrapper_kwargs_from_hparams(blob: dict) -> dict:
             f"x_DDC decoder_type={decoder_type!r} is not supported by "
             "this translator — only the convolutional UNet denoiser is "
             "vendored (XDDCUNet). The DiT autoencoder denoiser "
-            "(decoder_type='dit', modules/models/DiTAE.py) is deferred; "
-            "see phase8e_midway3_checkpoint_inventory.md."
+            "(decoder_type='dit') is deferred."
         )
     unet_cfg = dict(xddc_cfg.get("decoder", {}))
     for k in _BACKBONE_AUTO_KEYS:
@@ -716,7 +720,7 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         default=None,
         help=(
             "Path to the upstream amip repo (used to unpickle the data "
-            "normalizer). Defaults to /work/nvme/bdiu/awikner/amip."
+            "normalizer). Defaults to $AI_ROSSBY_AMIP_REPO."
         ),
     )
     p.add_argument(

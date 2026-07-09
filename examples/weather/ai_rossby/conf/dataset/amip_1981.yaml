@@ -8,14 +8,14 @@
 # Zarr store's `attrs` (the dataset class introspects them); the recipe
 # only needs the path + normalization stats here.
 
-zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981.zarr
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/amip/1981.zarr
 val_zarr_path: null
 
 # AMIP normalize_*.nc files were saved alongside the source HDF5 archive.
 # They use the same NetCDF-per-variable + level coord layout PlasimNormalizer
 # (now ClimateNormalizer) reads.
-mean_path: /work/hdd/bdiu/awikner/AMIP/h5/normalize_mean.nc
-std_path: /work/hdd/bdiu/awikner/AMIP/h5/normalize_std.nc
+mean_path: ${oc.env:AI_ROSSBY_AMIP_STATS,/work/hdd/bdiu/awikner/AMIP/h5}/normalize_mean.nc
+std_path: ${oc.env:AI_ROSSBY_AMIP_STATS,/work/hdd/bdiu/awikner/AMIP/h5}/normalize_std.nc
 delta_std_path: null
 
 # AMIP forcings (SST / sea-ice / TSI / CO₂) come from the prognostic store,

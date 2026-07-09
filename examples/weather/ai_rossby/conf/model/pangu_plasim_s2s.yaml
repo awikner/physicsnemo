@@ -8,8 +8,8 @@
 # Backbone defaults (num_heads=(6,12,12,6), depths=(2,6,6,2)) match
 # PanguWeather's PanguModel_Plasim ctor defaults.
 #
-# The S2S checkpoint at
-# /work/hdd/bdiu/awikner/PanguWeather-rajatm2/v2.0/results/S2S/2000/training_checkpoints/best_ckpt.tar
+# The S2S training checkpoint (PanguWeather v2.0, S2S/2000
+# results/.../best_ckpt.tar)
 # carries deterministic weights only (no layer_mu / layer_sigma / *_e2
 # tensors), so it loads cleanly into PanguPlasimLegacy. To load it
 # into the VAE PanguPlasim class instead, the VAE branches are left

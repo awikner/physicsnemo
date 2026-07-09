@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -39,7 +40,7 @@ Usage::
     python tools/data/e3sm/build_climatology_zarr.py \\
       --climatology /work/hdd/bdiu/.../sigma_data/climatology.nc \\
       --bias-dir    /work/hdd/bdiu/.../bias \\
-      --output      /work/nvme/bdiu/awikner/physicsnemo-zarr/e3sm/climatology_bias.zarr
+      --output      $AI_ROSSBY_DATA/e3sm/climatology_bias.zarr
 """
 
 from __future__ import annotations

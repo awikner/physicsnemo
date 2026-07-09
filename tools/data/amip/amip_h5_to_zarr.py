@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -64,7 +65,7 @@ Usage
     python tools/data/amip/amip_h5_to_zarr.py \\
       --config tools/data/amip/configs/amip_default.yaml \\
       --year 1981 \\
-      --output /work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981.zarr
+      --output $AI_ROSSBY_DATA/amip/1981.zarr
 """
 
 from __future__ import annotations

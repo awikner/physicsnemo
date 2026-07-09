@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from /work/nvme/bdiu/awikner/amip @ commit 497827e
+# Vendored from the amip repo @ commit 497827e
 # (modules/diffusion/utils.py) for Phase 8a. Pure-PyTorch (plus
 # torch_harmonics for SphereNoiseGenerator) — no upstream-private
 # imports.

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Two UNet building blocks (``ResBlock`` + ``AttentionBlock``) extracted
-from /work/nvme/bdiu/awikner/amip @ commit 497827e
+from the amip repo @ commit 497827e
 (modules/models/Unet.py lines 11–98) for Phase 8a.
 
 The upstream ``Unet.UNet`` class itself is deferred (Phase 8f); only

@@ -185,3 +185,7 @@ sbatch_logs/
 
 # ASV
 .asv/
+
+# ai-rossby: HPC job logs (per-user run artifacts, do not commit)
+hpc/scripts/logs/*.out
+hpc/scripts/logs/*.err

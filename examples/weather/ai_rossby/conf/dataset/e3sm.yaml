@@ -6,11 +6,16 @@
 # Speed-benchmarking config for the SFNO-E3SM training-speed optimization —
 # one archived year suffices for per-batch throughput measurement (matches
 # the PLASIM sim52 bench convention).
-
-zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2041.zarr
-val_zarr_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/2045.zarr
-mean_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/normalization_2015-2050.zarr
-std_path: /work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/normalization_2015-2050.zarr
+#
+# Data root: paths resolve under the AI_ROSSBY_DATA env var (the converted-Zarr
+# root). Set it once (e.g. `export AI_ROSSBY_DATA=/my/physicsnemo-zarr`) to
+# relocate all stores; if unset it falls back to the shared Delta location,
+# which delta_bdiu members can already read. Override any single path on the
+# CLI, e.g. `dataset.zarr_path=/my/store.zarr`. See the data-acquisition guide.
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/e3sm/2041.zarr
+val_zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/e3sm/2045.zarr
+mean_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/e3sm/normalization_2015-2050.zarr
+std_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/e3sm/normalization_2015-2050.zarr
 delta_std_path: null
 boundary_zarr_path: null
 yearly_repeating_boundary: False
@@ -32,3 +37,24 @@ shuffle: True
 
 normalize_constant_boundary: True
 normalize_diagnostic: True
+
+# --- Node-local data staging (optional) ------------------------------------
+# When True, copy every Zarr store above (train/val/normalization/boundary) to
+# fast node-local disk at the start of training and read from there, instead of
+# contending on the shared parallel filesystem (Delta Lustre /work/hdd) across
+# ranks and concurrent jobs. The copy runs once per node (local_rank 0) with a
+# large thread pool over kernel sendfile. See data_staging.py.
+#
+# Measured on Delta (E3SM year: ~17.5k chunk files / 30 GB, node-local /tmp):
+# a warm copy is write-bound at ~2.2 GB/s to /tmp (independent of copy method
+# or worker count), while the Lustre READ side scales hard with concurrency
+# (~1.6 GB/s @128 workers -> ~12 GB/s @512). Concurrency's job is to hide
+# cold-read latency: a full COLD year stages in ~47s @256 workers vs ~2 min
+# @64 and ~7.7 min for a serial `cp` — hence the 256 default. A serial `cp -r`
+# (one Lustre round-trip per file, serialized) overran a 25-min budget.
+#
+# Off by default (only a win when the run is data-bound and node-local disk has
+# room; ~60 GB for train+val+norm here).
+stage_to_local: False
+stage_dir: null            # null -> $SLURM_TMPDIR / $TMPDIR / /tmp (per-job subdir)
+stage_num_workers: 256     # concurrent file copies; I/O-bound, so >> CPU count is fine

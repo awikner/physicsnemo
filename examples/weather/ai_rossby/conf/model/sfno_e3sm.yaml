@@ -6,8 +6,8 @@
 # (converted from PanguWeather-e3sm v2.0 E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml
 # SFNO block; jsw_256 = embed_dim 256).
 #
-# Reference: /work/nvme/bdiu/awikner/PanguWeather-e3sm/v2.0/config/
-#            E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml
+# Reference: PanguWeather-e3sm v2.0
+#            config/E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml
 
 name: SfnoPlasim
 module: physicsnemo.experimental.models.sfno_plasim

@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Convert PanguWeather-style per-timestep E3SM HDF5 files to one Zarr store.
 
 E3SM source layout
-(``/work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data/``)
+(``/path/to/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data/``)
 has one sample per ``{year}_{idx:04d}.h5`` file. Flat ``input/<var>[_<level>]``
 keys; pressure-level vars use **hPa** in the level suffix (e.g.
 ``T_998.4964394917621``). Note:
@@ -31,7 +32,7 @@ Usage::
 
     python tools/data/e3sm/pangu_h5_to_zarr.py \\
       --year 2015 --sample-range 0 1460 \\
-      --output /work/nvme/bdiu/awikner/physicsnemo-zarr/e3sm/2015.zarr
+      --output $AI_ROSSBY_DATA/e3sm/2015.zarr
 """
 
 from __future__ import annotations
@@ -119,9 +120,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--input-dir",
         type=Path,
-        default=Path(
-            "/work/hdd/bdiu/awikner/E3SM/E3SMv3_SSP245AMIP_CTL_SST0051_REST0101/h5/sigma_data"
-        ),
+        required=True,
         help="Dir containing the E3SM {year}_{idx:04d}.h5 per-timestep files.",
     )
     p.add_argument("--year", type=int, required=True)
