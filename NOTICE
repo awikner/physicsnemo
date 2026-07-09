@@ -1,0 +1,67 @@
+ai-rossby
+=========
+
+This repository is a fork of NVIDIA PhysicsNeMo (Apache License 2.0; see
+LICENSE.txt) with additional weather- and climate-emulation code developed at
+The University of Chicago. It also contains code derived from two external
+research codebases. This NOTICE records that provenance.
+
+Upstream framework
+------------------
+NVIDIA PhysicsNeMo — Copyright (c) NVIDIA CORPORATION & AFFILIATES, licensed
+under the Apache License, Version 2.0. The bulk of this repository is unmodified
+or lightly-modified PhysicsNeMo. See LICENSE.txt for the full license text.
+
+University of Chicago contributions
+-----------------------------------
+Copyright (c) 2026 The University of Chicago. The ai-rossby training recipe
+(examples/weather/ai_rossby/), the data-conversion and checkpoint-translation
+tools (tools/), and the added experimental models/datapipes noted below carry a
+University of Chicago copyright line in addition to the upstream NVIDIA line,
+and are released under the same Apache License, Version 2.0.
+
+Derived components and their provenance
+---------------------------------------
+The following components are derived from external research codebases. Their
+licensing is being confirmed with the respective authors before any
+distribution beyond the immediate research group (see "Status", below).
+
+1. PanguWeather-derived deterministic models
+   - Files: physicsnemo/experimental/models/pangu_plasim/**,
+     physicsnemo/experimental/models/sfno_plasim/**,
+     examples/weather/ai_rossby/loss.py (loss formulation).
+   - Derived from: the PanguWeather v2.0 training stack (the
+     "PanguWeather-e3sm" / "PanguWeather-plasim" forks), which is itself
+     derived from NVIDIA's makani / FourCastNet stack (Apache-2.0) and from the
+     original Pangu-Weather architecture (Bi et al.,
+     https://github.com/198808xc/Pangu-Weather).
+   - License of the PanguWeather v2.0 fork: TODO — confirm with the
+     PanguWeather v2.0 authors and record here (expected Apache/BSD-family via
+     the makani/FourCastNet ancestry, but must be confirmed).
+
+2. amip-derived diffusion models and recipe
+   - Files: physicsnemo/experimental/models/amip_si/**,
+     physicsnemo/experimental/diffusion/**,
+     examples/weather/ai_rossby/{train_diffusion,validate_diffusion,eval_diffusion}.py,
+     tools/checkpoint_translation/amip_si.py.
+   - Derived from: the "amip" diffusion codebase, @ commit 497827e (the
+     per-file "Vendored from the amip repo @ commit 497827e" markers).
+   - Owner / License: TODO — collaborator-owned; obtain the amip author's
+     permission and license, and record them here. Until then this component
+     ships to the internal group only.
+
+3. EDM diffusion core
+   - File: physicsnemo/experimental/diffusion/__init__.py (EDMSchedulerModule)
+     and related.
+   - Modeled on EDM (Karras et al.). This code tracks the Apache-2.0 EDM
+     implementation already shipped in PhysicsNeMo — NOT the non-commercial
+     (CC-BY-NC-SA) NVIDIA EDM reference implementation. TODO — confirm.
+
+Status (2026-07-09)
+-------------------
+Release scope: internal research group only. The two derived components above
+(PanguWeather-derived, amip-derived) are pending author sign-off and license
+confirmation. If a contributor declines, the affected component is removed from
+the release surface (the amip-derived diffusion recipe is marked experimental
+and can be dropped). A public release would require formally resolving each
+"TODO" above before distribution.
