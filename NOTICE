@@ -35,9 +35,9 @@ distribution beyond the immediate research group (see "Status", below).
      derived from NVIDIA's makani / FourCastNet stack (Apache-2.0) and from the
      original Pangu-Weather architecture (Bi et al.,
      https://github.com/198808xc/Pangu-Weather).
-   - License of the PanguWeather v2.0 fork: TODO — confirm with the
-     PanguWeather v2.0 authors and record here (expected Apache/BSD-family via
-     the makani/FourCastNet ancestry, but must be confirmed).
+   - Copyright / license: Copyright (c) 2026 Alexander Wikner / The University
+     of Chicago; released under the Apache License, Version 2.0 (consistent with
+     the makani / FourCastNet ancestry). Confirmed 2026-07-09.
 
 2. amip-derived diffusion models and recipe
    - Files: physicsnemo/experimental/models/amip_si/**,
@@ -46,9 +46,12 @@ distribution beyond the immediate research group (see "Status", below).
      tools/checkpoint_translation/amip_si.py.
    - Derived from: the "amip" diffusion codebase, @ commit 497827e (the
      per-file "Vendored from the amip repo @ commit 497827e" markers).
-   - Owner / License: TODO — collaborator-owned; obtain the amip author's
-     permission and license, and record them here. Until then this component
-     ships to the internal group only.
+   - Copyright / license: Copyright (c) 2026 Anthony Zhou, Carnegie Mellon
+     University (ayz2@andrew.cmu.edu). Used with the author's permission
+     (confirmed 2026-07-09) and released here under the Apache License,
+     Version 2.0. The vendored amip files
+     (physicsnemo/experimental/models/amip_si/**,
+     physicsnemo/experimental/diffusion/**) carry his copyright line.
 
 3. EDM diffusion core
    - File: physicsnemo/experimental/diffusion/__init__.py (EDMSchedulerModule)
@@ -59,9 +62,9 @@ distribution beyond the immediate research group (see "Status", below).
 
 Status (2026-07-09)
 -------------------
-Release scope: internal research group only. The two derived components above
-(PanguWeather-derived, amip-derived) are pending author sign-off and license
-confirmation. If a contributor declines, the affected component is removed from
-the release surface (the amip-derived diffusion recipe is marked experimental
-and can be dropped). A public release would require formally resolving each
-"TODO" above before distribution.
+Release scope: internal research group only. Author sign-off for both derived
+components (PanguWeather-derived — A. Wikner; amip-derived — A. Zhou, CMU) has
+been obtained, and copyright is recorded above. The EDM item (3) remains a
+technical confirmation, not a legal blocker. A public release would still
+warrant a formal license review, but no outstanding permissions remain for the
+internal group release.
