@@ -357,13 +357,17 @@ single source of truth.
    (it distills them, so building earlier risks drift).
 
 ## Acceptance criteria
-- [ ] A fresh `ai-rossby` clone + documented env setup + one documented command
+- [x] A fresh `ai-rossby` clone + documented env setup + one documented command
       trains a supported Pangu/SFNO recipe on a cluster (10f smoke), with **no**
-      edits to hardcoded personal paths.
+      edits to hardcoded personal paths. **Verified 2026-07-09** (Delta job
+      20012367, 1×A100): with `AI_ROSSBY_DATA` unset the config resolved to the
+      shared store via the fallback and SFNO-E3SM trained 5 steps cleanly.
 - [ ] `README.md` identifies the fork and routes a new member to a working
       quickstart; recipe README + data-acquisition guide exist.
-- [ ] `NOTICE` present; amip + PanguWeather licenses documented and compatible;
-      researcher-authored files carry correct copyright; 0 headerless files.
+- [x] `NOTICE` present; amip + PanguWeather licenses documented and compatible
+      (author sign-offs obtained 2026-07-09 — PanguWeather: A. Wikner / UChicago;
+      amip: A. Zhou / CMU); researcher-authored files carry correct copyright;
+      0 headerless files; `license` pre-commit hook passes.
 - [ ] No committed run logs, collaborator usernames scrubbed from code/configs,
       no hard `KeyError` env reads on a documented setup.
 - [ ] Correctness fixes in 10d landed; CI (fork-appropriate) is green.
