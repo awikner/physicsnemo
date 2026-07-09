@@ -37,9 +37,9 @@ then replace the three `TODO-*-UUID` placeholders in
 
 ```yaml
 clusters:
-  delta:      { globus_collection: <NCSA Delta collection UUID> }
-  derecho:    { globus_collection: <NCAR GLADE collection UUID> }
-  stampede3:  { globus_collection: <TACC Stampede3 collection UUID> }
+  delta:      { globus_collection: 7e936164-de58-4e3d-85da-21aa23c07169 }
+  derecho:    { globus_collection: d33b3614-6d04-11e5-ba46-22000b92c6ec }
+  stampede3:  { globus_collection: 1e9ddd41-fe4b-406f-95ff-f3d79f9cb523 }
 ```
 
 Authenticate once from wherever you run the CLI (your laptop is easiest —

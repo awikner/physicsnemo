@@ -16,19 +16,19 @@
 clusters:
   delta:
     data_root: /work/hdd/bdiu/awikner/physicsnemo-zarr
-    globus_collection: TODO-NCSA-DELTA-UUID   # look up once on globus.org
+    globus_collection: 7e936164-de58-4e3d-85da-21aa23c07169   # NCSA Delta
     persistent: true                          # /work/hdd is not purged
   deltaai:
     alias_of: delta                           # shares Delta /work — physically the same data
   derecho:
     data_root: /glade/derecho/scratch/awikner/physicsnemo-zarr
-    globus_collection: TODO-NCAR-GLADE-UUID
+    globus_collection: d33b3614-6d04-11e5-ba46-22000b92c6ec   # NCAR GLADE
     volatile: true                            # scratch: 60-day purge
     role: master
   stampede3:
     data_root: /scratch/09979/awikner/physicsnemo-zarr
     raw_root: /scratch/09979/awikner/raw       # staged raw h5 for on-cluster conversion
-    globus_collection: TODO-TACC-UUID
+    globus_collection: 1e9ddd41-fe4b-406f-95ff-f3d79f9cb523   # TACC Stampede3
     volatile: true                            # scratch: 90-day purge
     role: conversion + second copy
   # midway3, dsi — add {data_root, globus_collection} when data is placed there.
