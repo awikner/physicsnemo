@@ -44,6 +44,7 @@ datasets:
     # NB: Derecho/Delta ".../h5/sigma_data" hold only a 2-year subset (2015, 2045); do not use.
     copies:
       - {cluster: delta, years: "2041-2049"}
+      - {cluster: stampede3, years: "2015-2049"}   # converted 2026-07-09 (35 yrs + norm + clim/bias)
 
   plasim:                                      # sigma-level PLASIM (sim52)
     subdir: plasim
@@ -66,6 +67,7 @@ datasets:
     stage_dest: plasim_plev/plev_data           # stage → Stampede3 (raw is 565G / 184k files)
     copies:
       - {cluster: delta, years: "7-78"}
+      - {cluster: stampede3, years: "12-104"}   # converted 2026-07-09 (verified 93 stores)
 
   era5:                                        # full ERA5 archive
     subdir: era5
