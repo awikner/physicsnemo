@@ -35,7 +35,9 @@ RAW=${RAW:-$SCRATCH/raw/amip}
 OUT_ROOT=${OUT_ROOT:-$SCRATCH/physicsnemo-zarr/amip}
 mkdir -p "$OUT_ROOT"
 
-for YEAR in $(seq 1978 2024); do
+# 2023-2024 raw lack the global_mean_co2 variable (1978-2022 have it), so the
+# target is 1978-2022 until corrected raw appears.
+for YEAR in $(seq 1978 2022); do
     OUT_PATH="$OUT_ROOT/${YEAR}.zarr"
     if [ -d "$OUT_PATH" ]; then
         echo "[$(date)] skipping AMIP year $YEAR (already exists)"

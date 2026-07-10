@@ -72,12 +72,13 @@ datasets:
   era5:                                        # full ERA5 archive
     subdir: era5
     target_years: "1979-2024"
-    stats: [normalization_pangu_s2s_mean.zarr, normalization_pangu_s2s_std.zarr]
+    stats: [normalization_pangu_s2s.zarr]      # single store the era5 sbatch builds
     raw_source:
       cluster: delta
       path: /work/hdd/bdiu/bgong1/data/h5data
     stage_dest: era5/h5data                     # raw dest under a conversion cluster's raw_root
-    copies: []                                 # no full-archive year stores converted yet
+    copies:
+      - {cluster: stampede3, years: "1979-2024"}   # converted 2026-07-10 (46 stores + norm)
 
   era5_sfno_s2s:                               # ERA5 Pangu-S2S benchmark subset
     subdir: era5_sfno_s2s
@@ -90,7 +91,7 @@ datasets:
 
   amip:
     subdir: amip
-    target_years: "1978-2024"
+    target_years: "1978-2022"                   # 2023-2024 raw lack global_mean_co2 — dropped 2026-07-10
     stats_nc:                                  # .nc — still to convert to .zarr (11a)
       cluster: delta
       path: /work/hdd/bdiu/awikner/AMIP/h5
@@ -100,3 +101,4 @@ datasets:
     stage_dest: amip                            # AMIP converter reads raw/amip/*.h5 directly
     copies:
       - {cluster: delta, years: "1981"}
+      - {cluster: stampede3, years: "1978-2022"}   # converted 2026-07-10 (45 stores)
