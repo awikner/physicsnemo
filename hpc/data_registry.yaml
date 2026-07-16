@@ -45,6 +45,7 @@ datasets:
     copies:
       - {cluster: delta, years: "2041-2049"}
       - {cluster: stampede3, years: "2015-2049"}   # converted 2026-07-09 (35 yrs + norm + clim/bias)
+      - {cluster: derecho, years: "2015-2049"}     # master; replicated + verified 2026-07-16
 
   plasim:                                      # sigma-level PLASIM (sim52)
     subdir: plasim
@@ -68,6 +69,7 @@ datasets:
     copies:
       - {cluster: delta, years: "7-78"}
       - {cluster: stampede3, years: "12-104"}   # converted 2026-07-09 (verified 93 stores)
+      - {cluster: derecho, years: "12-104"}     # master; replicated + verified 2026-07-16
 
   era5:                                        # full ERA5 archive
     subdir: era5
@@ -79,6 +81,7 @@ datasets:
     stage_dest: era5/h5data                     # raw dest under a conversion cluster's raw_root
     copies:
       - {cluster: stampede3, years: "1979-2024"}   # converted 2026-07-10 (46 stores + norm)
+      - {cluster: derecho, years: "1979-2024"}     # master; replicated + verified 2026-07-16
 
   era5_sfno_s2s:                               # ERA5 Pangu-S2S benchmark subset
     subdir: era5_sfno_s2s
@@ -102,3 +105,4 @@ datasets:
     copies:
       - {cluster: delta, years: "1981"}
       - {cluster: stampede3, years: "1978-2022"}   # converted 2026-07-10 (45 stores)
+      - {cluster: derecho, years: "1978-2022"}     # master; replicated + verified 2026-07-16
