@@ -82,6 +82,7 @@ datasets:
     copies:
       - {cluster: stampede3, years: "1979-2024"}   # converted 2026-07-10 (46 stores + norm)
       - {cluster: derecho, years: "1979-2024"}     # master; replicated + verified 2026-07-16
+      - {cluster: delta, years: "1979-2024"}       # persistent copy on /work/hdd; verified 2026-07-17 (#2)
 
   era5_sfno_s2s:                               # ERA5 Pangu-S2S benchmark subset
     subdir: era5_sfno_s2s
