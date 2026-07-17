@@ -56,8 +56,12 @@ datasets:
     raw_source:
       cluster: delta
       path: /work/nvme/bdiu/awikner/PLASIM/data/2100_year_sims_rerun/sim52/h5/sigma_data
+    # NB: NOT on the Derecho master — Derecho scratch is at its file-count quota
+    # (26.2M-file limit); sigma's ~1.5M chunk files don't fit. Second copy is on
+    # Stampede3 (no inode limit) instead. Delta copy is persistent.
     copies:
       - {cluster: delta, years: "12-104"}
+      - {cluster: stampede3, years: "12-104"}   # mirrored 2026-07-17 (#3); verified vs Delta source
 
   plasim_plev:                                 # pressure-level PLASIM (sim52)
     subdir: plasim_plev
