@@ -81,8 +81,15 @@ ERA5_VARIANTS: dict[str, tuple[str, str, str, str]] = {
         "pangu_s2s_1979-2018_surface_std_withnino_log_precip.nc",
     ),
     "pangu_s2s_Z200": (
-        # Z-only stats at 200 hPa — special-case for ablation; surface stats
-        # are still pangu_s2s_1979-2018_surface_{mean,std}.nc.
+        # The COMPLETE 18-level upper-air stats: all five upper-air vars
+        # (geopotential, temperature, specific_humidity, u, v) at all 18
+        # pressure levels *including 200 hPa*. The 17 shared levels are
+        # bit-identical to pangu_s2s_1979-2018_mean.nc; this file just also
+        # carries the 200 hPa level that the default `pangu_s2s` variant drops.
+        # Use this variant so the ERA5 normalization matches the full 18-level
+        # ERA5 Zarr dataset (the default 17-level variant omits 200 hPa, which
+        # makes the by-value ClimateNormalizer raise on the 18-level data).
+        # Surface stats are the same as the default variant.
         "pangu_s2s_1979-2018_mean_Z200.nc",
         "pangu_s2s_1979-2018_std_Z200.nc",
         "pangu_s2s_1979-2018_surface_mean.nc",

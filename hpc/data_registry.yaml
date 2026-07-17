@@ -78,7 +78,8 @@ datasets:
   era5:                                        # full ERA5 archive
     subdir: era5
     target_years: "1979-2024"
-    stats: [normalization_pangu_s2s.zarr]      # single store the era5 sbatch builds
+    stats: [normalization_pangu_s2s.zarr]      # 18-level (incl 200 hPa) — built from the
+                                               # pangu_s2s_Z200 variant to match the 18-lvl dataset
     raw_source:
       cluster: delta
       path: /work/hdd/bdiu/bgong1/data/h5data

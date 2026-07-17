@@ -48,11 +48,15 @@ for YEAR in $(seq 1979 2024); do
         --output "$OUT_PATH"
 done
 
-# 2. Normalization Zarrs (default Pangu-S2S variant; add --variant for others).
-echo "[$(date)] building ERA5 normalization Zarr (pangu_s2s) ..."
+# 2. Normalization Zarr. Use the pangu_s2s_Z200 variant: it carries the COMPLETE
+# 18 pressure levels (incl. 200 hPa) so the stats match the 18-level ERA5 Zarr
+# dataset. The plain `pangu_s2s` variant drops 200 hPa (17 levels) — that's the
+# SFNO_S2S_0003 17-level ablation and would make the by-value ClimateNormalizer
+# raise on the full 18-level data.
+echo "[$(date)] building ERA5 normalization Zarr (pangu_s2s, 18-level incl 200 hPa) ..."
 python tools/data/era5/build_normalization_zarr.py \
     --source-dir "$RAW" \
-    --variant pangu_s2s \
+    --variant pangu_s2s_Z200 \
     --output "$OUT_ROOT/normalization_pangu_s2s.zarr" \
     --overwrite
 
