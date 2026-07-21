@@ -52,7 +52,13 @@ cluster_cfg() {
         CACHE="/work/nvme/bdiu/awikner/.uv-cache" ;;
       deltaai)
         REPO="/work/nvme/bdiu/awikner/physicsnemo"; VENV=".venv-deltaai"  # shared /work with Delta
-        SYNC="module load python/miniforge3_pytorch/2.10.0 && source .venv-deltaai/bin/activate && uv pip install -e \".[sfno-extras,utils-extras,datapipes-extras]\" && uv pip install --group dev && uv pip uninstall torch torchvision triton"
+        # The inherited conda module's wandb is broken (protobuf-generated-code
+        # mismatch) and, via --system-site-packages, uv treats utils-extras'
+        # wandb as already-satisfied — so it never lands a venv-local copy and
+        # `import physicsnemo...logging` crashes. Force a fresh wandb into the
+        # venv LAST (after the torch uninstall; wandb pulls no torch) so it
+        # shadows the conda copy on sys.path.
+        SYNC="module load python/miniforge3_pytorch/2.10.0 && source .venv-deltaai/bin/activate && uv pip install -e \".[sfno-extras,utils-extras,datapipes-extras]\" && uv pip install --group dev && uv pip uninstall torch torchvision triton && uv pip install -U --force-reinstall wandb"
         CACHE="/work/nvme/bdiu/awikner/.uv-cache" ;;
       stampede3)
         REPO="\$WORK/physicsnemo"                                       # $WORK persistent; $SCRATCH is not

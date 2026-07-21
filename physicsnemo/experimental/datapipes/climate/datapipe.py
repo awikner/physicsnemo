@@ -136,13 +136,30 @@ class ClimateDatapipe(Datapipe):
 
         # Dataset stays IO-only (no transform); the normalizer + NaN-fill run
         # GPU-side after the H2D transfer to fuse into one batched op.
-        base_dataset = ClimateZarrDataset(
-            zarr_path,
-            boundary_zarr_path=boundary_zarr_path,
-            yearly_repeating_boundary=yearly_repeating_boundary,
-            leap_boundary_zarr_path=leap_boundary_zarr_path,
-            non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
-        )
+        #
+        # A non-``.zarr`` directory is treated as a multi-year archive (a
+        # directory of per-year ``*.zarr`` sub-stores) and routed to
+        # :class:`ClimateZarrMultiYearDataset`; a single ``.zarr`` store uses
+        # :class:`ClimateZarrDataset` as before.
+        _p = Path(zarr_path)
+        if _p.is_dir() and not str(zarr_path).endswith(".zarr"):
+            from .multiyear import ClimateZarrMultiYearDataset
+
+            base_dataset = ClimateZarrMultiYearDataset(
+                zarr_path,
+                boundary_zarr_path=boundary_zarr_path,
+                yearly_repeating_boundary=yearly_repeating_boundary,
+                leap_boundary_zarr_path=leap_boundary_zarr_path,
+                non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
+            )
+        else:
+            base_dataset = ClimateZarrDataset(
+                zarr_path,
+                boundary_zarr_path=boundary_zarr_path,
+                yearly_repeating_boundary=yearly_repeating_boundary,
+                leap_boundary_zarr_path=leap_boundary_zarr_path,
+                non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
+            )
 
         if distributed:
             from physicsnemo.distributed import DistributedManager

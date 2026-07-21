@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Full multi-year ERA5 archive (`era5/` store: per-year 1979-2024, 6-hourly,
+# 180x360, 18 pressure levels). Pairs with conf/model/sfno_era5.yaml.
+#
+# Multi-year training reads a DIRECTORY of per-year `*.zarr` sub-stores (not a
+# single `.zarr`): build_datapipe routes a non-`.zarr` directory to
+# ClimateZarrMultiYearDataset. Since the loader globs every `*.zarr` in the
+# directory, train and val years must live in SEPARATE directories. Create them
+# once as symlink dirs alongside the archive, e.g.:
+#
+#   SRC=$AI_ROSSBY_DATA/era5
+#   mkdir -p $AI_ROSSBY_DATA/era5_train $AI_ROSSBY_DATA/era5_val
+#   for y in $(seq 1979 2018); do ln -sf $SRC/$y.zarr $AI_ROSSBY_DATA/era5_train/; done
+#   for y in 2019 2020;        do ln -sf $SRC/$y.zarr $AI_ROSSBY_DATA/era5_val/;   done
+#
+# All stores resolve under $AI_ROSSBY_DATA (fallback: shared Delta location).
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5_train
+val_zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5_val
+
+# 18-level normalization stats (separate mean/std zarrs, rebuilt to include
+# 200 hPa). The 17-level model + level-subset transform align against these by
+# value, so the extra (200 hPa) stat level is simply not selected.
+mean_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5/normalization_pangu_s2s_mean.zarr
+std_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5/normalization_pangu_s2s_std.zarr
+delta_std_path: null
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+forecast_lead_times: [4]          # 4 x 6h = 24-hour forecast
+num_samples_per_epoch: 8760       # ~1 year of 6-hourly steps per epoch
+batch_size: 1                     # PER-GPU (per rank). embed_dim=512 @ 180x360
+                                  # fits 1/GPU on 40 GB A100 w/ checkpointing=2;
+                                  # raise to ~4 on 80 GB H100/GH200.
+num_workers: 8
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+shuffle: True
+
+# ERA5 land/ocean NaN fill: SST over land, sea-ice off the ocean.
+nan_fill_default: 0.0
+nan_fill_values:
+  sea_surface_temperature: 271.15
+  sea_ice_cover: 0.0
+
+# ERA5 stats don't carry land_sea_mask / geopotential_at_surface /
+# total_precipitation_24hr stats, so leave these off.
+normalize_constant_boundary: False
+normalize_diagnostic: False

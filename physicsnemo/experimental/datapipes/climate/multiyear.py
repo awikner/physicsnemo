@@ -157,8 +157,18 @@ class ClimateZarrMultiYearDataset(Dataset):
     def upper_air_variable_names(self) -> list[str]:
         return self.sub_datasets[0].upper_air_variable_names
 
-    def __len__(self) -> int:
+    @property
+    def n_time(self) -> int:
+        """Total number of time samples across all sub-stores.
+
+        Mirrors :class:`ClimateZarrDataset`'s ``n_time`` so consumers such as
+        ``validate.py`` (rollout index range) work against the composite the
+        same way they do against a single-store dataset. Equal to ``__len__``.
+        """
         return int(self._cum_lengths[-1])
+
+    def __len__(self) -> int:
+        return self.n_time
 
     # ------------------------------------------------------------------ #
     # Global-index dispatch

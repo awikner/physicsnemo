@@ -463,10 +463,15 @@ class ClimateNormalizer:
 
         Pass ``predict_delta=True`` + ``delta_std_path`` for tendency-mode
         target normalization.
+
+        Any keyword in ``kwargs`` **overrides** the value derived from the
+        dataset layout. This lets a caller pass, e.g., ``pressure_levels=[...]``
+        to align the normalizer with a stats store that carries a different
+        level set than the data (e.g. a 17-level model trained against an
+        18-level archive). Without the override the dataset-derived value is
+        used.
         """
-        return cls(
-            mean_path,
-            std_path,
+        base = dict(
             surface_variables=dataset.layout.surface_variables,
             varying_boundary_variables=dataset.layout.varying_boundary_variables,
             sigma_upper_air_variables=dataset.layout.sigma_upper_air_variables,
@@ -475,8 +480,9 @@ class ClimateNormalizer:
             pressure_levels=dataset.pressure_levels,
             constant_boundary_variables=dataset.layout.constant_boundary_variables,
             diagnostic_variables=dataset.layout.diagnostic_variables,
-            **kwargs,
         )
+        base.update(kwargs)  # caller-supplied values win (e.g. pressure_levels)
+        return cls(mean_path, std_path, **base)
 
 
 class NanFillTransform:

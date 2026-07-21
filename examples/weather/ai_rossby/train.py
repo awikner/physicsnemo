@@ -48,6 +48,8 @@ with warnings.catch_warnings():
         "ignore", category=Warning, module=r"physicsnemo\.experimental.*"
     )
     from physicsnemo.experimental.datapipes.plasim import (
+        ClimateZarrMultiYearDataset,
+        ComposeTransform,
         NanFillTransform,
         PlasimClimateDatapipe,
         PlasimClimateDataset,
@@ -85,6 +87,69 @@ from validate import (
 
 def _resolve_path(p: str | None) -> str | None:
     return to_absolute_path(p) if p else None
+
+
+class _PressureLevelSubsetTransform:
+    """Select a subset of pressure levels from upper-air tensors.
+
+    Applied (CPU-side, at the dataset ``__getitem__`` boundary) when the model
+    requests fewer / different pressure levels than the data store carries —
+    e.g. a 17-level model trained against the 18-level ERA5 archive. It slices
+    the level axis (dim 1: (C_var, C_level, H, W)) of every upper-air tensor
+    down to the requested levels, so the tensors reaching the normalizer and
+    the model match ``cfg.model.levels``. Chain it BEFORE the NaN-fill transform
+    (``ComposeTransform(_PressureLevelSubsetTransform(idx), nan_fill)``).
+    """
+
+    def __init__(self, indices: list[int]) -> None:
+        self._idx = torch.tensor(indices, dtype=torch.long)
+
+    def __call__(self, sample: dict) -> dict:
+        out = dict(sample)
+        for key in (
+            "upper_air_in",
+            "target_upper_air",
+            "upper_air_pressure_in",
+            "target_upper_air_pressure",
+        ):
+            if key in out and out[key] is not None:
+                out[key] = out[key][:, self._idx]
+        return out
+
+
+def _ddp_mean_scalars(values: dict, *, dist) -> dict:
+    """All-reduce scalar metrics across ranks (mean), staying on-device.
+
+    Aggregates per-GPU metrics to a global mean before rank 0 logs them, so the
+    single wandb run reflects ALL GPUs rather than rank 0's local shard. Does a
+    SINGLE all-reduce over the stacked scalars per call and keeps the results as
+    on-device tensors — no ``.item()``/``.cpu()``, so there is no added per-step
+    host sync (the existing logging cadence does the only host transfer); for
+    the compute-bound SFNO models the extra async collective is negligible.
+
+    No-op in single-process runs (returns ``values`` unchanged). All ranks must
+    call this with the same keys in the same order — guaranteed here since every
+    rank builds the dict identically.
+    """
+    if not (getattr(dist, "distributed", False) and dist.world_size > 1):
+        return values
+    import torch.distributed as tdist
+
+    keys = list(values.keys())
+    vec = torch.stack(
+        [
+            (
+                values[k].detach()
+                if torch.is_tensor(values[k])
+                else torch.as_tensor(float(values[k]), device=dist.device)
+            )
+            .to(device=dist.device, dtype=torch.float32)
+            .reshape(())
+            for k in keys
+        ]
+    )
+    tdist.all_reduce(vec, op=tdist.ReduceOp.AVG)
+    return {k: vec[i] for i, k in enumerate(keys)}
 
 
 def _maybe_stage_data(cfg: DictConfig, *, dist, logger) -> None:
@@ -157,11 +222,13 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
     deadlocks mid-epoch. Initializing wandb on ALL ranks makes the jitter
     symmetric so the ranks stay in lockstep. This mirrors the PanguWeather
     reference trainer, which calls ``init_wandb`` unconditionally on every
-    rank and logs only from rank 0. physicsnemo's :func:`initialize_wandb`
-    already names runs per-rank (``..._Process_<rank>_...``) and assigns a
-    shared DDP group tag, so the extra ranks' runs group cleanly; they stay
-    empty (only rank 0 logs) but their background threads provide the timing
-    symmetry that keeps DDP alive.
+    rank and logs only from rank 0. To avoid one online run PER rank, only
+    rank 0 uses the configured wandb ``mode`` (e.g. ``online``); every other
+    rank is forced to ``mode="offline"`` so it still spins up wandb's
+    background threads (preserving the timing symmetry) but writes a throwaway
+    LOCAL run instead of syncing a second run to the server. Net effect:
+    exactly ONE run in the wandb UI, DDP stays alive. (The offline ranks leave
+    harmless ``./wandb/offline-run-*`` dirs; don't ``wandb sync`` those.)
 
     Returns ``True`` only on rank 0 (so ``LaunchLogger`` routes metrics to
     wandb from rank 0 alone — avoiding duplicate data across ranks), and
@@ -185,17 +252,23 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
             )
         return False
 
-    # Called on ALL ranks (see docstring). initialize_wandb reads the
-    # DistributedManager to name + group the per-rank runs.
+    # Called on ALL ranks (see docstring). Only rank 0 syncs to the server
+    # (configured mode); other ranks go offline so there is exactly ONE online
+    # run while their background threads still provide the DDP timing symmetry.
+    configured_mode = str(wb.get("mode", "offline"))
+    rank_mode = configured_mode if dist.rank == 0 else "offline"
+    # init_timeout: the 90 s default can trip rank 0 during a full-job launch
+    # while other ranks are still loading data; 300 s is safe (configurable).
     initialize_wandb(
         project=str(wb.get("project", "ai-rossby")),
         entity=str(wb.get("entity", "")) or None,
         name=str(wb.get("name", cfg.get("run_name", "train"))),
-        mode=str(wb.get("mode", "offline")),
+        mode=rank_mode,
         config=OmegaConf.to_container(cfg, resolve=True),
+        init_timeout=int(wb.get("init_timeout", 300)),
     )
     # Rank 0 alone routes LaunchLogger metrics to wandb; the other ranks
-    # created a run only for background-thread symmetry (see docstring).
+    # created an offline run only for background-thread symmetry (see docstring).
     return dist.rank == 0
 
 
@@ -438,15 +511,47 @@ def build_datapipe(
     data = cfg.dataset
     model = cfg.model
 
-    raw_dataset = PlasimClimateDataset(
-        zarr_path,
+    # A non-``.zarr`` directory is a multi-year archive (per-year sub-stores);
+    # a single ``.zarr`` store uses the single-year dataset. Mirrors the routing
+    # in ClimateDatapipe so ``raw_dataset`` (used for the normalizer layout)
+    # matches what the datapipe builds internally.
+    _ds_kwargs = dict(
         boundary_zarr_path=_resolve_path(data.boundary_zarr_path),
         yearly_repeating_boundary=bool(data.yearly_repeating_boundary),
         leap_boundary_zarr_path=_resolve_path(data.leap_boundary_zarr_path),
         non_leap_boundary_zarr_path=_resolve_path(data.non_leap_boundary_zarr_path),
     )
+    _p = Path(zarr_path)
+    if _p.is_dir() and not str(zarr_path).endswith(".zarr"):
+        raw_dataset = ClimateZarrMultiYearDataset(zarr_path, **_ds_kwargs)
+    else:
+        raw_dataset = PlasimClimateDataset(zarr_path, **_ds_kwargs)
+
+    # Pressure-level subset: when the model uses a strict subset of the data
+    # store's PRESSURE levels (e.g. a 17-level model on the 18-level ERA5
+    # archive), compute the subset indices, tell the normalizer which levels to
+    # align to, and chain a subset transform (below) so the upper-air tensors
+    # are trimmed to the model's levels before normalization + forward.
+    #
+    # Guarded to fire ONLY for that case: it is skipped when the data has no
+    # pressure levels (sigma/hybrid datasets — E3SM, PLASIM-sigma), when the
+    # level sets already match, or when the model's levels are not all present
+    # in the data's pressure levels (a different level system, not a subset).
+    # This keeps sigma-level recipes unaffected. A genuinely inconsistent
+    # request still surfaces downstream via the normalizer's by-value matching.
+    pressure_level_indices: Optional[list[int]] = None
+    model_levels = list(model.get("levels", []) or [])
+    data_pressure_levels = list(raw_dataset.pressure_levels)
+    if model_levels and data_pressure_levels:
+        model_set = set(map(float, model_levels))
+        data_set = set(map(float, data_pressure_levels))
+        if model_set != data_set and model_set.issubset(data_set):
+            level_to_idx = {float(lv): i for i, lv in enumerate(data_pressure_levels)}
+            pressure_level_indices = [level_to_idx[float(lv)] for lv in model_levels]
 
     normalizer_kwargs: dict = {}
+    if pressure_level_indices is not None:
+        normalizer_kwargs["pressure_levels"] = [float(lv) for lv in model_levels]
     if data.delta_std_path:
         normalizer_kwargs["predict_delta"] = True
         normalizer_kwargs["delta_std_path"] = _resolve_path(data.delta_std_path)
@@ -502,7 +607,16 @@ def build_datapipe(
     # in worker processes (CPU) before pin_memory + device transfer.
     # In sequence mode the datapipe wraps the dataset in SequenceDataset,
     # whose `.transform` setter forwards to the base dataset.
-    pipe.dataset.transform = nan_fill
+    #
+    # When the model uses a subset of the data's pressure levels, trim the
+    # upper-air tensors to those levels BEFORE the NaN-fill so every downstream
+    # tensor (normalizer + model) is on the model's level set.
+    if pressure_level_indices is not None:
+        pipe.dataset.transform = ComposeTransform(
+            _PressureLevelSubsetTransform(pressure_level_indices), nan_fill
+        )
+    else:
+        pipe.dataset.transform = nan_fill
     return pipe
 
 
@@ -909,14 +1023,21 @@ def main(cfg: DictConfig) -> None:
                         )
                     if ema is not None:
                         ema.update(inner_model, epoch=global_epoch)
+                    # Aggregate the per-GPU minibatch losses to a global mean
+                    # before logging, so the single wandb run's per-step series
+                    # reflects all ranks (not just rank 0's local batch). On-
+                    # device, no per-step host sync (see _ddp_mean_scalars).
                     log.log_minibatch(
-                        {
-                            "loss": losses["loss"].detach(),
-                            "surface": losses["surface"],
-                            "upper_air": losses["upper_air"],
-                            "diagnostic": losses["diagnostic"],
-                            "vae_kl": losses["vae_kl"],
-                        }
+                        _ddp_mean_scalars(
+                            {
+                                "loss": losses["loss"].detach(),
+                                "surface": losses["surface"],
+                                "upper_air": losses["upper_air"],
+                                "diagnostic": losses["diagnostic"],
+                                "vae_kl": losses["vae_kl"],
+                            },
+                            dist=dist,
+                        )
                     )
                     if bench_tsv_file is not None:
                         bench_tsv_file.write(
@@ -971,7 +1092,19 @@ def main(cfg: DictConfig) -> None:
                             )["loss"]
                             accum += l.detach() * batch["surface_in"].shape[0]
                             total += batch["surface_in"].shape[0]
-                        val_loss = (accum / max(total, 1)).item()
+                        # Aggregate the running loss + sample count across all
+                        # ranks so val_loss is the GLOBAL mean — each rank sees
+                        # only its shard of the validation set. Mirrors the
+                        # cross-rank reduction LaunchLogger applies to the train
+                        # loss. One collective per validation pass.
+                        if getattr(dist, "distributed", False) and dist.world_size > 1:
+                            import torch.distributed as tdist
+
+                            total_t = torch.tensor(float(total), device=dist.device)
+                            tdist.all_reduce(accum, op=tdist.ReduceOp.SUM)
+                            tdist.all_reduce(total_t, op=tdist.ReduceOp.SUM)
+                            total = float(total_t.item())
+                        val_loss = (accum / max(total, 1.0)).item()
 
                     rollout_metrics: dict[str, float] = {}
                     if rollout_validator is not None:

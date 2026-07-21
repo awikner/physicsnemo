@@ -58,14 +58,19 @@ log_every_n_steps: 1
 # Multi-GPU: wandb is initialized on EVERY rank (only rank 0 logs metrics).
 # Running wandb on all ranks makes its background-thread GIL/CUDA jitter
 # symmetric, which keeps DDP's NCCL collectives in lockstep — initializing it
-# on rank 0 alone desyncs the ranks and deadlocks training. This mirrors the
-# PanguWeather reference trainer. See _maybe_init_wandb in train.py.
+# on rank 0 alone desyncs the ranks and deadlocks training. To avoid one run
+# per GPU, only rank 0 uses `mode` below; other ranks are forced to `offline`
+# (local, not synced) so the UI shows exactly ONE run. Training + validation
+# metrics are aggregated across all GPUs to rank 0 before logging (per-step
+# minibatch + epoch train reduced in-band; val_loss all-reduced), so that one
+# run reflects every GPU. See _maybe_init_wandb / _ddp_mean_scalars in train.py.
 wandb:
   enabled: True
   project: ai-rossby
   entity: null                    # wandb team/username; null = your default entity
   name: ${run_name}
-  mode: offline                   # offline | online | disabled
+  mode: offline                   # offline | online | disabled (rank 0 only; others offline)
+  init_timeout: 300               # seconds for wandb.init; raise if rank 0 times out at launch
 
 # --- Bench-time per-batch TSV emission (optional) --------------------------
 # When non-null and rank 0, every training-step's loss components are

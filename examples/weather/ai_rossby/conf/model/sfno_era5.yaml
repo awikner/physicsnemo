@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim model config — full multi-year ERA5 archive (the `era5/` store,
+# 1979-2024, 18 pressure levels), SFNO_S2S_0003_test architecture.
+#
+# Pairs with conf/dataset/era5_multiyear.yaml. Variable groups match the
+# `era5/` archive's Zarr attrs (validated against a 4x-H100 training run on
+# Stampede3); they differ from conf/model/sfno_plasim_s2s.yaml, which targets
+# the separate `era5_sfno_s2s/` benchmark store.
+#
+# The archive carries 18 pressure levels (incl. 200 hPa); this model uses 17
+# (SFNO_S2S_0003 drops 200). build_datapipe detects the mismatch and trims the
+# upper-air tensors to `levels` before normalization (see
+# _PressureLevelSubsetTransform in train.py), so the 18-level archive + 18-level
+# normalization store serve the 17-level model without misalignment.
+
+name: SfnoPlasim
+module: physicsnemo.experimental.models.sfno_plasim
+
+# Variable groups — match the `era5/` archive attrs. SST and sea-ice are
+# varying boundary fields here (not surface).
+surface_variables:
+  - 2m_temperature
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+  - mean_sea_level_pressure
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - specific_humidity
+  - geopotential
+constant_boundary_variables:
+  - land_sea_mask
+  - geopotential_at_surface
+varying_boundary_variables:
+  - sea_surface_temperature
+  - sea_ice_cover
+  - toa_incident_solar_radiation
+diagnostic_variables:
+  - total_precipitation_24hr
+
+# 17 ERA5 pressure levels (SFNO_S2S_0003 drops 200 hPa from the archive's 18).
+levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
+horizontal_resolution: [180, 360]
+
+# SFNO-specific kwargs from SFNO_S2S_0003_test (identical block to
+# conf/model/sfno_plasim_s2s.yaml):
+spectral_transform: sht
+filter_type: linear
+operator_type: dhconv
+scale_factor: 1
+embed_dim: 512
+num_layers: 12
+use_mlp: True
+mlp_ratio: 2.0
+activation_function: gelu
+encoder_layers: 1
+pos_embed: True
+drop_rate: 0.0
+drop_path_rate: 0.0
+num_blocks: 16
+sparsity_threshold: 0.0
+normalization_layer: instance_norm
+hard_thresholding_fraction: 1.0
+use_complex_kernels: True
+big_skip: True
+rank: 1.0
+factorization: null
+separable: False
+complex_network: True
+complex_activation: real
+spectral_layers: 3
+checkpointing: 0
+data_grid: equiangular
