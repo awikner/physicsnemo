@@ -257,11 +257,18 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
     # run while their background threads still provide the DDP timing symmetry.
     configured_mode = str(wb.get("mode", "offline"))
     rank_mode = configured_mode if dist.rank == 0 else "offline"
+    # entity: a null/empty config value must become Python ``None`` (use the
+    # account's default entity). NOT ``str(...)`` — OmegaConf null -> the literal
+    # string "None", which wandb's server rejects online with
+    # "CommError: permission denied" (offline never validates it, so the bug
+    # only bites online runs).
+    _ent = wb.get("entity", None)
+    entity = str(_ent) if _ent else None
     # init_timeout: the 90 s default can trip rank 0 during a full-job launch
     # while other ranks are still loading data; 300 s is safe (configurable).
     initialize_wandb(
         project=str(wb.get("project", "ai-rossby")),
-        entity=str(wb.get("entity", "")) or None,
+        entity=entity,
         name=str(wb.get("name", cfg.get("run_name", "train"))),
         mode=rank_mode,
         config=OmegaConf.to_container(cfg, resolve=True),
