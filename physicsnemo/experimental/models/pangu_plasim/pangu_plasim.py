@@ -176,7 +176,8 @@ class PanguPlasim(Module):
         Activates the VAE encoder-2 branch (uses ``target_surface``,
         ``target_upper_air``); independent of ``self.training``.
     return_latent : bool, optional, default=False
-        Append the post-downsample bottleneck latent to the return tuple.
+        Append the pre-patch-recovery latent (the full-resolution decoder
+        features, just before the patch-recovery heads) to the return tuple.
 
     Outputs
     -------
@@ -186,8 +187,8 @@ class PanguPlasim(Module):
         ``diagnostic_variables`` is non-empty. ``mu``, ``sigma`` are the
         encoder-1 VAE statistics; ``mu2``, ``sigma2`` carry the encoder-2
         statistics in ``train`` mode and are zero-tensor placeholders at
-        evaluation. When ``return_latent=True`` the bottleneck latent is
-        appended at the end.
+        evaluation. When ``return_latent=True`` the pre-patch-recovery latent
+        is appended at the end.
 
     Notes
     -----
@@ -887,7 +888,6 @@ class PanguPlasim(Module):
 
         skip = x
         x = self.downsample(x)
-        latent = x.detach().clone() if return_latent else None
         x = self.layer2(x)
         x = self.layer3(x)
         x = x.reshape(
@@ -930,6 +930,9 @@ class PanguPlasim(Module):
 
         output = torch.concat([x, skip], dim=-1)
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
+        # Latent state exported just before patch recovery — the full-resolution
+        # decoder features the patch-recovery heads project into physical channels.
+        latent = output.detach().clone() if return_latent else None
 
         if self.predict_delta:
             output_surface_delta = output[:, :, -1, :, :]

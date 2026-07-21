@@ -88,7 +88,8 @@ class PanguPlasimLegacy(Module):
         Toggles activation checkpointing in patch recovery (see
         ``checkpointing``); no VAE encoder-2 branch exists here.
     return_latent : bool, optional, default=False
-        Append the post-downsample bottleneck latent to the return tuple.
+        Append the pre-patch-recovery latent (the full-resolution decoder
+        features, just before the patch-recovery heads) to the return tuple.
 
     Outputs
     -------
@@ -97,7 +98,7 @@ class PanguPlasimLegacy(Module):
         or seven-element tuple. The trailing four scalar zero-tensor placeholders
         preserve positional compatibility with :class:`PanguPlasim`'s eval-mode
         return so downstream code targets one return shape. When
-        ``return_latent=True`` the bottleneck latent is appended at the end.
+        ``return_latent=True`` the pre-patch-recovery latent is appended at the end.
 
     Notes
     -----
@@ -644,7 +645,6 @@ class PanguPlasimLegacy(Module):
         x = self.layer1(x)
         skip = x
         x = self.downsample(x)
-        latent = x.detach().clone() if return_latent else None
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.upsample(x)
@@ -652,6 +652,9 @@ class PanguPlasimLegacy(Module):
 
         output = torch.concat([x, skip], dim=-1)
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
+        # Latent state exported just before patch recovery — the full-resolution
+        # decoder features the patch-recovery heads project into physical channels.
+        latent = output.detach().clone() if return_latent else None
 
         if self.predict_delta:
             output_surface_delta = output[:, :, -1, :, :]
