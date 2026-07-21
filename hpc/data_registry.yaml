@@ -13,24 +13,33 @@
 #
 # Year ranges are compact strings: "2041-2049", "1981", or "1981,1983-1985".
 
+# TOPOLOGY DECISION (2026-07-21): retire Derecho scratch as the master — its
+# file-count (inode) quota (~26.2M-file hard limit) makes it unable to hold the
+# full dataset family (millions of tiny zarr chunk files each). The intended
+# persistent home is **Delta /work/hdd** (not purged). The re-home transfer
+# (fill the ranges that currently live only on volatile Stampede3 —
+# e3sm 2015-2040, plasim_plev 79-104, amip 1978-2022 — Stampede3 -> Delta) is
+# NOT done yet; the `copies` below still reflect the current physical layout
+# (data is still on Derecho until the migration + decommission).
 clusters:
   delta:
     data_root: /work/hdd/bdiu/awikner/physicsnemo-zarr
     globus_collection: 7e936164-de58-4e3d-85da-21aa23c07169   # NCSA Delta
     persistent: true                          # /work/hdd is not purged
+    role: intended persistent master          # target durable home (migration pending)
   deltaai:
     alias_of: delta                           # shares Delta /work — physically the same data
   derecho:
     data_root: /glade/derecho/scratch/awikner/physicsnemo-zarr
     globus_collection: d33b3614-6d04-11e5-ba46-22000b92c6ec   # NCAR GLADE
     volatile: true                            # scratch: 60-day purge
-    role: master
+    role: master (RETIRING — inode-limited; migrate to Delta then decommission)
   stampede3:
     data_root: /scratch/09979/awikner/physicsnemo-zarr
-    raw_root: /scratch/09979/awikner/raw       # staged raw h5 for on-cluster conversion
+    raw_root: /scratch/09979/awikner/raw       # (raw staging deleted 2026-07-20; re-stage if reconverting)
     globus_collection: 1e9ddd41-fe4b-406f-95ff-f3d79f9cb523   # TACC Stampede3
     volatile: true                            # scratch: 90-day purge
-    role: conversion + second copy
+    role: conversion + working copy
   # midway3, dsi — add {data_root, globus_collection} when data is placed there.
 
 datasets:
