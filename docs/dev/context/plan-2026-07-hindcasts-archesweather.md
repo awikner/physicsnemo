@@ -451,13 +451,21 @@ Path: `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/{model}/{YYYY}.zarr`, m
 - [x] **C1 ArchesWeather model + datapipe prev-state + loss + configs DONE**
       (commits d644e77c, 2e9ba645, b79e7208; pushed). CPU smoke: 88.75M params,
       correct shapes, backward OK. Datapipe test 4/4, loss test 2/2, all py_compile.
-- [~] C2 smokes: local shape/params ✅; 1-GPU real-env integration smoke SUBMITTED
-      on Stampede3 (job 3334859, h100, PD). 4-GPU DDP pending.
-- [ ] C3 training 300k steps (launcher `hpc/scripts/train_archesweather_era5.sbatch`
-      ready; era5_train/val/recent symlink dirs created on Stampede3; launch after
-      smoke passes). delta-std stats job `tools/data/era5/compute_delta24_std.py`
-      ready (run to enable loss delta-normalization; loss works without it).
-- [ ] C4 ArchesWeather hindcasts on Stampede3 (post-training; era5_all/ dir ready)
+- [x] C2 smokes: local shape/params ✅; **1-GPU real-env integration smoke PASSED on
+      Derecho A100** (job 6841131, rc=0) — Module.instantiate + prev/calendar datapipe
+      + train_step + ArchesWeatherLoss + selective-wd optimizer + validation all ran
+      end-to-end, finite loss, ~1.1s/iter. (Stampede3 smoke 3334859 was stuck >100min
+      in the h100 queue → cancelled, validated on Derecho instead.) Init loss large
+      (untrained, no delta-scaler) — expected. 4-GPU DDP not separately smoked
+      (single-GPU stack validated; DDP is the same code under torch<2.11).
+- [~] C3 300k-step training LAUNCHED on **Stampede3 H100** (job 3335041, 48h, queued
+      on busy h100 partition; auto-resumes from ./checkpoints on resubmit — needs
+      several 48h chunks for full 300k, ~137 epochs). wandb offline. RPFT switch
+      (era5_recent) at ~epoch 114 via AI_ROSSBY_TRAIN_DIR=era5_recent resubmit.
+      delta-std stats job ready (run `tools/data/era5/compute_delta24_std.py` +
+      set loss.delta_scaler_path to enable delta-normalization; loss works without it).
+- [ ] C4 ArchesWeather hindcasts on Stampede3 (post-training; era5_all/ dir ready;
+      inference.py handles prev/calendar rollout at step_size=4).
 - [~] D: consolidator + test DONE (commit aafcf6a4); registry/verification/docs/
       cleanup/final report pending campaign completion.
 
