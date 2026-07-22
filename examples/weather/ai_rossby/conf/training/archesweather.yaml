@@ -24,11 +24,13 @@ max_epochs: 137
 
 ddp_bucket_cap_mb: null
 ddp_static_graph: False
-# torch.compile: ~1.8x faster steady-state step (259->142 ms) and -30% memory,
-# numerically identical loss (validated on DeltaAI GH200, 2026-07-22). ArchesWeather
-# has no SHT/complex ops, so it compiles cleanly (unlike the SFNO recipe). ~2 min
-# one-time compile warmup. Transfers across H100-class GPUs.
-jit_compile: True
+# torch.compile: validated 1.8x faster (259->142 ms) + -30% memory + loss-identical
+# on DeltaAI GH200 SINGLE-GPU (2026-07-22). BUT it HANGS under 4-GPU DDP on Midway3
+# (compiling a DDP-wrapped model -> 0% GPU / no progress for 20+ min). So default OFF
+# for the multi-GPU recipe; re-enable only for single-GPU, OR after fixing the
+# compile+DDP path (try ddp_static_graph:True and/or compile the inner model BEFORE
+# DDP-wrapping in train.py). TODO: investigate compile+DDP to recover the 1.8x.
+jit_compile: False
 
 optimizer:
   type: AdamW
