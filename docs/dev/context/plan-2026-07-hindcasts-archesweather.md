@@ -428,13 +428,20 @@ Path: `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/{model}/{YYYY}.zarr`, m
 ## 6. Progress log (update as executed)
 
 - [x] Recon (4 agents) + user decisions + this plan committed. (2026-07-21)
-- [~] A1–A3 Pangu config + scripts staged on Derecho; smoke jobs 6838495 (basic
-      yr2000) + 6838668 (edge Dec2024) QUEUED. **Finding: the stock loader's
-      `max_inference_idx` clamp drops Dec 21/25/29 inits EVERY year (~92-93/yr,
-      not 95) AND crashes yr-2024 on a missing 2025 file → a loader patch is
-      REQUIRED for all years (staged, not yet applied — apply after edge smoke).**
-- [ ] A4 Pangu 25-year campaign (blocked on smoke confirmation + patch)
-- [ ] A5 Pangu consolidation + transfer + cleanup (consolidator ready: §A5/§4)
+- [x] A1–A3 Pangu config + scripts + smokes DONE. Both smokes PASS (basic Jan2000
+      T2m 214-307 K; edge Dec2024 T2m 219-313 K, 16-frame). **Loader patch applied**
+      to Derecho `utils/data_loader_multifiles.py` (backup `.bak_hindcast`), gated
+      behind config flag `include_forecast_past_data_end` (default-off, zero impact
+      on other configs): (a) persistence fallback for a missing h5 (archive-end,
+      steps back 6h until an existing file — fixes Dec-2024→2025 crash); (b) relaxes
+      the `max_inference_idx` clamp that was dropping Dec 21/25/29 EVERY year.
+      Verified enumeration: 2000→96, 2001→95, 2024→96 (leap keeps Feb29 → dropped at
+      consolidation → 95/yr). To revert: restore the .bak + drop the flag.
+- [x] A4 25-year campaign LAUNCHED: jobs **6839213..6839237** (yr 2000..2024),
+      queued/running on Derecho, 4×A100, ≤2h each, run_num=2000, outputs at
+      `.../hindcast_2000_2024_15d/2000/predictions/` (filenames carry init datetime).
+- [ ] A5 Pangu consolidation + transfer + cleanup — per year as jobs finish
+      (consolidator `tools/data/hindcast/consolidate_hindcasts.py --format pangu`).
 - [~] B1 SFNO checkpoint STILL blocked (rmasiwal `/work2/10441/rmasiwal` 0700,
       unchanged since Dec-2024). Per user decision: skip SFNO hindcasts if never
       unblocked. Polled repeatedly this session; still denied.
