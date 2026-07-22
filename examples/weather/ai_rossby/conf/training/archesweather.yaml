@@ -24,13 +24,20 @@ max_epochs: 137
 
 ddp_bucket_cap_mb: null
 ddp_static_graph: False
-# torch.compile: validated 1.8x faster (259->142 ms) + -30% memory + loss-identical
-# on DeltaAI GH200 SINGLE-GPU (2026-07-22). BUT it HANGS under 4-GPU DDP on Midway3
-# (compiling a DDP-wrapped model -> 0% GPU / no progress for 20+ min). So default OFF
-# for the multi-GPU recipe; re-enable only for single-GPU, OR after fixing the
-# compile+DDP path (try ddp_static_graph:True and/or compile the inner model BEFORE
-# DDP-wrapping in train.py). TODO: investigate compile+DDP to recover the 1.8x.
-jit_compile: False
+# torch.compile: validated ~1.9x faster on Midway3 4xH100 DDP (eager 400 ->
+# compiled 211 ms/step warm; ~33h -> ~17.6h for 300k steps) and 1.8x single-GPU on
+# DeltaAI GH200 (259->142 ms, -30% memory, loss-identical), 2026-07-22.
+# The earlier 4-GPU DDP hang (0% GPU / no progress 20+ min during compile) is FIXED:
+#   - train.py sets torch._dynamo.config.optimize_ddp = compile_optimize_ddp (False),
+#     so Dynamo's DDPOptimizer doesn't deadlock splitting the graph at DDP gradient-
+#     bucket boundaries (pytorch#166305);
+#   - the launcher pins TORCHINDUCTOR_COMPILE_THREADS=1 so N ranks don't oversubscribe
+#     the node with compile-worker subprocesses (pytorch#125235).
+# One-time compile cost ~5 min (epoch 1); warm from epoch 2.
+jit_compile: True
+# Keep Dynamo's DDPOptimizer OFF under compile (it hangs); we forgo comm/compute
+# bucket overlap — negligible on NVLink. Set True only to experiment.
+compile_optimize_ddp: False
 
 optimizer:
   type: AdamW

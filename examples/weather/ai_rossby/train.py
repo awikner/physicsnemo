@@ -828,6 +828,27 @@ def main(cfg: DictConfig) -> None:
     # grid + fixed local batch), avoiding recompiles on the shape-dependent
     # scatter guards. Opt-in; validate loss stays within noise before adopting.
     if bool(cfg_train.get("jit_compile", False)):
+        # torch.compile + DDP hang fix (validated 2026-07-22 on Midway3 H100).
+        # Two independent causes make compile stall at 0% GPU for 20+ min under
+        # multi-GPU DDP; both are disabled here:
+        #  1. Dynamo's DDPOptimizer splits the compiled graph at DDP gradient-
+        #     bucket boundaries and can deadlock when the graph has breaks
+        #     (pytorch#166305, #125235). Setting optimize_ddp=False compiles the
+        #     module as a single graph — we forgo compute/comm bucket overlap
+        #     (negligible for this model on NVLink), and the hang disappears.
+        #  2. Inductor spawns ~ncpu background compile-worker subprocesses *per
+        #     rank*; 4 ranks on one node oversubscribe the CPUs into thrash that
+        #     looks like a hang. The launcher pins TORCHINDUCTOR_COMPILE_THREADS
+        #     (small, e.g. 1) to serialize compilation.
+        # NB: alias the submodule (import ... as _dynamo) so we do NOT rebind the
+        # module-level name `torch` into this function's local scope — a bare
+        # `import torch._dynamo` here would make `torch` local everywhere in the
+        # function and raise UnboundLocalError on every prior `torch.` use.
+        import torch._dynamo as _dynamo
+
+        _dynamo.config.optimize_ddp = bool(
+            cfg_train.get("compile_optimize_ddp", False)
+        )
         model = torch.compile(model, dynamic=False)
 
     # --- Loss + optim ------------------------------------------------------

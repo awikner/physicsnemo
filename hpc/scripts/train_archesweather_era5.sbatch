@@ -81,6 +81,11 @@ NPROC="${NPROC:-1}"
 [ "${NPROC}" -ge 1 ] || NPROC=1
 NNODES="${SLURM_NNODES:-1}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# torch.compile under multi-GPU DDP: cap Inductor's background compile-worker
+# subprocesses so N ranks x default-workers don't oversubscribe the node into a
+# compile-time hang (pytorch#125235; see conf/training/archesweather.yaml +
+# train.py). 1 = serial compile. No effect when jit_compile is off.
+export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-1}"
 nvidia-smi || true
 
 if [ "${NNODES}" -gt 1 ]; then
