@@ -473,3 +473,32 @@ Path: `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/{model}/{YYYY}.zarr`, m
 committed, pushed. Cluster campaigns (Pangu 25-yr generation, ArchesWeather 300k-step
 training + generation) are launched/staged but run for hours–days beyond a single
 session; SFNO remains gated on checkpoint perms. See memory `hindcast-campaign-2026-07`.
+
+## 7. Learnings from execution (2026-07-22)
+
+- **Pangu NC writer emits MORE vars than recon assumed.** The per-init NetCDFs carry
+  the land/ocean state (volumetric_soil_water_layer_1, soil_temperature_level_1,
+  skin_temperature, sea_surface_temperature) *in addition to* the 5 surface + 2 diag +
+  5 upper-air. Recon §2.1 said these are "marched but NOT written" — wrong; they ARE
+  written. The consolidator keeps them verbatim (more complete; harmless). So pangu_s2s
+  stores have 9 surface + 2 diagnostic + 5 upper-air vars, not the 4+2+5 in §4.
+- **Loader clamp bug (fixed).** Stock `utils/data_loader_multifiles.py` `max_inference_idx`
+  clamp drops Dec 21/25/29 inits EVERY year (→92-93/yr) and crashes at archive end
+  (Dec-2024 needs 2025 h5). Patched (gated behind `include_forecast_past_data_end`, backup
+  `.bak_hindcast`): persistence for missing h5 + relaxed clamp. Confirmed 95/yr (leap 96,
+  Feb29 dropped at consolidation). This patch lives ONLY in the legacy Derecho PanguWeather
+  repo, not the fork.
+- **Consolidation is I/O-bound (~39 min/year, ~29-30 GB/store).** Reads ~38 GB NC + writes
+  ~29 GB zstd to GLADE Lustre per year. OOMs on login nodes (stacks ~40 GB/year) — MUST run
+  as a batch job. Run PARALLEL across disjoint year ranges (one sequential job can't finish
+  25 yrs in walltime). Feb-29 correctly dropped (init_time=95, verified finite).
+- **Derecho CPU `main` queue is badly congested** (>2.7 h queued); the GPU `main` queue
+  backfills in minutes. Ran the CPU-only consolidator on GPU nodes (UCHI0018) to unblock —
+  wasteful but pragmatic.
+- **TACC Stampede3 rejects `--gpus-per-node`/`--gres`** (whole-node allocation). Launchers
+  must derive GPU count from `nvidia-smi`/Slurm env, not a baked gres directive (fixed in
+  train_archesweather_era5.sbatch). Stampede3 h100 queue was heavily oversubscribed
+  (a 1-GPU smoke sat >100 min PD) — validated the ArchesWeather stack on Derecho A100 instead.
+- **Globus works autonomously** from Stampede3 (`~/gcli/bin/globus`, identity
+  awikner@uchicago.edu); the NCAR GLADE session was valid (no interactive `session update`
+  needed this session). Transfers are server-side (submit + poll `globus task show`).
