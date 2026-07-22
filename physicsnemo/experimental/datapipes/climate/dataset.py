@@ -204,16 +204,31 @@ class ClimateZarrDataset(Dataset):
         leap_boundary_zarr_path: Optional[str | Path] = None,
         non_leap_boundary_zarr_path: Optional[str | Path] = None,
         emit_calendar: bool = False,
+        calendar_encoding: str = "second_doy",
+        prev_state_steps: int = 0,
     ) -> None:
         self.zarr_path = str(zarr_path)
         self.dtype = pin_memory_dtype
         self.transform = transform
         # Whether ``__getitem__`` emits a per-sample ``calendar`` tensor with
-        # shape ``(2,)`` containing ``(second_of_day, day_of_year)``.
-        # Diffusion recipes (Phase 8c) flip this on so the model wrappers
-        # have a c_scalar input; deterministic recipes (Pangu/SFNO) leave it
-        # off — same default behavior as pre-Phase-8b.
+        # shape ``(2,)``. Two encodings are supported:
+        #   * ``"second_doy"`` (default): ``(second_of_day, day_of_year)`` — the
+        #     diffusion recipes' :class:`CalendarEmbedding` input (Phase 8c).
+        #   * ``"month_hour"``: ``(month_1_12, hour_0_23)`` — the ArchesWeather
+        #     adaLN conditioning input.
+        # Deterministic recipes (Pangu/SFNO) leave ``emit_calendar`` off — same
+        # default behavior as pre-Phase-8b.
         self._emit_calendar = bool(emit_calendar)
+        self._calendar_encoding = str(calendar_encoding)
+        if self._calendar_encoding not in ("second_doy", "month_hour"):
+            raise ValueError(
+                "calendar_encoding must be 'second_doy' or 'month_hour', got "
+                f"{calendar_encoding!r}"
+            )
+        # Number of time steps back to read the "previous state" (t - k) that
+        # ArchesWeather channel-concatenates with the current state. 0 disables
+        # (default; SFNO/Pangu/PLASIM never read a previous frame).
+        self._prev_state_steps = int(prev_state_steps)
         # Boundary-substitution configuration (Phase-2 follow-up; see
         # implementation_plan.md). When set, varying boundary variables are
         # read from a SEPARATE Zarr store (single-year, time-indexed) instead
@@ -572,9 +587,19 @@ class ClimateZarrDataset(Dataset):
                 f"range [0, {self.n_time})"
             )
 
-        # Coalesce start + target reads into ONE asyncio.gather (halves the
-        # per-sample asyncio sync-bookkeeping cost vs two _sample_at calls).
-        raw = self._read_many_async([start_idx, target_idx])
+        # Previous-state read (ArchesWeather): the state at ``start - k``. Clamp
+        # to 0 (persistence) at the archive start — the sampler normally keeps
+        # starts >= prev_state_steps, so this only guards the edge.
+        prev_idx = None
+        if self._prev_state_steps > 0:
+            prev_idx = max(0, start_idx - self._prev_state_steps)
+
+        # Coalesce start + target (+ prev) reads into ONE asyncio.gather (halves
+        # the per-sample asyncio sync-bookkeeping cost vs separate reads).
+        read_indices = [start_idx, target_idx]
+        if prev_idx is not None and prev_idx not in read_indices:
+            read_indices.append(prev_idx)
+        raw = self._read_many_async(read_indices)
         sample = self._build_sample(raw[start_idx])
         target = self._build_sample(raw[target_idx])
         sample["target_surface"] = target["surface_in"]
@@ -589,6 +614,15 @@ class ClimateZarrDataset(Dataset):
             sample["target_upper_air_pressure"] = target["upper_air_pressure_in"]
         sample["lead_time"] = torch.tensor(lead, dtype=torch.long)
         sample["time_idx"] = torch.tensor(start_idx, dtype=torch.long)
+        if prev_idx is not None:
+            prev = self._build_sample(raw[prev_idx])
+            sample["surface_prev_in"] = prev["surface_in"]
+            if "upper_air_in" in prev:
+                sample["upper_air_prev_in"] = prev["upper_air_in"]
+            if "upper_air_sigma_in" in prev:
+                sample["upper_air_sigma_prev_in"] = prev["upper_air_sigma_in"]
+            if "upper_air_pressure_in" in prev:
+                sample["upper_air_pressure_prev_in"] = prev["upper_air_pressure_in"]
         if self._emit_calendar:
             sample["calendar"] = self._calendar_vector(start_idx)
         if self.transform is not None:
@@ -605,7 +639,21 @@ class ClimateZarrDataset(Dataset):
         for any normalization. CO₂, when needed, comes through the
         ``varying_boundary`` group as a broadcast field (see the AMIP
         channel-config).
+
+        When ``calendar_encoding='month_hour'`` the vector is instead
+        ``(month_1_12, hour_0_23)`` — the ArchesWeather adaLN conditioning
+        input.
         """
+        if self._calendar_encoding == "month_hour":
+            t = self._prog_times[time_idx]
+            if isinstance(t, np.datetime64):
+                import pandas as pd
+
+                ts = pd.Timestamp(t)
+                month, hour = int(ts.month), int(ts.hour)
+            else:
+                month, hour = int(t.month), int(t.hour)
+            return torch.tensor([float(month), float(hour)], dtype=self.dtype)
         _, doy, hour = self._decompose_time(time_idx)
         second_of_day = float(hour) * 3600.0
         return torch.tensor(

@@ -87,6 +87,7 @@ class LeadTimePairSampler(Sampler):
         rank: int = 0,
         world_size: int = 1,
         drop_last: bool = True,
+        min_start: int = 0,
     ) -> None:
         if dataset_length <= 0:
             raise ValueError(f"dataset_length must be > 0, got {dataset_length}")
@@ -100,6 +101,15 @@ class LeadTimePairSampler(Sampler):
             raise ValueError(
                 f"max(forecast_lead_times)={max(leads)} >= dataset_length="
                 f"{dataset_length}; no valid pairs exist."
+            )
+
+        self.min_start = int(min_start)
+        if self.min_start < 0:
+            raise ValueError(f"min_start must be >= 0, got {min_start}")
+        if self.min_start >= dataset_length - max(leads):
+            raise ValueError(
+                f"min_start={self.min_start} leaves no valid starts "
+                f"(dataset_length={dataset_length}, max_lead={max(leads)})."
             )
 
         self.dataset_length = dataset_length
@@ -128,15 +138,20 @@ class LeadTimePairSampler(Sampler):
     def __iter__(self) -> Iterator[tuple[int, int]]:
         max_lead = max(self.forecast_lead_times)
         valid_starts = self.dataset_length - max_lead
+        # Starts are drawn from [min_start, valid_starts): min_start >= k reserves
+        # room for the ArchesWeather previous-state read (t - k); it is 0 for
+        # models without a previous-state input.
         # Note: a lead_t < max_lead allows start_t up to (dataset_length - lead_t - 1),
         # but for simplicity we cap all starts at the strictest bound so every drawn
         # (start, lead) is in range without per-sample bookkeeping.
+        span = valid_starts - self.min_start
 
         if self.shuffle:
             g = torch.Generator()
             g.manual_seed(self.seed + self.epoch)
-            full_starts = torch.randint(
-                low=0, high=valid_starts, size=(self.num_samples,), generator=g
+            full_starts = (
+                self.min_start
+                + torch.randint(low=0, high=span, size=(self.num_samples,), generator=g)
             ).tolist()
             full_lead_idx = torch.randint(
                 low=0,
@@ -145,9 +160,9 @@ class LeadTimePairSampler(Sampler):
                 generator=g,
             ).tolist()
         else:
-            # Deterministic walk: starts cycle through [0, valid_starts), leads cycle
-            # through forecast_lead_times in order.
-            full_starts = [i % valid_starts for i in range(self.num_samples)]
+            # Deterministic walk: starts cycle through [min_start, valid_starts),
+            # leads cycle through forecast_lead_times in order.
+            full_starts = [self.min_start + (i % span) for i in range(self.num_samples)]
             full_lead_idx = [
                 i % len(self.forecast_lead_times) for i in range(self.num_samples)
             ]

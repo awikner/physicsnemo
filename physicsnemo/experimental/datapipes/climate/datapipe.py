@@ -126,6 +126,9 @@ class ClimateDatapipe(Datapipe):
         leap_boundary_zarr_path: Optional[str | Path] = None,
         non_leap_boundary_zarr_path: Optional[str | Path] = None,
         unroll_steps: int = 1,
+        prev_state_steps: int = 0,
+        emit_calendar: bool = False,
+        calendar_encoding: str = "second_doy",
     ) -> None:
         super().__init__(meta=DatapipeMetaData(name="plasim_climate"))
 
@@ -151,6 +154,9 @@ class ClimateDatapipe(Datapipe):
                 yearly_repeating_boundary=yearly_repeating_boundary,
                 leap_boundary_zarr_path=leap_boundary_zarr_path,
                 non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
+                emit_calendar=emit_calendar,
+                calendar_encoding=calendar_encoding,
+                prev_state_steps=prev_state_steps,
             )
         else:
             base_dataset = ClimateZarrDataset(
@@ -159,6 +165,9 @@ class ClimateDatapipe(Datapipe):
                 yearly_repeating_boundary=yearly_repeating_boundary,
                 leap_boundary_zarr_path=leap_boundary_zarr_path,
                 non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
+                emit_calendar=emit_calendar,
+                calendar_encoding=calendar_encoding,
+                prev_state_steps=prev_state_steps,
             )
 
         if distributed:
@@ -182,6 +191,7 @@ class ClimateDatapipe(Datapipe):
                 seed=seed,
                 rank=rank,
                 world_size=world_size,
+                min_start=int(prev_state_steps),
             )
         else:
             # Multi-step rollout — wrap with SequenceDataset and use a plain

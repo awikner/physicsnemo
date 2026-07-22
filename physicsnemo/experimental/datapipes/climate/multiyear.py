@@ -85,6 +85,9 @@ class ClimateZarrMultiYearDataset(Dataset):
         leap_boundary_zarr_path: Optional[Union[str, Path]] = None,
         non_leap_boundary_zarr_path: Optional[Union[str, Path]] = None,
         consolidated: bool = True,
+        emit_calendar: bool = False,
+        calendar_encoding: str = "second_doy",
+        prev_state_steps: int = 0,
     ) -> None:
         root_path = Path(root)
         if not root_path.is_dir():
@@ -99,6 +102,11 @@ class ClimateZarrMultiYearDataset(Dataset):
         self.root = root_path
         self.dtype = pin_memory_dtype
         self.transform = transform
+        # Previous-state (ArchesWeather) is handled at the COMPOSITE level via
+        # global-index dispatch so a start near a year boundary reads its
+        # previous frame from the prior year's sub-store. The per-year subs are
+        # therefore built with prev_state_steps=0 (they never read a prev frame).
+        self._prev_state_steps = int(prev_state_steps)
 
         sub_kwargs = dict(
             consolidated=consolidated,
@@ -108,6 +116,8 @@ class ClimateZarrMultiYearDataset(Dataset):
             yearly_repeating_boundary=yearly_repeating_boundary,
             leap_boundary_zarr_path=leap_boundary_zarr_path,
             non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
+            emit_calendar=emit_calendar,
+            calendar_encoding=calendar_encoding,
         )
         sub_datasets: list[ClimateZarrDataset] = [
             ClimateZarrDataset(p, **sub_kwargs) for p in store_paths
@@ -222,6 +232,21 @@ class ClimateZarrMultiYearDataset(Dataset):
         # Rewrite time_idx to the GLOBAL index so downstream code (samplers,
         # logging, metrics) sees a contiguous timeline across the whole archive.
         sample["time_idx"] = torch.tensor(int(start_g), dtype=torch.int64)
+
+        # Previous-state (ArchesWeather): read the frame at start - k via global
+        # dispatch (crosses year boundaries transparently). Clamped to 0 at the
+        # archive start (the sampler normally keeps starts >= prev_state_steps).
+        if self._prev_state_steps > 0:
+            prev_g = max(0, start_g - self._prev_state_steps)
+            p_sub, p_local = self._global_to_local(prev_g)
+            prev_sample = self.sub_datasets[p_sub][(p_local, 0)]
+            sample["surface_prev_in"] = prev_sample["surface_in"]
+            if "upper_air_in" in prev_sample:
+                sample["upper_air_prev_in"] = prev_sample["upper_air_in"]
+            if "upper_air_sigma_in" in prev_sample:
+                sample["upper_air_sigma_prev_in"] = prev_sample["upper_air_sigma_in"]
+            if "upper_air_pressure_in" in prev_sample:
+                sample["upper_air_pressure_prev_in"] = prev_sample["upper_air_pressure_in"]
 
         if self.transform is not None:
             sample = self.transform(sample)

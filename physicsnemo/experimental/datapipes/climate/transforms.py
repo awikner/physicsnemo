@@ -350,6 +350,17 @@ class ClimateNormalizer:
             out["upper_air_in"] = (
                 out["upper_air_in"] - self.upper_air_mean
             ) / self.upper_air_std
+        # ArchesWeather previous-state inputs (t - k) share the current-state
+        # stats (they are the same physical fields one step earlier). Present
+        # only when the datapipe was built with prev_state_steps > 0.
+        if "surface_prev_in" in out and self.surface_mean is not None:
+            out["surface_prev_in"] = (
+                out["surface_prev_in"] - self.surface_mean
+            ) / self.surface_std
+        if "upper_air_prev_in" in out and self.upper_air_mean is not None:
+            out["upper_air_prev_in"] = (
+                out["upper_air_prev_in"] - self.upper_air_mean
+            ) / self.upper_air_std
         if "varying_boundary" in out and self.varying_mean is not None:
             out["varying_boundary"] = (
                 out["varying_boundary"] - self.varying_mean
