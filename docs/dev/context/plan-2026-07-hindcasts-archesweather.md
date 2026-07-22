@@ -458,10 +458,11 @@ Path: `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/{model}/{YYYY}.zarr`, m
       in the h100 queue → cancelled, validated on Derecho instead.) Init loss large
       (untrained, no delta-scaler) — expected. 4-GPU DDP not separately smoked
       (single-GPU stack validated; DDP is the same code under torch<2.11).
-- [~] C3 300k-step training LAUNCHED on **Stampede3 H100** (job 3335041, 48h, queued
-      on busy h100 partition; auto-resumes from ./checkpoints on resubmit — needs
-      several 48h chunks for full 300k, ~137 epochs). wandb offline. RPFT switch
-      (era5_recent) at ~epoch 114 via AI_ROSSBY_TRAIN_DIR=era5_recent resubmit.
+- [~] C3 300k-step training — **VENUE CHANGED (2026-07-22, user): Midway3
+      `pedramh-gpu` (4×H100, infinite walltime, account pi-pedramh).** See §8 for the
+      Midway3 setup. (Stampede3 H100 job 3335041 was the initial submission; cancelled
+      in favour of Midway3 — Stampede3 h100 was heavily oversubscribed and pi-pedramh's
+      pedramh-gpu node has infinite walltime so no 48h chunking/resubmit is needed.)
       delta-std stats job ready (run `tools/data/era5/compute_delta24_std.py` +
       set loss.delta_scaler_path to enable delta-normalization; loss works without it).
 - [ ] C4 ArchesWeather hindcasts on Stampede3 (post-training; era5_all/ dir ready;
@@ -502,3 +503,30 @@ session; SFNO remains gated on checkpoint perms. See memory `hindcast-campaign-2
 - **Globus works autonomously** from Stampede3 (`~/gcli/bin/globus`, identity
   awikner@uchicago.edu); the NCAR GLADE session was valid (no interactive `session update`
   needed this session). Transfers are server-side (submit + poll `globus task show`).
+
+## 8. ArchesWeather training on Midway3 (venue change, 2026-07-22, user-directed)
+
+Train ArchesWeather-M on UChicago RCC **Midway3 `pedramh-gpu`** (single node
+`midway3-0423`, **4×H100**, 515 GB, 32 cpu, **infinite walltime**, account
+**pi-pedramh**). Chosen over Stampede3 H100 (heavily oversubscribed) — infinite
+walltime means no 48h chunking/resubmit.
+
+- **Data fits scratch.** Training data = ERA5 1979-2018 (train) + 2019 (val), 41
+  year-stores × ~30 GB ≈ **1.2-1.3 TB** < Midway3 scratch **2.0 TB hard limit**
+  (`/scratch/midway3/awikner`). NOTE soft quota is 100 GB (grace-based); we run
+  far over soft, relying on grace + the 2 TB hard cap. era5_recent (RPFT) + train/val
+  are symlink dirs (no extra copies). Checkpoints (few GB) fit the remaining headroom.
+- **Globus:** Midway3 collection `2fde89c0-6fb4-11eb-8c47-0eb1aa8d4337`
+  (UChicago RCC Midway3). No globus-cli ON Midway3 → drive the transfer from
+  Stampede3 (`~/gcli/bin/globus`). Source = TACC Stampede3 `1e9ddd41-...`
+  `/scratch/09979/awikner/physicsnemo-zarr/era5/{1979..2019}.zarr` + the two
+  normalization_pangu_s2s_{mean,std}.zarr. Direct recursive transfer (tiny-chunk
+  stores → per-file-overhead-bound, ~hours, server-side).
+- **Setup on Midway3:** clone/pull `awikner/physicsnemo@ai-rossbypalooza`; build the
+  venv (`uv sync --extra cu12 --extra utils-extras --extra datapipes-extras --group dev`
+  — SFNO extras NOT needed for ArchesWeather; torch<2.11 pin); create
+  era5_train/era5_val/era5_recent symlink dirs under `/scratch/midway3/awikner/physicsnemo-zarr`.
+- **Launch:** `AI_ROSSBY_DATA=/scratch/midway3/awikner/physicsnemo-zarr sbatch
+  -p pedramh-gpu -A pi-pedramh hpc/scripts/train_archesweather_era5.sbatch`
+  (launcher is cluster-agnostic; derives GPU count from nvidia-smi). No walltime cap
+  needed. RPFT: resubmit with `AI_ROSSBY_TRAIN_DIR=era5_recent` at ~epoch 114.
