@@ -52,6 +52,7 @@ with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=Warning, module=r"physicsnemo\.experimental.*")
     from physicsnemo.experimental.datapipes.plasim import (
         ClimateZarrDataset,
+        ClimateZarrMultiYearDataset,
         NanFillTransform,
         PlasimClimateDataset,
         PlasimNormalizer,
@@ -83,6 +84,77 @@ def _resolve_path(p: Optional[str]) -> Optional[str]:
     return to_absolute_path(p) if p else None
 
 
+def _timestamp_ymdh(t) -> tuple[int, int, int, int]:
+    """Return ``(year, month, day, hour)`` for a cftime OR ``np.datetime64``.
+
+    cftime objects expose ``.year/.month/.day/.hour`` directly; a
+    ``numpy.datetime64`` is converted to a Python ``datetime`` (second
+    resolution) so the same attribute access works. Kept dependency-light
+    (``numpy`` only) so :func:`resolve_init_schedule` is unit-testable
+    without the full physicsnemo stack.
+    """
+    if isinstance(t, np.datetime64):
+        dt = t.astype("datetime64[s]").astype(object)
+        return dt.year, dt.month, dt.day, dt.hour
+    return int(t.year), int(t.month), int(t.day), int(t.hour)
+
+
+def resolve_init_schedule(
+    times: Sequence,
+    months: Optional[Sequence[int]] = None,
+    days: Optional[Sequence[int]] = None,
+    hours: Optional[Sequence[int]] = None,
+    years: Optional[Sequence[int]] = None,
+) -> list[int]:
+    r"""Resolve a calendar ``init_schedule`` to sorted INTEGER time indices.
+
+    Scans a sequence of timestamps (cftime objects or ``numpy.datetime64``)
+    and returns the positions whose ``(year, month, day, hour)`` match every
+    provided filter. A filter that is ``None`` (or empty) matches *any* value
+    for that field, so ``resolve_init_schedule(times)`` returns every index
+    except the ones dropped below.
+
+    **Feb 29 is always dropped** — the hindcast campaign never initializes on a
+    leap day, so it is excluded regardless of the ``months``/``days`` filters
+    (this keeps the per-year IC count identical across leap and non-leap
+    years).
+
+    Parameters
+    ----------
+    times : sequence
+        The (multi-year) store ``time`` coordinate — cftime objects or
+        ``numpy.datetime64`` values. Position ``i`` maps to global index ``i``.
+    months, days, hours, years : sequence of int, optional
+        Allowed calendar values. ``None`` / empty means "any".
+
+    Returns
+    -------
+    list[int]
+        Sorted, de-duplicated global time indices matching the schedule.
+    """
+    month_set = set(int(m) for m in months) if months else None
+    day_set = set(int(d) for d in days) if days else None
+    hour_set = set(int(h) for h in hours) if hours else None
+    year_set = set(int(y) for y in years) if years else None
+
+    out: list[int] = []
+    for i, t in enumerate(times):
+        year, month, day, hour = _timestamp_ymdh(t)
+        # Never generate a Feb-29 initialization.
+        if month == 2 and day == 29:
+            continue
+        if year_set is not None and year not in year_set:
+            continue
+        if month_set is not None and month not in month_set:
+            continue
+        if day_set is not None and day not in day_set:
+            continue
+        if hour_set is not None and hour not in hour_set:
+            continue
+        out.append(i)
+    return sorted(set(out))
+
+
 def _build_perturber(perturber_name: str, perturber_scales: dict) -> Perturber:
     """Translate config strings into a concrete :class:`Perturber`."""
     kind = str(perturber_name).lower()
@@ -100,12 +172,16 @@ def _build_perturber(perturber_name: str, perturber_scales: dict) -> Perturber:
 
 
 def _stack_initial(dataset, ic_indices: Sequence[int], device: torch.device) -> dict:
-    """Stack a list of per-IC dataset samples (lead=1 placeholders) into one batch.
+    """Stack a list of per-IC dataset samples into one batch.
 
     Same pattern as :class:`RolloutValidator._stack_initial`; pulled out
-    here so the inference CLI doesn't import the validator class.
+    here so the inference CLI doesn't import the validator class. Uses lead=0:
+    the rollout seeds itself from the INPUT tensors only (never the paired
+    target), so a zero lead is byte-identical for the used values while
+    tolerating an IC placed at the very last archive index (whose ``t + 1``
+    target read would otherwise be out of range).
     """
-    samples = [dataset[(int(t), 1)] for t in ic_indices]
+    samples = [dataset[(int(t), 0)] for t in ic_indices]
     out: dict[str, torch.Tensor] = {}
     for k in samples[0]:
         v0 = samples[0][k]
@@ -117,7 +193,13 @@ def _stack_initial(dataset, ic_indices: Sequence[int], device: torch.device) -> 
 
 
 def _stack_at_step(dataset, t_list: Sequence[int], device: torch.device) -> dict:
-    samples = [dataset[(int(t), 1)] for t in t_list]
+    # lead=0: the rollout consumes only the INPUT tensors (surface_in /
+    # upper_air_in / varying_boundary / constant_boundary / calendar) from this
+    # read — never the paired target — so a zero lead avoids an out-of-range
+    # ``t + 1`` read when ``t`` is clamped to the last archive index (the
+    # boundary-clamp / persistence case) while leaving those input values
+    # byte-for-byte identical to the previous ``lead=1`` placeholder.
+    samples = [dataset[(int(t), 0)] for t in t_list]
     out: dict[str, torch.Tensor] = {}
     for k in samples[0]:
         v0 = samples[0][k]
@@ -398,11 +480,171 @@ def _write_per_ic_frame(
         ds["pred_diagnostic_std"][frame, ...] = _np(d_std)
 
 
-def _extract_layout(dataset: PlasimClimateDataset) -> dict:
+def _underlying_xr(dataset):
+    """Return the xarray store backing ``dataset`` (single- or multi-year).
+
+    :class:`ClimateZarrMultiYearDataset` has no ``_ds``; its per-year
+    sub-datasets each do. lat/lon are identical across years, so the first
+    sub-store is authoritative.
+    """
+    if hasattr(dataset, "_ds"):
+        return dataset._ds
+    if hasattr(dataset, "sub_datasets") and dataset.sub_datasets:
+        return dataset.sub_datasets[0]._ds
+    raise AttributeError(
+        "dataset exposes neither `_ds` nor `sub_datasets`; cannot read layout"
+    )
+
+
+def _full_time_coord(dataset) -> Optional[np.ndarray]:
+    """Return the full (global) time coordinate as one contiguous array.
+
+    For a multi-year dataset the per-year sub-store time coords are
+    concatenated in the (already chronological) sub-dataset order so the
+    array index equals the global time index used by ``ic_start`` /
+    ``init_schedule``. Returns ``None`` when no time coord is present.
+    """
+    if hasattr(dataset, "sub_datasets") and dataset.sub_datasets:
+        parts = []
+        for sub in dataset.sub_datasets:
+            if "time" in sub._ds.coords:
+                parts.append(np.asarray(sub._ds["time"].values))
+            else:
+                return None
+        return np.concatenate(parts) if parts else None
+    ds = getattr(dataset, "_ds", None)
+    if ds is not None and "time" in ds.coords:
+        return np.asarray(ds["time"].values)
+    return None
+
+
+def _model_optional_kwarg_names(model) -> set:
+    """Names among {surface_prev_in, upper_air_prev_in, calendar} the model takes.
+
+    Mirrors ``train_loop._optional_model_kwargs``' detection: inspect the
+    model's ``forward.__code__.co_varnames``. SFNO/Pangu don't name any of
+    these, so the returned set is empty and the rollout call is byte-for-byte
+    unchanged; ArchesWeather names all three. Diffusion wrappers route through
+    a different path and never consult this.
+    """
+    inner = model.module if hasattr(model, "module") else model
+    varnames = getattr(
+        inner.forward, "__code__", type("_x", (), {"co_varnames": ()})()
+    ).co_varnames
+    return {
+        k
+        for k in ("surface_prev_in", "upper_air_prev_in", "calendar")
+        if k in varnames
+    }
+
+
+def _clamp_idx(idx: int, n: int) -> int:
+    """Clamp a time index into ``[0, n-1]`` (persistence at the archive edges)."""
+    if idx < 0:
+        return 0
+    if idx > n - 1:
+        return n - 1
+    return int(idx)
+
+
+def _calendar_tensor(
+    times: Optional[np.ndarray],
+    time_idx: int,
+    n_rows: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Build the ArchesWeather ``(n_rows, 2)`` ``(month, hour)`` calendar tensor.
+
+    ``time_idx`` is the (clamped) global index of the CURRENT input state.
+    When no time coord is available, falls back to ``(1, 0)`` (Jan, 00Z) which
+    matches the model's own default in :meth:`ArchesWeather._cond_emb`.
+    """
+    if times is not None:
+        _, month, _, hour = _timestamp_ymdh(times[time_idx])
+    else:
+        month, hour = 1, 0
+    row = torch.tensor([float(month), float(hour)], device=device, dtype=dtype)
+    return row.unsqueeze(0).expand(n_rows, 2).contiguous()
+
+
+def _apply_ema_weights(model, ema_state, *, logger=None) -> bool:
+    r"""Copy EMA parameters onto ``model`` in place; return whether it happened.
+
+    The trainer persists EMA in the checkpoint's ``metadata`` under key
+    ``"ema"`` (``train.py``: ``metadata={"ema": ema.state_dict()}``). The value
+    is :meth:`ModelEMA.state_dict`'s dict::
+
+        {"avg_model_state": <AveragedModel.state_dict()>,
+         "decay": ..., "warmup_epochs": ..., "steps_per_epoch": ...}
+
+    ``AveragedModel`` stores the shadow model under a ``module.`` prefix plus an
+    ``n_averaged`` buffer. This reconstructs the shadow parameter dict by
+    stripping ``module.`` (skipping ``n_averaged``) and copies it onto the
+    model's ``named_parameters`` — exactly what ``ModelEMA.apply_to`` does at
+    validation time (params only; buffers are left untouched).
+
+    Defensive fallbacks: accepts a raw ``{param_name: tensor}`` dict, or a dict
+    already keyed without the ``module.`` prefix. Returns ``False`` (and logs)
+    when no usable EMA state is found so the caller can fall back to raw
+    weights.
+    """
+    if ema_state is None:
+        if logger is not None:
+            logger.warning(
+                "use_ema=True but checkpoint has no EMA metadata; using raw weights"
+            )
+        return False
+
+    avg = None
+    if isinstance(ema_state, dict):
+        if "avg_model_state" in ema_state and isinstance(
+            ema_state["avg_model_state"], dict
+        ):
+            avg = ema_state["avg_model_state"]
+        else:
+            # Defensive: ema_state may already be a flat state dict.
+            avg = ema_state
+    if not isinstance(avg, dict) or not avg:
+        if logger is not None:
+            logger.warning(
+                "use_ema=True but EMA metadata is not a usable state dict; "
+                "using raw weights"
+            )
+        return False
+
+    module_sd: dict[str, torch.Tensor] = {}
+    for k, v in avg.items():
+        if k == "n_averaged":
+            continue
+        if not torch.is_tensor(v):
+            continue
+        name = k[len("module."):] if k.startswith("module.") else k
+        module_sd[name] = v
+
+    inner = model.module if hasattr(model, "module") else model
+    applied = 0
+    with torch.no_grad():
+        for name, p in inner.named_parameters():
+            if name in module_sd:
+                p.data.copy_(module_sd[name].to(p.device, p.dtype))
+                applied += 1
+    if logger is not None:
+        logger.info(
+            f"applied EMA weights to {applied} params "
+            f"(of {sum(1 for _ in inner.named_parameters())})"
+        )
+    return applied > 0
+
+
+def _extract_layout(dataset) -> dict:
     """Layout introspection (run once per inference run).
 
     Returns surface/upper_air/diagnostic variable names + level coord +
-    lat/lon arrays + time coord — everything the per-IC builder needs.
+    lat/lon arrays + time coord — everything the per-IC builder needs. Works
+    against both the single-store dataset and the multi-year composite (whose
+    lat/lon come from the first sub-store and whose time coord is the global
+    concatenation).
     """
     sample = dataset[0]
     surface_variables = list(dataset.layout.surface_variables)
@@ -420,13 +662,10 @@ def _extract_layout(dataset: PlasimClimateDataset) -> dict:
         levels_coord = pressure_levels
     else:
         levels_coord = list(range(n_levels))
-    lat_arr = np.asarray(dataset._ds["lat"].values, dtype=np.float32)  # type: ignore[attr-defined]
-    lon_arr = np.asarray(dataset._ds["lon"].values, dtype=np.float32)  # type: ignore[attr-defined]
-    time_arr = (
-        np.asarray(dataset._ds["time"].values)  # type: ignore[attr-defined]
-        if "time" in dataset._ds.coords  # type: ignore[attr-defined]
-        else None
-    )
+    base_xr = _underlying_xr(dataset)
+    lat_arr = np.asarray(base_xr["lat"].values, dtype=np.float32)
+    lon_arr = np.asarray(base_xr["lon"].values, dtype=np.float32)
+    time_arr = _full_time_coord(dataset)
     return {
         "surface_variables": surface_variables,
         "upper_air_variables": upper_air_variables,
@@ -458,6 +697,10 @@ def run_inference_streaming_per_ic(
     has_diagnostic: bool = False,
     seed: int = 0,
     save_variables: Optional[dict] = None,
+    prev_state_steps: int = 0,
+    step_size: Optional[int] = None,
+    clamped_inits: Optional[list] = None,
+    run_attrs: Optional[dict] = None,
     logger=None,
 ) -> list[str]:
     r"""Roll each IC out and hand one xr.Dataset per IC to the writer.
@@ -493,21 +736,59 @@ def run_inference_streaming_per_ic(
         perturber = Deterministic() if ensemble_size == 1 else ReplicateOnly()
     rng = torch.Generator(device=device).manual_seed(seed)
     layout = _extract_layout(dataset)
+    times = layout["time"]
+    n_time = len(dataset)
+
+    # Optional per-model forward kwargs. SFNO/Pangu name none of these, so the
+    # rollout call below is byte-for-byte unchanged; ArchesWeather names all
+    # three (prev-state channel-concat + month/hour adaLN conditioning).
+    opt_names = _model_optional_kwarg_names(model)
+    needs_prev = bool({"surface_prev_in", "upper_air_prev_in"} & opt_names)
+    needs_calendar = "calendar" in opt_names
+
+    # Rollout step size (in dataset indices per model step). SFNO/Pangu roll
+    # one archive index per step. A prev-state model (ArchesWeather) predicts
+    # `prev_state_steps` indices ahead per step (24 h = 4 x 6 h), and its
+    # previous-state input is exactly one model step back — so the step size
+    # equals `prev_state_steps` unless the caller overrides it.
+    if step_size is None:
+        step_size = max(1, prev_state_steps) if needs_prev else 1
+    step_size = int(step_size)
 
     paths: list[str] = []
     for ic in ic_indices:
         ic = int(ic)
         n_frames = max_step + 1
 
+        # Per-frame global time index (clamped to the archive end — persistence
+        # past the last available step). frame f is at ic + f * step_size.
+        frame_idx = [_clamp_idx(ic + f * step_size, n_time) for f in range(n_frames)]
+        last_wanted = ic + max_step * step_size
+        was_clamped = last_wanted > (n_time - 1)
+        if was_clamped and clamped_inits is not None:
+            clamped_inits.append(
+                {
+                    "ic_index": ic,
+                    "ic_time": (str(times[ic]) if times is not None else None),
+                    "wanted_last_index": int(last_wanted),
+                    "clamped_to_index": int(n_time - 1),
+                }
+            )
+            if logger is not None:
+                logger.warning(
+                    f"  ! IC {ic}: rollout needs index {last_wanted} but archive "
+                    f"ends at {n_time - 1}; clamping boundary reads (persistence)"
+                )
+
         # Time slice for this IC (cftime-aware when available).
-        if layout["time"] is not None:
-            t_slice = layout["time"][ic : ic + n_frames]
-            t_start = layout["time"][ic]
-            t_end = layout["time"][ic + max_step] if (ic + max_step) < len(layout["time"]) else None
+        if times is not None:
+            t_slice = times[np.asarray(frame_idx)]
+            t_start = times[frame_idx[0]]
+            t_end = times[frame_idx[-1]]
         else:
             t_slice = None
             t_start = ic
-            t_end = ic + max_step
+            t_end = ic + max_step * step_size
 
         ds = _build_per_ic_dataset(
             ic_index=ic,
@@ -522,8 +803,13 @@ def run_inference_streaming_per_ic(
             n_levels=layout["n_levels"],
             has_diagnostic=has_diagnostic,
             time_values=t_slice,
-            ic_time=(t_start if layout["time"] is not None else None),
+            ic_time=(t_start if times is not None else None),
         )
+        if run_attrs:
+            for _k, _v in run_attrs.items():
+                ds.attrs[_k] = _v
+        ds.attrs["step_size"] = int(step_size)
+        ds.attrs["boundary_clamped"] = int(bool(was_clamped))
 
         # Initial state at ic — populate frame 0 of the output AND seed
         # the rollout. The rollout itself runs in NORMALIZED space
@@ -563,12 +849,44 @@ def run_inference_streaming_per_ic(
         state = perturber(init_batch, ensemble_size, generator=rng)
         const_boundary = state.get("constant_boundary")
 
+        # Previous-state seed (ArchesWeather). For the first model step the
+        # previous frame is the archive state `prev_state_steps` indices before
+        # the IC (clamped to the archive start -> persistence). Thereafter the
+        # previous state is the input from the prior iteration (shift below).
+        prev_surface = prev_upper = None
+        if needs_prev:
+            prev_idx = _clamp_idx(ic - prev_state_steps, n_time)
+            prev_batch = _maybe_normalize(
+                normalizer, _stack_at_step(dataset, [prev_idx], device)
+            )
+            prev_surface = prev_batch["surface_in"]
+            prev_upper = prev_batch.get("upper_air_in")
+            if ensemble_size > 1:
+                prev_surface = prev_surface.repeat_interleave(ensemble_size, dim=0)
+                if prev_upper is not None:
+                    prev_upper = prev_upper.repeat_interleave(ensemble_size, dim=0)
+
         for k in range(1, max_step + 1):
+            # Optional model kwargs. The CURRENT input state is at global index
+            # ic + (k-1)*step_size — calendar is derived from that timestamp.
+            extra: dict[str, torch.Tensor] = {}
+            if needs_prev:
+                if "surface_prev_in" in opt_names:
+                    extra["surface_prev_in"] = prev_surface
+                if "upper_air_prev_in" in opt_names:
+                    extra["upper_air_prev_in"] = prev_upper
+            if needs_calendar:
+                cur_idx = _clamp_idx(ic + (k - 1) * step_size, n_time)
+                extra["calendar"] = _calendar_tensor(
+                    times, cur_idx, state["surface_in"].shape[0], device
+                )
+
             out = model(
                 state["surface_in"],
                 const_boundary,
                 state["varying_boundary"],
                 state["upper_air_in"],
+                **extra,
             )
             if has_diagnostic:
                 next_surface, next_upper, next_diag = out[0], out[1], out[2]
@@ -606,13 +924,20 @@ def run_inference_streaming_per_ic(
                     pd[0].cpu().numpy().astype(np.float32)
                 )
 
-            # Advance boundary for next step (time t+k → input boundary).
+            # Advance boundary for next step. The next input state is at global
+            # index ic + k*step_size (clamped to the archive end -> persistence).
+            next_idx = _clamp_idx(ic + k * step_size, n_time)
             target_batch = _maybe_normalize(
-                normalizer, _stack_at_step(dataset, [ic + k], device)
+                normalizer, _stack_at_step(dataset, [next_idx], device)
             )
             next_boundary = target_batch["varying_boundary"]
             if ensemble_size > 1:
                 next_boundary = next_boundary.repeat_interleave(ensemble_size, dim=0)
+            # Shift the previous-state window: prev <- current input, then the
+            # just-produced output becomes the next current input.
+            if needs_prev:
+                prev_surface = state["surface_in"]
+                prev_upper = state["upper_air_in"]
             state = {
                 "surface_in": next_surface,
                 "upper_air_in": next_upper,
@@ -1042,6 +1367,8 @@ def run_inference(
     batch_size: int = 1,
     has_diagnostic: bool = False,
     seed: int = 0,
+    prev_state_steps: int = 0,
+    step_size: Optional[int] = None,
 ) -> xr.Dataset:
     """Roll the model out from each IC and return a populated xarray dataset.
 
@@ -1078,9 +1405,21 @@ def run_inference(
     else:
         levels_coord = list(range(n_levels))
 
-    # Lat/lon from the dataset's underlying xarray store.
-    lat_arr = np.asarray(dataset._ds["lat"].values, dtype=np.float32)  # type: ignore[attr-defined]
-    lon_arr = np.asarray(dataset._ds["lon"].values, dtype=np.float32)  # type: ignore[attr-defined]
+    # Lat/lon from the dataset's underlying xarray store (multi-year safe).
+    base_xr = _underlying_xr(dataset)
+    lat_arr = np.asarray(base_xr["lat"].values, dtype=np.float32)
+    lon_arr = np.asarray(base_xr["lon"].values, dtype=np.float32)
+    times = _full_time_coord(dataset)
+    n_time = len(dataset)
+
+    # Optional per-model forward kwargs (empty for SFNO/Pangu -> unchanged
+    # call). See ``run_inference_streaming_per_ic`` for the step-size rationale.
+    opt_names = _model_optional_kwarg_names(model)
+    needs_prev = bool({"surface_prev_in", "upper_air_prev_in"} & opt_names)
+    needs_calendar = "calendar" in opt_names
+    if step_size is None:
+        step_size = max(1, prev_state_steps) if needs_prev else 1
+    step_size = int(step_size)
 
     out_ds = _build_xr_dataset(
         ic_indices=ic_indices,
@@ -1109,13 +1448,51 @@ def run_inference(
         state = perturber(init_batch, ensemble_size, generator=rng)
         const_boundary = state.get("constant_boundary")
 
+        # Previous-state seed (ArchesWeather): per-IC frame prev_state_steps
+        # indices before each IC, stacked then ensemble-replicated to match the
+        # rolled-out batch layout.
+        prev_surface = prev_upper = None
+        if needs_prev:
+            prev_idx = [_clamp_idx(int(t) - prev_state_steps, n_time) for t in sub_ic]
+            prev_batch = _maybe_normalize(
+                normalizer, _stack_at_step(dataset, prev_idx, device)
+            )
+            prev_surface = prev_batch["surface_in"]
+            prev_upper = prev_batch.get("upper_air_in")
+            if ensemble_size > 1:
+                prev_surface = prev_surface.repeat_interleave(ensemble_size, dim=0)
+                if prev_upper is not None:
+                    prev_upper = prev_upper.repeat_interleave(ensemble_size, dim=0)
+
         for k in range(1, max_step + 1):
             input_boundary = state["varying_boundary"]
+            extra: dict[str, torch.Tensor] = {}
+            if needs_prev:
+                if "surface_prev_in" in opt_names:
+                    extra["surface_prev_in"] = prev_surface
+                if "upper_air_prev_in" in opt_names:
+                    extra["upper_air_prev_in"] = prev_upper
+            if needs_calendar:
+                # CURRENT input state per IC is at ic + (k-1)*step_size.
+                rows = [
+                    _calendar_tensor(
+                        times,
+                        _clamp_idx(int(t) + (k - 1) * step_size, n_time),
+                        1,
+                        device,
+                    )
+                    for t in sub_ic
+                ]
+                cal = torch.cat(rows, dim=0)  # (n_ic, 2)
+                if ensemble_size > 1:
+                    cal = cal.repeat_interleave(ensemble_size, dim=0)
+                extra["calendar"] = cal
             out = model(
                 state["surface_in"],
                 const_boundary,
                 input_boundary,
                 state["upper_air_in"],
+                **extra,
             )
             if has_diagnostic:
                 next_surface, next_upper_air, next_diag = out[0], out[1], out[2]
@@ -1138,15 +1515,19 @@ def run_inference(
                     batch_start : batch_start + n_ic, :, k - 1, :, :, :
                 ] = pd.cpu().numpy().astype(np.float32)
 
-            # Advance state. The next step's boundary comes from time t+k;
-            # ensemble-repeat the boundary so it matches the rolled-out batch.
-            target_times = [t + k for t in sub_ic]
+            # Advance state. The next input state per IC is at ic + k*step_size
+            # (clamped -> persistence past the archive end); ensemble-repeat the
+            # boundary so it matches the rolled-out batch.
+            target_times = [_clamp_idx(int(t) + k * step_size, n_time) for t in sub_ic]
             target_batch = _maybe_normalize(
                 normalizer, _stack_at_step(dataset, target_times, device)
             )
             next_boundary = target_batch["varying_boundary"]
             if ensemble_size > 1:
                 next_boundary = next_boundary.repeat_interleave(ensemble_size, dim=0)
+            if needs_prev:
+                prev_surface = state["surface_in"]
+                prev_upper = state["upper_air_in"]
             state = {
                 "surface_in": next_surface,
                 "upper_air_in": next_upper_air,
@@ -1194,10 +1575,22 @@ def main(cfg: DictConfig) -> None:
     model.eval()
 
     ckpt_dir = _resolve_path(str(inf_cfg.checkpoint_dir))
+    ckpt_meta: dict = {}
     loaded_epoch = load_checkpoint(
-        ckpt_dir, models=model, device=dist.device
+        ckpt_dir, models=model, device=dist.device, metadata_dict=ckpt_meta
     )
     logger.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
+
+    # Optionally swap in the EMA (exponential-moving-average) weights the
+    # trainer persisted under ``metadata['ema']``. Records which weights were
+    # actually used in the output attrs so downstream consumers can tell.
+    use_ema = bool(inf_cfg.get("use_ema", False))
+    weights_used = "raw"
+    if use_ema:
+        applied = _apply_ema_weights(model, ckpt_meta.get("ema"), logger=logger)
+        weights_used = "ema" if applied else "raw_ema_unavailable"
+    model.eval()
+    logger.info(f"weights_used={weights_used}")
 
     # --- Build dataset + normalizer (no datapipe — direct dataset access) ---
     # Diffusion wrappers need a ``calendar`` tensor on each sample; turn
@@ -1208,14 +1601,25 @@ def main(cfg: DictConfig) -> None:
     val_zarr_path = _resolve_path(
         data.val_zarr_path if data.val_zarr_path else data.zarr_path
     )
-    base_ds = PlasimClimateDataset(
-        val_zarr_path,
+    # A non-``.zarr`` directory is a multi-year archive (per-year sub-stores);
+    # a single ``.zarr`` store uses the single-year dataset. Mirrors the routing
+    # in ``train.build_datapipe`` so a Dec-init rollout can cross the year
+    # boundary. Prev-state / calendar are reconstructed by the rollout itself
+    # (it reads the archive directly), so the dataset does not need
+    # ``prev_state_steps`` / ``calendar_encoding`` set here.
+    _ds_kwargs = dict(
         boundary_zarr_path=_resolve_path(data.boundary_zarr_path),
         yearly_repeating_boundary=bool(data.yearly_repeating_boundary),
         leap_boundary_zarr_path=_resolve_path(data.leap_boundary_zarr_path),
         non_leap_boundary_zarr_path=_resolve_path(data.non_leap_boundary_zarr_path),
         emit_calendar=is_diffusion,
     )
+    _vp = Path(val_zarr_path)
+    if _vp.is_dir() and not str(val_zarr_path).endswith(".zarr"):
+        base_ds = ClimateZarrMultiYearDataset(val_zarr_path, **_ds_kwargs)
+        logger.info(f"opened multi-year archive {val_zarr_path} ({len(base_ds)} steps)")
+    else:
+        base_ds = PlasimClimateDataset(val_zarr_path, **_ds_kwargs)
     normalizer = PlasimNormalizer.from_dataset(
         base_ds,
         mean_path=_resolve_path(data.mean_path),
@@ -1232,10 +1636,57 @@ def main(cfg: DictConfig) -> None:
     base_ds.transform = nan_fill
 
     # --- Inference config ---------------------------------------------------
-    ic_indices = list(inf_cfg.ic_start)
+    # IC selection: either an explicit list of integer time indices
+    # (``inference.ic_start``) or a calendar ``inference.init_schedule`` block
+    # resolved against the (multi-year) store time coord. When both are given,
+    # ``init_schedule`` wins (with a warning). Feb 29 is always dropped.
+    init_schedule = inf_cfg.get("init_schedule", None)
+    if init_schedule is not None:
+        if "ic_start" in inf_cfg and inf_cfg.get("ic_start") is not None:
+            logger.warning(
+                "both inference.ic_start and inference.init_schedule set; "
+                "using init_schedule and ignoring ic_start"
+            )
+        sched = OmegaConf.to_container(init_schedule, resolve=True) or {}
+        times = _full_time_coord(base_ds)
+        if times is None:
+            raise ValueError(
+                "inference.init_schedule requires the store to have a time coord"
+            )
+        years = sched.get("years", None)
+        if years is None and sched.get("year", None) is not None:
+            years = [sched.get("year")]
+        ic_indices = resolve_init_schedule(
+            times,
+            months=sched.get("months", None),
+            days=sched.get("days", None),
+            hours=sched.get("hours", None),
+            years=years,
+        )
+        logger.info(
+            f"init_schedule resolved to {len(ic_indices)} ICs "
+            f"(years={years}, months={sched.get('months')}, "
+            f"days={sched.get('days')}, hours={sched.get('hours')})"
+        )
+        if not ic_indices:
+            raise ValueError(
+                "inference.init_schedule matched no time indices; check the "
+                "months/days/hours/years against the store calendar"
+            )
+    else:
+        ic_indices = list(inf_cfg.ic_start)
     max_step = int(inf_cfg.max_step)
     ensemble_size = int(inf_cfg.get("ensemble_size", 1))
     batch_size = int(inf_cfg.get("batch_size", 1))
+    # Previous-state offset + rollout step size (ArchesWeather). Default the
+    # prev offset from the paired dataset config so it matches the model; the
+    # step size defaults (in the rollout) to prev_state_steps for a prev-state
+    # model and 1 otherwise. Both are ignored for SFNO/Pangu.
+    prev_state_steps = int(
+        inf_cfg.get("prev_state_steps", data.get("prev_state_steps", 0))
+    )
+    step_size_raw = inf_cfg.get("step_size", None)
+    step_size = int(step_size_raw) if step_size_raw is not None else None
     perturber = _build_perturber(
         str(inf_cfg.get("perturber", "deterministic")),
         OmegaConf.to_container(inf_cfg.get("perturber_scales", {}), resolve=True) or {},
@@ -1278,6 +1729,13 @@ def main(cfg: DictConfig) -> None:
                 f"diffusion: sampler={type(scheduler).__name__}, "
                 f"sampler_num_steps={sampler_num_steps}"
             )
+
+    # Per-IC run-level attrs stamped onto every output (self-describing files).
+    run_attrs = {
+        "weights_used": weights_used,
+        "checkpoint_epoch": int(loaded_epoch),
+    }
+    clamped_inits: list = []
 
     # Async writer overlaps disk I/O with GPU rollout — the next IC's
     # forecast runs while the previous one is being flushed to disk.
@@ -1326,12 +1784,27 @@ def main(cfg: DictConfig) -> None:
                 has_diagnostic=getattr(model, "has_diagnostic", False),
                 seed=int(cfg.seed) + 1009,
                 save_variables=save_variables,
+                prev_state_steps=prev_state_steps,
+                step_size=step_size,
+                clamped_inits=clamped_inits,
+                run_attrs=run_attrs,
                 logger=logger,
             )
         # __exit__ calls wait_all(): final flush + raise on any worker error.
     logger.info(f"wrote {len(paths)} per-IC forecast files to {output_dir}")
     for p in paths:
         logger.info(f"  {p}")
+    if clamped_inits:
+        logger.warning(
+            f"{len(clamped_inits)} IC(s) required boundary clamping at the "
+            f"archive end (persistence past the last available step):"
+        )
+        for c in clamped_inits:
+            logger.warning(
+                f"  ic_index={c['ic_index']} ic_time={c['ic_time']} "
+                f"wanted_last_index={c['wanted_last_index']} "
+                f"clamped_to_index={c['clamped_to_index']}"
+            )
 
 
 if __name__ == "__main__":
