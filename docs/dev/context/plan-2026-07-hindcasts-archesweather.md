@@ -242,12 +242,17 @@ A4. Full campaign: submit all 25 year-jobs (they are independent; queue absorbs 
     Monitor with `qstat -u awikner`. Expect ≤2 h each on 1 node × 4 A100.
 A5. Consolidation (see §4): per completed year, run the consolidator on Derecho
     (CPU job or login-safe plain xarray/zarr — do NOT import physicsnemo on login nodes) to build
-    `pangu_s2s/YYYY.zarr`; drop any Feb-29 init; then Globus-transfer to Stampede3
-    `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/pangu_s2s/`; verify (open store, check
-    dims/coords/finite fraction); then DELETE the year's NC files and the Derecho-side yearly
-    zarr (inode pressure, 85.7%!). Endpoints: NCAR GLADE `d33b3614-6d04-11e5-ba46-22000b92c6ec`,
-    TACC Stampede3 `1e9ddd41-fe4b-406f-95ff-f3d79f9cb523`. Watch Globus high-assurance session
-    timeouts (`globus session update` — Delta↔access-ci.org, TACC↔uchicago.edu).
+    `pangu_s2s/YYYY.zarr`; drop any Feb-29 init. **TRANSFER VIA TAR-REPLICATION** (these hindcast
+    zarr stores are tiny-chunk — ~5000 dirs/store — so per-file Globus is very slow; tar first):
+    on Derecho, `tar -cf pangu_s2s_YYYY.tar -C hindcasts/pangu_s2s YYYY.zarr` into a staging dir;
+    Globus-transfer the TARBALLS (large files → near line-rate) to Stampede3; then **untar at the
+    destination** into `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/pangu_s2s/`; verify
+    (open store, check dims/coords/finite fraction); then DELETE the year's NC files, the
+    Derecho-side yearly zarr + tarball, and the Stampede3-side tarball (inode/space). Endpoints:
+    NCAR GLADE `d33b3614-6d04-11e5-ba46-22000b92c6ec`, TACC Stampede3
+    `1e9ddd41-fe4b-406f-95ff-f3d79f9cb523`. (cf. `hpc/scripts/replicate_tar.sh`, the group's
+    tar-bundle→Globus→untar tool, ~5× faster for these stores.) Watch Globus high-assurance
+    session timeouts (`globus session update` — Delta↔access-ci.org, TACC↔uchicago.edu).
 
 ### Phase B — SFNO hindcasts (Derecho) [gated on checkpoint access; code work can start now]
 
@@ -280,7 +285,10 @@ A note: inference.py runs rollout with `dataset` reads per step — point `data.
     `era5_all`, `mean/std` at the Derecho norm stores, model config `model=sfno_era5`.
 B5. Full campaign: per-year PBS jobs (`-q main`, 1 node 4×A100 or even 1 GPU — measure in smoke;
     95 inits × 15 steps is light). Simplest: 1 GPU per year-job, `inference.batch_size` ≥ 8.
-    Then consolidate per year (§4) → `sfno_era5/YYYY.zarr` → Globus → verify → clean Derecho.
+    Then consolidate per year (§4) → `sfno_era5/YYYY.zarr` → **TAR-REPLICATE to Stampede3** (tar
+    the store on Derecho → Globus the tarball → untar at destination into
+    `hindcasts/sfno_era5/`; same rationale + procedure as Phase A5 — tiny-chunk stores, ~5×
+    faster than per-file Globus) → verify → clean Derecho (zarr + tarballs, both sides).
 
 ### Phase C — ArchesWeather port + training + hindcasts (local dev → Stampede3)
 
@@ -377,7 +385,10 @@ Path: `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/{model}/{YYYY}.zarr`, m
 - Dims: surface/diagnostic vars `(init_time, lead_time, lat, lon)`; upper-air
   `(init_time, lead_time, pressure_level, lat, lon)` with pressure_level = the 17 model levels.
 - Chunking: `(1, 16, [17,] 180, 360)` — one chunk per (variable, init) → ~95 chunks/var/year
-  (~1.5k files/store; Derecho-inode- and Globus-friendly; a full-trajectory read is one chunk).
+  (a full-trajectory read is one chunk). NOTE the zarr v3 nesting still yields ~5000 dirs/store,
+  so cross-cluster transfer (Pangu §A5, SFNO §B5) uses **tar-replication** (tar → Globus →
+  untar), NOT per-file Globus. (ArchesWeather §C4 writes its stores directly on Stampede3 — no
+  transfer, no tar needed.)
 - Coords: `init_time` (cftime standard, hours since YYYY-01-01), `lead_time` = [0..15] int
   (attrs units "days"), `lat`/`lon`/`pressure_level` copied from the training store.
 - lead 0 = the ERA5 initial condition (denormalized model input), leads 1..15 = forecasts.
