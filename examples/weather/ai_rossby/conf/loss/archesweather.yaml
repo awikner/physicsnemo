@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ArchesWeather-M loss: latitude-weighted MSE with per-surface-var graphcast
+# weights, per-level pressure weights (p / mean(p)), and optional 24h-increment
+# (delta) normalization. Selected by build_loss via loss_class == "archesweather".
+
+loss_class: archesweather
+latitude_weighted: true
+
+# Graphcast surface weights (our channel order t2m, u10, v10, mslp).
+surface_graphcast_weights:
+  2m_temperature: 1.0
+  10m_u_component_of_wind: 0.1
+  10m_v_component_of_wind: 0.1
+  mean_sea_level_pressure: 0.1
+
+# loss_delta_normalization: JSON of per-channel scalers (pangu_std / delta24_std)
+# produced by tools/data/era5/compute_delta24_std.py. Leave null to disable
+# (plain lat/level/surface-weighted MSE). Point at the generated file to match
+# the original recipe, e.g.:
+#   ${oc.env:AI_ROSSBY_DATA}/era5/archesweather_delta_scaler.json
+delta_scaler_path: null

@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ArchesWeather-M training config (arXiv:2412.12971 flagship deterministic
+# recipe). AdamW 3e-4, betas (0.9, 0.98), selective weight decay 0.05, warmup +
+# cosine to 0 over ~300k optimizer steps, global batch 4, grad clip 1.0, bf16,
+# no EMA, seed 0.
+#
+# Step<->epoch mapping: dataset num_samples_per_epoch=8760, global batch 4 ->
+# 2190 steps/epoch. 300k steps ~= 137 epochs; 5000-step warmup ~= 2.28 epochs
+# (rounded to 2). The scheduler here is epoch-granular (LinearWarmupCosineAnnealingLR),
+# a close approximation of the original per-step cosine — documented approximation.
+#
+# RPFT (replay fine-tuning): at ~epoch 114 (~250k steps) switch the dataset's
+# zarr_path to era5_recent (2007-2018) and resume (auto from ./checkpoints); the
+# cosine schedule continues from checkpointed scheduler state.
+
+use_static_capture: False
+amp: bf16
+grad_clip_norm: 1.0
+max_epochs: 137
+
+ddp_bucket_cap_mb: null
+ddp_static_graph: False
+jit_compile: False
+
+optimizer:
+  type: AdamW
+  lr: 3.0e-4
+  betas: [0.9, 0.98]
+  weight_decay: 0.05
+  # Apply weight decay ONLY to non-norm weights (geoarches convention).
+  selective_weight_decay: true
+  fused: null
+
+ema:
+  enabled: False
+  decay: 0.9999
+  warmup_epochs: 0
+
+stages:
+  - name: default
+    num_epochs: ${training.max_epochs}
+    unroll_steps: 1
+    max_iterations: .inf
+    batch_size: null
+    scheduler:
+      type: LinearWarmupCosineAnnealingLR
+      num_warmup_epochs: 2
+      warmup_start_lr: 1.0e-8
+      eta_min: 0.0

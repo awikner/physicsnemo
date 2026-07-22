@@ -55,10 +55,11 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
             f"Unsupported optimizer_type={name!r} (supported: 'AdamW', 'Muon')."
         )
     fused = bool(getattr(cfg, "fused", torch.cuda.is_available()))
-    kwargs = dict(
-        lr=float(cfg.lr),
-        weight_decay=float(getattr(cfg, "weight_decay", 0.0)),
-    )
+    wd = float(getattr(cfg, "weight_decay", 0.0))
+    betas = getattr(cfg, "betas", None)
+    kwargs = dict(lr=float(cfg.lr), weight_decay=wd)
+    if betas is not None:
+        kwargs["betas"] = tuple(float(b) for b in betas)
     if fused:
         if not torch.cuda.is_available():
             import warnings as _warnings
@@ -71,6 +72,26 @@ def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
             )
         else:
             kwargs["fused"] = True
+
+    # Selective weight decay (ArchesWeather): apply wd ONLY to params whose name
+    # contains 'weight' and not 'norm' (i.e. Linear/Conv weights, not biases or
+    # LayerNorm/pos-bias params). Matches geoarches' configure_optimizers.
+    if bool(getattr(cfg, "selective_weight_decay", False)) and wd > 0.0:
+        decay, no_decay = [], []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if "weight" in name and "norm" not in name:
+                decay.append(p)
+            else:
+                no_decay.append(p)
+        params = [
+            {"params": decay, "weight_decay": wd},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
+        kwargs.pop("weight_decay")
+        return torch.optim.AdamW(params, **kwargs)
+
     return torch.optim.AdamW(model.parameters(), **kwargs)
 
 
@@ -231,6 +252,7 @@ def train_step(
         device_type = "cuda" if batch["surface_in"].is_cuda else "cpu"
         amp_ctx = torch.amp.autocast(device_type=device_type, dtype=amp_dtype)
 
+    extra_kwargs = _optional_model_kwargs(model, batch)
     with amp_ctx:
         out = model(
             batch["surface_in"],
@@ -240,11 +262,13 @@ def train_step(
             target_surface=batch.get("target_surface"),
             target_upper_air=batch.get("target_upper_air"),
             train=True,
+            **extra_kwargs,
         ) if _model_accepts_train_kwarg(model) else model(
             batch["surface_in"],
             batch["constant_boundary"],
             batch["varying_boundary"],
             batch["upper_air_in"],
+            **extra_kwargs,
         )
 
         # Output tuple layout:
@@ -430,6 +454,26 @@ def multistep_train_step(
     if scheduler is not None:
         scheduler.step()
     return losses_out
+
+
+_OPTIONAL_MODEL_BATCH_KEYS = ("surface_prev_in", "upper_air_prev_in", "calendar")
+
+
+def _optional_model_kwargs(
+    model: torch.nn.Module, batch: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Extra forward kwargs a model wants that also exist in the batch.
+
+    Returns the subset of ``{surface_prev_in, upper_air_prev_in, calendar}``
+    that are BOTH present in ``batch`` AND named parameters of the model's
+    ``forward``. SFNO/Pangu forwards don't name these, so the result is empty
+    and their call is byte-for-byte unchanged; ArchesWeather names all three.
+    """
+    inner = model.module if hasattr(model, "module") else model
+    varnames = getattr(
+        inner.forward, "__code__", type("_x", (), {"co_varnames": ()})()
+    ).co_varnames
+    return {k: batch[k] for k in _OPTIONAL_MODEL_BATCH_KEYS if k in batch and k in varnames}
 
 
 def _model_accepts_train_kwarg(model: torch.nn.Module) -> bool:

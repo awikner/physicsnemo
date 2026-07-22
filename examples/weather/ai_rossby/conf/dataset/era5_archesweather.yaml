@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ERA5 multi-year archive for ArchesWeather-M training. Same `era5/` per-year
+# stores as era5_multiyear.yaml, but the datapipe additionally emits the
+# previous state (t - 24h) and a (month, hour) calendar vector for the adaLN
+# conditioning.
+#
+# Symlink dirs (create once alongside the archive):
+#   SRC=$AI_ROSSBY_DATA/era5
+#   for y in $(seq 1979 2018); do ln -sf $SRC/$y.zarr $AI_ROSSBY_DATA/era5_train/; done
+#   ln -sf $SRC/2019.zarr $AI_ROSSBY_DATA/era5_val/
+#   for y in $(seq 2007 2018); do ln -sf $SRC/$y.zarr $AI_ROSSBY_DATA/era5_recent/; done
+# RPFT (final ~50k steps) switches zarr_path -> era5_recent (2007-2018).
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5_train
+val_zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5_val
+
+mean_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5/normalization_pangu_s2s_mean.zarr
+std_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/era5/normalization_pangu_s2s_std.zarr
+# ArchesWeather predicts the FULL next state (not a tendency) — leave the
+# datapipe delta path off. (The loss applies its own delta-normalization; see
+# conf/loss/archesweather.yaml delta_scaler_path.)
+delta_std_path: null
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+forecast_lead_times: [4]          # 4 x 6h = 24-hour forecast
+# ArchesWeather-specific: read the state 4 steps (24 h) before each start and
+# emit a (month, hour) calendar vector for the adaLN conditioning.
+prev_state_steps: 4
+emit_calendar: true
+calendar_encoding: month_hour
+
+num_samples_per_epoch: 8760       # ~1 year of 6-hourly steps per epoch
+batch_size: 1                     # PER-GPU (global 4 on 4 GPUs -> matches the
+                                  # ArchesWeather-M global batch of 4).
+num_workers: 8
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+shuffle: True
+
+# ERA5 land/ocean NaN fill (constant + varying boundary; the model ignores the
+# varying fields but they are still filled to avoid NaNs in the batch).
+nan_fill_default: 0.0
+nan_fill_values:
+  sea_surface_temperature: 271.15
+  sea_ice_cover: 0.0
+
+normalize_constant_boundary: False
+normalize_diagnostic: False

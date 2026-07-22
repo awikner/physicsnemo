@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ArchesWeather-M model config — full multi-year ERA5 archive (`era5/` store,
+# 1979-2024, 18 pressure levels), adapted to our 17-level / 1-degree grid.
+#
+# Pairs with conf/dataset/era5_archesweather.yaml (prev_state_steps: 4,
+# emit_calendar: true, calendar_encoding: month_hour), conf/loss/archesweather.yaml,
+# and conf/training/archesweather.yaml. Variable groups match the `era5/` archive
+# attrs EXCEPT there is no diagnostic head (diagnostic_variables empty) and there
+# is no boundary forcing (varying_boundary is accepted at forward and ignored —
+# seasonality enters via the month/hour adaLN condition). The 18-level archive is
+# trimmed to `levels` (17) by build_datapipe's _PressureLevelSubsetTransform.
+
+name: ArchesWeather
+module: physicsnemo.experimental.models.archesweather
+
+# Variable groups — surface + upper-air match the `era5/` archive attrs.
+surface_variables:
+  - 2m_temperature
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+  - mean_sea_level_pressure
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - specific_humidity
+  - geopotential
+constant_boundary_variables:
+  - land_sea_mask
+  - geopotential_at_surface
+# Accepted but IGNORED by ArchesWeather.forward (no SST/SIC/TISR forcing). Kept
+# so build_datapipe's NaN-fill handles the store's varying fields.
+varying_boundary_variables:
+  - sea_surface_temperature
+  - sea_ice_cover
+  - toa_incident_solar_radiation
+# ArchesWeather-M has NO diagnostic head — must be empty.
+diagnostic_variables: []
+
+# 17 ERA5 pressure levels (drops 200 hPa from the archive's 18, like sfno_era5).
+levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
+horizontal_resolution: [180, 360]
+
+# ArchesWeather-M architecture (arXiv:2412.12971), adapted to patch (2,3,3) ->
+# token grid (zdim=10, 60, 120), windows/shifts carried over verbatim.
+emb_dim: 192
+depth_multiplier: 2
+num_heads: [6, 12, 12, 6]
+window_size: [1, 6, 10]
+droppath_coeff: 0.2
+dropout: 0.0
+mlp_ratio: 4.0
+cond_dim: 256
+patch_size: [2, 3, 3]
+mlp_layer: swiglu
+use_prev_state: true
+add_input_state: false
+gradient_checkpointing: false
+
+# Per-channel standardization of the constant boundary masks (land_sea_mask,
+# geopotential_at_surface). Leave null for identity (the surface patch-embed
+# conv can absorb the scale); fill with two scalars per mask computed from the
+# store for an exact match to the original recipe.
+const_mean: null
+const_std: null

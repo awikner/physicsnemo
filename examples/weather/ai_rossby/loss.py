@@ -188,6 +188,151 @@ def vae_kl_loss(
     return kl.mean()
 
 
+class ArchesWeatherLoss(torch.nn.Module):
+    r"""Latitude-weighted MSE loss for the ArchesWeather recipe.
+
+    Faithful to the ArchesWeather-M loss (geoarches ``ForecastModule.loss``):
+
+    * Squared error, lat-weighted (cos(lat), mean 1).
+    * Per-surface-variable graphcast weights (t2m 1.0, u10/v10/mslp 0.1) scaled
+      by ``n_surface`` (compensates the channel-mean reduction).
+    * Per-level pressure weights ``p / mean(p)`` (vertical_coeffs), the level
+      term scaled by ``n_level_vars``.
+    * Combined denominator ``total_coeff = n_level_vars + sum(surface weights)``
+      (5 + 1.3 = 6.3 for our 5-level-var / 4-surface-var set — the original's
+      6 + 1.3 = 7.3 drops to 6.3 because we have no vertical-wind level var).
+    * Optional ``loss_delta_normalization``: multiply each channel coefficient by
+      ``(pangu_std / delta24_std)^2`` so the loss weights each field by its
+      typical 24 h increment magnitude. The per-channel scalers are precomputed
+      by ``tools/data/era5/compute_delta24_std.py`` and read from a JSON file.
+
+    The final loss is the SUM of the surface-group mean and the level-group mean
+    (each group meaned over ``(B, C, [L,] H, W)``), matching the original.
+
+    Parameters
+    ----------
+    surface_variables : list of str
+        Surface channel names, in model output order.
+    upper_air_variable_names : list of str
+        Upper-air channel names, in model output order.
+    levels : list of float
+        Pressure levels (for the vertical coefficient ``p / mean(p)``).
+    num_lat : int
+        Latitude resolution (cos-lat weights).
+    surface_graphcast_weights : dict, optional
+        Per-surface-var weight; defaults to 1.0 for ``2m_temperature`` and 0.1
+        for the others (graphcast).
+    delta_scaler_path : str or None, optional
+        JSON with ``{"surface": {var: scaler}, "level": {var: [per-level scaler]}}``
+        where ``scaler = pangu_std / delta24_std``. ``None`` disables delta
+        normalization.
+    latitude_weighted : bool, optional, default=True
+    """
+
+    def __init__(
+        self,
+        *,
+        surface_variables: list[str],
+        upper_air_variable_names: list[str],
+        levels: list[float],
+        num_lat: int,
+        surface_graphcast_weights: Optional[Mapping[str, float]] = None,
+        delta_scaler_path: Optional[str] = None,
+        latitude_weighted: bool = True,
+    ) -> None:
+        super().__init__()
+        self._surface_names = list(surface_variables)
+        self._upper_names = list(upper_air_variable_names)
+        self._levels = [float(x) for x in levels]
+        self._num_lat = int(num_lat)
+        self.latitude_weighted = bool(latitude_weighted)
+        self._cached: dict[tuple, torch.Tensor] = {}
+
+        n_surf = len(self._surface_names)
+        n_level = len(self._upper_names)
+        n_lev = len(self._levels)
+
+        gw = dict(surface_graphcast_weights or {})
+        default_gw = {n: (1.0 if n == "2m_temperature" else 0.1) for n in self._surface_names}
+        default_gw.update(gw)
+        surf_w = torch.tensor([float(default_gw[n]) for n in self._surface_names])
+        total_coeff = float(n_level) + float(surf_w.sum())
+
+        # Base per-channel coefficients (before delta scaling).
+        surface_scale = surf_w * n_surf / total_coeff  # (Cs,)
+        p = torch.tensor(self._levels)
+        vert = p / p.mean()  # (L,), mean 1
+        level_scale = (n_level / total_coeff) * vert[None, :].expand(n_level, n_lev).clone()  # (Cu, L)
+
+        if delta_scaler_path:
+            import json
+
+            with open(delta_scaler_path) as fh:
+                spec = json.load(fh)
+            s_scaler = torch.tensor(
+                [float(spec["surface"][n]) for n in self._surface_names]
+            )
+            surface_scale = surface_scale * s_scaler.pow(2)
+            l_scaler = torch.tensor(
+                [
+                    [float(v) for v in spec["level"][n]]
+                    for n in self._upper_names
+                ]
+            )  # (Cu, L)
+            if l_scaler.shape != level_scale.shape:
+                raise ValueError(
+                    f"delta level scaler shape {tuple(l_scaler.shape)} != "
+                    f"expected {tuple(level_scale.shape)} "
+                    f"({n_level} vars x {n_lev} levels)"
+                )
+            level_scale = level_scale * l_scaler.pow(2)
+
+        self.register_buffer("surface_scale", surface_scale)
+        self.register_buffer("level_scale", level_scale)
+
+    def _lat(self, device, dtype) -> torch.Tensor:
+        key = (device, dtype)
+        if key not in self._cached:
+            self._cached[key] = cos_lat_weights(self._num_lat, device, dtype)
+        return self._cached[key]
+
+    def forward(
+        self,
+        out_surface: torch.Tensor,
+        out_upper_air: torch.Tensor,
+        target_surface: torch.Tensor,
+        target_upper_air: torch.Tensor,
+        out_diagnostic: Optional[torch.Tensor] = None,
+        target_diagnostic: Optional[torch.Tensor] = None,
+    ) -> dict[str, torch.Tensor]:
+        del out_diagnostic, target_diagnostic  # ArchesWeather-M has no diagnostic head
+        device, dtype = out_surface.device, out_surface.dtype
+        lat = self._lat(device, dtype) if self.latitude_weighted else None
+
+        surf_scale = self.surface_scale.to(device=device, dtype=dtype)
+        lev_scale = self.level_scale.to(device=device, dtype=dtype)
+
+        s_err = (out_surface - target_surface).pow(2)  # (B, Cs, H, W)
+        s_coeff = surf_scale.view(1, -1, 1, 1)
+        if lat is not None:
+            s_coeff = s_coeff * lat.view(1, 1, -1, 1)
+        loss_surface = (s_err * s_coeff).mean()
+
+        u_err = (out_upper_air - target_upper_air).pow(2)  # (B, Cu, L, H, W)
+        u_coeff = lev_scale.view(1, lev_scale.shape[0], lev_scale.shape[1], 1, 1)
+        if lat is not None:
+            u_coeff = u_coeff * lat.view(1, 1, 1, -1, 1)
+        loss_upper_air = (u_err * u_coeff).mean()
+
+        total = loss_surface + loss_upper_air
+        return {
+            "loss": total,
+            "surface": loss_surface.detach(),
+            "upper_air": loss_upper_air.detach(),
+            "diagnostic": torch.zeros((), device=device, dtype=dtype),
+        }
+
+
 class PanguPlasimLoss(torch.nn.Module):
     r"""Task loss for Pangu_Plasim training (deterministic variant).
 

@@ -68,7 +68,7 @@ from typing import Optional
 
 from data_staging import _STAGEABLE_KEYS, resolve_stage_root, stage_store
 from ema import ModelEMA
-from loss import PanguPlasimLoss
+from loss import ArchesWeatherLoss, PanguPlasimLoss
 from train_loop import (
     _resolve_amp_dtype,
     make_optimizer,
@@ -111,6 +111,10 @@ class _PressureLevelSubsetTransform:
             "target_upper_air",
             "upper_air_pressure_in",
             "target_upper_air_pressure",
+            # ArchesWeather previous-state upper-air tensors (present only when
+            # the datapipe was built with prev_state_steps > 0).
+            "upper_air_prev_in",
+            "upper_air_pressure_prev_in",
         ):
             if key in out and out[key] is not None:
                 out[key] = out[key][:, self._idx]
@@ -394,14 +398,16 @@ def _flatten_optimizer_cfg(opt_cfg: DictConfig) -> DictConfig:
     ``weight_decay``, ``fused``). Keeps :func:`make_optimizer`'s API stable
     so the unit tests covering it stay untouched.
     """
-    return OmegaConf.create(
-        {
-            "optimizer_type": str(opt_cfg.type),
-            "lr": float(opt_cfg.lr),
-            "weight_decay": float(opt_cfg.get("weight_decay", 0.0)),
-            "fused": opt_cfg.get("fused", None),
-        }
-    )
+    flat = {
+        "optimizer_type": str(opt_cfg.type),
+        "lr": float(opt_cfg.lr),
+        "weight_decay": float(opt_cfg.get("weight_decay", 0.0)),
+        "fused": opt_cfg.get("fused", None),
+        "selective_weight_decay": bool(opt_cfg.get("selective_weight_decay", False)),
+    }
+    if opt_cfg.get("betas", None) is not None:
+        flat["betas"] = list(opt_cfg.get("betas"))
+    return OmegaConf.create(flat)
 
 
 def _flatten_scheduler_cfg(
@@ -608,6 +614,11 @@ def build_datapipe(
         leap_boundary_zarr_path=_resolve_path(data.leap_boundary_zarr_path),
         non_leap_boundary_zarr_path=_resolve_path(data.non_leap_boundary_zarr_path),
         unroll_steps=int(unroll_steps),
+        # ArchesWeather: previous-state channel-concat + month/hour adaLN.
+        # Defaults keep SFNO/Pangu recipes unchanged (0 / off / second_doy).
+        prev_state_steps=int(data.get("prev_state_steps", 0)),
+        emit_calendar=bool(data.get("emit_calendar", False)),
+        calendar_encoding=str(data.get("calendar_encoding", "second_doy")),
     )
 
     # Attach the per-variable NaN fill as the dataset's transform so it runs
@@ -641,6 +652,19 @@ def build_loss(cfg: DictConfig) -> PanguPlasimLoss:
         if v is None:
             return None
         return dict(OmegaConf.to_container(v, resolve=True) or {})
+
+    # ArchesWeather uses its own lat/level/surface-weighted MSE with optional
+    # 24 h-increment (delta) normalization. Selected via `loss.loss_class`.
+    if str(cfg_loss.get("loss_class", "")) == "archesweather":
+        return ArchesWeatherLoss(
+            surface_variables=list(cfg_model.surface_variables),
+            upper_air_variable_names=list(cfg_model.upper_air_variables),
+            levels=list(cfg_model.levels),
+            num_lat=int(cfg_model.horizontal_resolution[0]),
+            surface_graphcast_weights=_maybe_dict(cfg_loss.get("surface_graphcast_weights")),
+            delta_scaler_path=_resolve_path(cfg_loss.get("delta_scaler_path")),
+            latitude_weighted=bool(cfg_loss.get("latitude_weighted", True)),
+        )
 
     return PanguPlasimLoss(
         surface_variables=list(cfg_model.surface_variables),
