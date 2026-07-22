@@ -33,11 +33,12 @@
 
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=128g
 #SBATCH --job-name=train-archesweather-era5
 #SBATCH --output=hpc/scripts/logs/train-archesweather-era5-%j.out
+# NOTE: GPU count is derived at runtime from nvidia-smi (see NPROC below), so no
+# `--gpus-per-node`/`--gres` directive is baked in — TACC Stampede3 rejects gres
+# specs (whole-node allocation). On clusters that REQUIRE a gres request (Delta,
+# DeltaAI), pass it at submit time, e.g. `sbatch --gpus-per-node=4 ...`.
 
 set -euo pipefail
 
@@ -70,7 +71,14 @@ for d in "${TRAIN_DIR}" era5_val; do
   fi
 done
 
-NPROC="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-4}}"
+# Derive per-node GPU count: prefer Slurm's env, else count visible GPUs
+# (TACC whole-node allocation exposes all node GPUs without a gres var).
+NPROC="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
+if [ -z "${NPROC}" ]; then
+  NPROC="$(nvidia-smi -L 2>/dev/null | wc -l)"
+fi
+NPROC="${NPROC:-1}"
+[ "${NPROC}" -ge 1 ] || NPROC=1
 NNODES="${SLURM_NNODES:-1}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 nvidia-smi || true
