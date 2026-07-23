@@ -48,6 +48,10 @@ Instead of running every diagnostic from the library, we chose to cherry-pick.
 Only water-related metrics are computed: total water mass, total dry air mass
 and TCWV maps.
 
+All six scripts below (and their plotting counterparts) live in
+`examples/weather/ai_rossbypalooza/physmetrics/` in this repo — run them from
+that directory, or reference the full path.
+
 Running these on a compute node will use multi-CPU efficiently.
 
 ### `mass_drift_only.py`
