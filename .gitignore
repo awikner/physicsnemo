@@ -189,3 +189,12 @@ sbatch_logs/
 # ai-rossby: HPC job logs (per-user run artifacts, do not commit)
 hpc/scripts/logs/*.out
 hpc/scripts/logs/*.err
+
+# macOS
+.DS_Store
+
+# ai-rossby: PhysMetrics diagnostic outputs (regeneratable, do not commit)
+mass_drift*.csv
+mass_trajectory.csv
+tcwv_bias_maps_*.npz
+plots/
