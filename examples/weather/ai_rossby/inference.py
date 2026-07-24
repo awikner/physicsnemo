@@ -53,6 +53,7 @@ with warnings.catch_warnings():
     from physicsnemo.experimental.datapipes.plasim import (
         ClimateZarrDataset,
         ClimateZarrMultiYearDataset,
+        ComposeTransform,
         NanFillTransform,
         PlasimClimateDataset,
         PlasimNormalizer,
@@ -82,6 +83,37 @@ from async_writer import (
 
 def _resolve_path(p: Optional[str]) -> Optional[str]:
     return to_absolute_path(p) if p else None
+
+
+class _PressureLevelSubsetTransform:
+    """Select a subset of pressure levels from upper-air tensors.
+
+    Inference-side mirror of ``train._PressureLevelSubsetTransform`` — applied
+    (CPU-side, at the dataset ``__getitem__`` boundary) when the model requests
+    fewer / different pressure levels than the data store carries (e.g. the
+    17-level SFNO/Pangu model on the 18-level ERA5 archive). It slices the level
+    axis (dim 1: ``(C_var, C_level, H, W)``) of every upper-air tensor down to
+    the requested levels, so the tensors reaching the normalizer and the model
+    match ``cfg.model.levels``. Chain it BEFORE the NaN-fill transform
+    (``ComposeTransform(_PressureLevelSubsetTransform(idx), nan_fill)``).
+    """
+
+    def __init__(self, indices: list[int]) -> None:
+        self._idx = torch.tensor(indices, dtype=torch.long)
+
+    def __call__(self, sample: dict) -> dict:
+        out = dict(sample)
+        for key in (
+            "upper_air_in",
+            "target_upper_air",
+            "upper_air_pressure_in",
+            "target_upper_air_pressure",
+            "upper_air_prev_in",
+            "upper_air_pressure_prev_in",
+        ):
+            if key in out and out[key] is not None:
+                out[key] = out[key][:, self._idx]
+        return out
 
 
 def _timestamp_ymdh(t) -> tuple[int, int, int, int]:
@@ -656,7 +688,15 @@ def _extract_layout(dataset) -> dict:
     n_levels = sample["upper_air_in"].shape[1] if "upper_air_in" in sample else 1
     sigma_levels = list(getattr(dataset, "sigma_levels", []))
     pressure_levels = list(getattr(dataset, "pressure_levels", []))
-    if sigma_levels and len(sigma_levels) == n_levels:
+    # When a pressure-level subset transform is active the tensors reaching the
+    # writer carry fewer levels than the store's own ``pressure_levels`` coord
+    # (e.g. 17 model levels on the 18-level ERA5 archive). ``main`` stashes the
+    # model's selected level VALUES on the dataset so the output ``level`` coord
+    # reports the physical hPa values rather than falling back to 0..n-1.
+    level_override = list(getattr(dataset, "_inference_level_coord", []) or [])
+    if level_override and len(level_override) == n_levels:
+        levels_coord = level_override
+    elif sigma_levels and len(sigma_levels) == n_levels:
         levels_coord = sigma_levels
     elif pressure_levels and len(pressure_levels) == n_levels:
         levels_coord = pressure_levels
@@ -1398,7 +1438,15 @@ def run_inference(
     # from the dataset; if both present and equal length, prefer sigma.
     sigma_levels = list(getattr(dataset, "sigma_levels", []))
     pressure_levels = list(getattr(dataset, "pressure_levels", []))
-    if sigma_levels and len(sigma_levels) == n_levels:
+    # When a pressure-level subset transform is active the tensors reaching the
+    # writer carry fewer levels than the store's own ``pressure_levels`` coord
+    # (e.g. 17 model levels on the 18-level ERA5 archive). ``main`` stashes the
+    # model's selected level VALUES on the dataset so the output ``level`` coord
+    # reports the physical hPa values rather than falling back to 0..n-1.
+    level_override = list(getattr(dataset, "_inference_level_coord", []) or [])
+    if level_override and len(level_override) == n_levels:
+        levels_coord = level_override
+    elif sigma_levels and len(sigma_levels) == n_levels:
         levels_coord = sigma_levels
     elif pressure_levels and len(pressure_levels) == n_levels:
         levels_coord = pressure_levels
@@ -1620,12 +1668,45 @@ def main(cfg: DictConfig) -> None:
         logger.info(f"opened multi-year archive {val_zarr_path} ({len(base_ds)} steps)")
     else:
         base_ds = PlasimClimateDataset(val_zarr_path, **_ds_kwargs)
+
+    # Pressure-level subset: when the model uses a strict subset of the data
+    # store's PRESSURE levels (e.g. the 17-level SFNO/Pangu model on the
+    # 18-level ERA5 archive), compute the subset indices, tell the normalizer
+    # which levels to align against, and chain a subset transform (below) so the
+    # upper-air tensors are trimmed to the model's levels before normalization +
+    # forward. Mirrors train.build_datapipe's level-mismatch handling so the
+    # rollout runs on exactly the channels the checkpoint was trained on;
+    # without it the forward would fail with a level/channel shape mismatch.
+    #
+    # Guarded to fire ONLY for that case: skipped when the data has no pressure
+    # levels (sigma/hybrid datasets), when the level sets already match, or when
+    # the model's levels are not all present in the data's pressure levels (a
+    # different level system, not a subset).
+    pressure_level_indices: Optional[list[int]] = None
+    model_levels = list(cfg.model.get("levels", []) or [])
+    data_pressure_levels = list(getattr(base_ds, "pressure_levels", []) or [])
+    if model_levels and data_pressure_levels:
+        model_set = set(map(float, model_levels))
+        data_set = set(map(float, data_pressure_levels))
+        if model_set != data_set and model_set.issubset(data_set):
+            level_to_idx = {float(lv): i for i, lv in enumerate(data_pressure_levels)}
+            pressure_level_indices = [level_to_idx[float(lv)] for lv in model_levels]
+            logger.info(
+                f"pressure-level subset active: model uses {len(model_levels)} "
+                f"of {len(data_pressure_levels)} data levels "
+                f"(indices={pressure_level_indices})"
+            )
+
+    normalizer_kwargs: dict = {}
+    if pressure_level_indices is not None:
+        normalizer_kwargs["pressure_levels"] = [float(lv) for lv in model_levels]
     normalizer = PlasimNormalizer.from_dataset(
         base_ds,
         mean_path=_resolve_path(data.mean_path),
         std_path=_resolve_path(data.std_path),
         normalize_constant_boundary=bool(data.get("normalize_constant_boundary", False)),
         normalize_diagnostic=bool(data.get("normalize_diagnostic", False)),
+        **normalizer_kwargs,
     ).to(dist.device)
     nan_fill = NanFillTransform(
         constant_boundary_variables=list(cfg.model.constant_boundary_variables),
@@ -1633,7 +1714,17 @@ def main(cfg: DictConfig) -> None:
         fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
         default=float(data.nan_fill_default),
     )
-    base_ds.transform = nan_fill
+    # Trim the upper-air tensors to the model's levels BEFORE the NaN-fill so
+    # every downstream tensor (normalizer + model) is on the model's level set.
+    if pressure_level_indices is not None:
+        base_ds.transform = ComposeTransform(
+            _PressureLevelSubsetTransform(pressure_level_indices), nan_fill
+        )
+        # Report the model's physical level VALUES in the output ``level`` coord
+        # (see ``_extract_layout``); a plain attribute, no dataset mutation.
+        base_ds._inference_level_coord = [float(lv) for lv in model_levels]
+    else:
+        base_ds.transform = nan_fill
 
     # --- Inference config ---------------------------------------------------
     # IC selection: either an explicit list of integer time indices
@@ -1687,9 +1778,19 @@ def main(cfg: DictConfig) -> None:
     )
     step_size_raw = inf_cfg.get("step_size", None)
     step_size = int(step_size_raw) if step_size_raw is not None else None
+    # ``perturber_scales`` may be absent (deterministic rollouts don't need it).
+    # ``inf_cfg.get(key, {})`` would return a *plain* ``{}`` in that case, which
+    # ``OmegaConf.to_container`` rejects ("Input cfg is not an OmegaConf config
+    # object"); only pass it through the container conversion when it is present.
+    _perturber_scales = inf_cfg.get("perturber_scales", None)
     perturber = _build_perturber(
         str(inf_cfg.get("perturber", "deterministic")),
-        OmegaConf.to_container(inf_cfg.get("perturber_scales", {}), resolve=True) or {},
+        (
+            OmegaConf.to_container(_perturber_scales, resolve=True)
+            if _perturber_scales is not None
+            else {}
+        )
+        or {},
     )
 
     output_dir = _resolve_path(str(inf_cfg.output_dir))
