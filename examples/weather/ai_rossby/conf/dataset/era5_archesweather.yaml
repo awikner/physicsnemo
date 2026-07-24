@@ -47,8 +47,12 @@ shuffle: True
 # ERA5 land/ocean NaN fill (constant + varying boundary; the model ignores the
 # varying fields but they are still filled to avoid NaNs in the batch).
 nan_fill_default: 0.0
+# SAME per-variable mask fill as PanguWeather v2.0 (_fill_mask): sst/ts=270, soil/sic=0.
 nan_fill_values:
-  sea_surface_temperature: 271.15
+  sea_surface_temperature: 270.0
+  skin_temperature: 270.0
+  soil_temperature_level_1: 270.0
+  volumetric_soil_water_layer_1: 0.0
   sea_ice_cover: 0.0
 
 normalize_constant_boundary: False

@@ -78,19 +78,36 @@ PANGU_ERA5_CHANNELS = {
         "10m_u_component_of_wind",
         "10m_v_component_of_wind",
         "mean_sea_level_pressure",
+        "surface_pressure",
+        "sea_surface_temperature",
+        "skin_temperature",
+        "soil_temperature_level_1",
+        "volumetric_soil_water_layer_1",
     ],
     "constant_boundary_variables": [
         "land_sea_mask",
         "geopotential_at_surface",
     ],
+    # sea_surface_temperature is a *prognostic* surface variable (above), to match
+    # the Pangu-Weather S2S feature set; only sea-ice + incident solar remain as
+    # varying boundary forcing.
     "varying_boundary_variables": [
-        "sea_surface_temperature",
         "sea_ice_cover",
         "toa_incident_solar_radiation",
     ],
     "diagnostic_variables": [
         "total_precipitation_24hr",
+        "mean_top_net_long_wave_radiation_flux",
     ],
+    # Channels not present verbatim in the raw H5, computed from a source key via
+    # an affine transform (out = src*scale + offset). ERA5's
+    # mean_top_net_long_wave_radiation_flux (net TOA longwave, negative=outgoing)
+    # = -ULWRFtoa_24h (24h-mean upward TOA longwave in the Pangu v2.0 archive);
+    # verified against the pangu_s2s normalization (mean -226.05 vs raw +226.28)
+    # and the Pangu hindcast (-226.8 at real leads).
+    "derived_variables": {
+        "mean_top_net_long_wave_radiation_flux": {"source": "ULWRFtoa_24h", "scale": -1.0},
+    },
     "pressure_upper_air_variables": [
         "temperature",
         "u_component_of_wind",
@@ -272,26 +289,44 @@ def _read_one_file(
     pressure_upper_air_vars: list[str],
     pressure_levels: list[float],
     read_constants: bool,
+    derived_vars: Optional[dict] = None,
 ) -> dict:
-    """Worker: pull one H5 sample's data into per-var float32 ndarrays."""
+    """Worker: pull one H5 sample's data into per-var float32 ndarrays.
+
+    Vars listed in ``derived_vars`` (name -> {"source": key, "scale": s,
+    "offset": o}) are not read verbatim: they are computed from another H5 key
+    as ``source*scale + offset`` (e.g. the net TOA longwave flux is -ULWRFtoa_24h).
+    """
+    derived = derived_vars or {}
     with h5py.File(path, "r") as f:
         g = f["input"]
         time = _decode_time(g["time"][()])
         out: dict = {"time": time}
 
+        # The raw PanguWeather H5 stores latitude S->N (row 0 = South Pole); the Zarr
+        # lat coord is N->S (89.5..-89.5) to match ERA5 + the SFNO SHT grid (row 0 =
+        # North Pole), so flip every spatial field along lat (axis -2) on ingest.
         for v in surface_vars + varying_boundary_vars + diagnostic_vars:
-            out[v] = np.asarray(g[v][:], dtype="float32")
+            if v in derived:
+                spec = derived[v]
+                src = np.asarray(g[spec["source"]][:], dtype="float32")
+                arr = src * np.float32(spec.get("scale", 1.0)) + np.float32(
+                    spec.get("offset", 0.0)
+                )
+            else:
+                arr = np.asarray(g[v][:], dtype="float32")
+            out[v] = arr[::-1, :]  # flip lat: S->N raw -> N->S store
 
         for v in pressure_upper_air_vars:
             stack = np.stack(
                 [np.asarray(g[_level_key(g, v, lev)][:], dtype="float32") for lev in pressure_levels],
                 axis=0,
             )
-            out[v] = stack  # shape (n_levels, H, W)
+            out[v] = stack[:, ::-1, :]  # (n_levels, H, W); flip lat S->N -> N->S
 
         if read_constants:
             for v in constant_boundary_vars:
-                out[f"_const_{v}"] = np.asarray(g[v][:], dtype="float32")
+                out[f"_const_{v}"] = np.asarray(g[v][:], dtype="float32")[::-1, :]
 
     return out
 
@@ -314,6 +349,7 @@ def convert(args: argparse.Namespace) -> None:
     diagnostic_vars = list(channels["diagnostic_variables"])
     pressure_upper_air_vars = list(channels["pressure_upper_air_variables"])
     pressure_levels = [float(x) for x in channels["pressure_levels"]]
+    derived_vars = dict(channels.get("derived_variables", {}))
 
     if args.output.exists() and not args.overwrite:
         raise FileExistsError(f"{args.output} exists; pass --overwrite to replace")
@@ -360,6 +396,7 @@ def convert(args: argparse.Namespace) -> None:
         pressure_upper_air_vars=pressure_upper_air_vars,
         pressure_levels=pressure_levels,
         read_constants=True,
+        derived_vars=derived_vars,
     )
     sample_surface = next(iter(first_payload[v] for v in surface_vars))
     n_lat, n_lon = sample_surface.shape
@@ -483,6 +520,7 @@ def convert(args: argparse.Namespace) -> None:
                 pressure_upper_air_vars=pressure_upper_air_vars,
                 pressure_levels=pressure_levels,
                 read_constants=False,
+                derived_vars=derived_vars,
             )
             batch_payloads.append(payload)
             if len(batch_payloads) == write_batch:
@@ -508,6 +546,7 @@ def convert(args: argparse.Namespace) -> None:
                     pressure_upper_air_vars=pressure_upper_air_vars,
                     pressure_levels=pressure_levels,
                     read_constants=False,
+                    derived_vars=derived_vars,
                 )
 
             for batch_start in range(0, n_time, write_batch):

@@ -545,6 +545,8 @@ class NanFillTransform:
         *,
         constant_boundary_variables: Sequence[str] = (),
         varying_boundary_variables: Sequence[str] = (),
+        surface_variables: Sequence[str] = (),
+        diagnostic_variables: Sequence[str] = (),
         fill_values: Optional[dict[str, float]] = None,
         default: float = 0.0,
         scan_constant: bool = True,
@@ -562,6 +564,13 @@ class NanFillTransform:
         self._varying_fill = self._build_fill_tensor(
             varying_boundary_variables, fill_values
         )
+        # Prognostic surface / diagnostic vars can also carry masked NaN (e.g.
+        # sea_surface_temperature over land, now a prognostic surface var). Fill
+        # them with the SAME per-variable mask values (Pangu v2.0 _fill_mask:
+        # sst=270, skin/ts=270, sic/soil=0). (C,1,1) fill broadcasts against both
+        # (C,H,W) and (prev,C,H,W) surface tensors.
+        self._surface_fill = self._build_fill_tensor(surface_variables, fill_values)
+        self._diagnostic_fill = self._build_fill_tensor(diagnostic_variables, fill_values)
 
     def _build_fill_tensor(
         self,
@@ -589,6 +598,18 @@ class NanFillTransform:
             )
             if self._strict:
                 _assert_finite(out["varying_boundary"], "varying_boundary")
+        if self._surface_fill is not None:
+            for key in ("surface_in", "surface_prev_in", "target_surface"):
+                if key in out and torch.is_tensor(out[key]):
+                    out[key] = _nan_to_per_channel(out[key], self._surface_fill)
+                    if self._strict:
+                        _assert_finite(out[key], key)
+        if self._diagnostic_fill is not None:
+            for key in ("diagnostic", "target_diagnostic"):
+                if key in out and torch.is_tensor(out[key]):
+                    out[key] = _nan_to_per_channel(out[key], self._diagnostic_fill)
+                    if self._strict:
+                        _assert_finite(out[key], key)
         return out
 
     @classmethod
@@ -601,6 +622,8 @@ class NanFillTransform:
         return cls(
             constant_boundary_variables=dataset.layout.constant_boundary_variables,
             varying_boundary_variables=dataset.layout.varying_boundary_variables,
+            surface_variables=dataset.layout.surface_variables,
+            diagnostic_variables=dataset.layout.diagnostic_variables,
             **kwargs,
         )
 

@@ -121,3 +121,31 @@ datasets:
       - {cluster: delta, years: "1981"}
       - {cluster: stampede3, years: "1978-2022"}   # converted 2026-07-10 (45 stores)
       - {cluster: derecho, years: "1978-2022"}     # master; replicated + verified 2026-07-16
+
+  imerg:                                       # IMERG global daily precipitation
+    subdir: imerg
+    target_years: "2000-2025"                   # 2000 partial (from 06-01), 2025 partial (to 04-30)
+    note: "diagnostic-only precip: total_precipitation_24hr (mm/day), daily
+      (data_timedelta_hours=24). Global 180x360 on the ERA5 grid; lat/lon copied from
+      era5/*.zarr (N->S 89.5..-89.5, lon 0..359). Grid N->S order verified via a
+      tropics(|lat|<15) >> poles(|lat|>60) precip sanity check for every year."
+    raw_source:                                 # per-day YYYYMMDDHH.h5 (input/total_precipitation_24hr)
+      cluster: derecho
+      path: /glade/derecho/scratch/awikner/laude_data/IMERG_1p0
+    copies:
+      - {cluster: derecho, years: "2000-2025"}   # converted 2026-07-22 (26 stores)
+      - {cluster: stampede3, years: "2000-2025"} # tar-replicated 2026-07-22 (26 stores)
+
+  imd:                                         # IMD India-region daily precipitation
+    subdir: imd
+    target_years: "1901-2025"
+    note: "diagnostic-only precip: total_precipitation_24hr (mm/day, renamed from
+      RAINFALL), daily (data_timedelta_hours=24). Native India 33x35 grid from
+      coordinates.nc (lat 6.5..38.5, lon 66.5..100.5); ~69% NaN (ocean/no-station)
+      preserved as the fill value. Not regridded."
+    raw_source:                                 # per-day YYYYMMDDHH.h5 (input/RAINFALL) + coordinates.nc
+      cluster: derecho
+      path: /glade/derecho/scratch/awikner/laude_data/IMD_1p0
+    copies:
+      - {cluster: derecho, years: "1901-2025"}   # converted 2026-07-22 (125 stores)
+      - {cluster: stampede3, years: "1901-2025"} # tar-replicated 2026-07-22 (125 stores)

@@ -23,3 +23,4 @@ For a top-level orientation see the repo-root **`CLAUDE.md`**.
 | [sfno-e3sm-compute-bound-gh200](sfno-e3sm-compute-bound-gh200.md) | SFNO-E3SM is compute-bound on GH200; node-local staging off by default |
 | [phase11-data-consolidation](phase11-data-consolidation.md) | Phase 11: convert all datasets, consolidate; Globus/tar/inode gotchas; ERA5 norm fix |
 | [derecho-retire-rehome-to-delta](derecho-retire-rehome-to-delta.md) | **DEFERRED** work: retire inode-limited Derecho scratch, re-home to Delta |
+| [PhysMetrics](PhysMetrics.md) | PhysMetrics.Weather install fix + custom mass-drift/TCWV-bias scripts for the hackathon hindcasts (`pangu_s2s`/`sfno_s2s` vs ERA5) |
