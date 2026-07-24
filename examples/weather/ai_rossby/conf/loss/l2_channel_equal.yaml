@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Raw (no cos-lat) L2 with EVERY variable-level channel weighted equally.
+# build_loss sets the group weights to (group_channel_count / total_channels)
+# when channel_equal_weight=True, so the total loss is the plain mean over all
+# channels: each surface var, each (upper-air var x pressure level), and each
+# diagnostic var contributes identically. Magnitude stays O(1) (unlike raw
+# variable counts, which would scale the loss ~n_channels and fight
+# grad_clip_norm). Pairs with dataset normalize_diagnostic=True so the diagnostic
+# channels (precip, OLR) are on the same unit-variance scale as everything else.
+loss_type: l2
+latitude_weighted: False
+channel_equal_weight: True
+
+# Ignored when channel_equal_weight=True (build_loss overrides them with the
+# channel-count fractions); kept for schema compatibility.
+surface_weight: 1.0
+upper_air_weight: 1.0
+diagnostic_weight: 1.0
+surface_var_weights: {}
+upper_air_var_weights: {}
+diagnostic_var_weights: {}

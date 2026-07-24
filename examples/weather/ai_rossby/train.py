@@ -589,6 +589,12 @@ def build_datapipe(
     nan_fill = NanFillTransform(
         constant_boundary_variables=list(model.constant_boundary_variables),
         varying_boundary_variables=list(model.varying_boundary_variables),
+        # Prognostic surface vars (e.g. sea_surface_temperature, now promoted to
+        # match Pangu-S2S) + diagnostics can carry masked NaN over land; fill them
+        # with the same per-variable mask values (Pangu _fill_mask: sst/ts=270,
+        # sic/soil=0). Without this the SST land-NaN reaches the loss -> NaN.
+        surface_variables=list(model.surface_variables),
+        diagnostic_variables=list(model.get("diagnostic_variables", []) or []),
         fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
         default=float(data.nan_fill_default),
     )
@@ -666,15 +672,33 @@ def build_loss(cfg: DictConfig) -> PanguPlasimLoss:
             latitude_weighted=bool(cfg_loss.get("latitude_weighted", True)),
         )
 
+    # Optional: weight every variable-LEVEL channel equally. Each group term is a
+    # channel-mean (divides by that group's channel count), so setting the group
+    # weight = (group channel count / total channels) makes the total loss the
+    # plain mean over ALL channels -- every surface var, every (upper-air var x
+    # level), and every diagnostic var contributes identically. Magnitude stays
+    # O(1) (unlike raw counts, which would be ~n_channels and fight grad-clip).
+    surface_weight = float(cfg_loss.surface_weight)
+    upper_air_weight = float(cfg_loss.upper_air_weight)
+    diagnostic_weight = float(cfg_loss.diagnostic_weight)
+    if bool(cfg_loss.get("channel_equal_weight", False)):
+        n_surf = len(cfg_model.surface_variables)
+        n_upper_ch = len(cfg_model.upper_air_variables) * len(cfg_model.levels)
+        n_diag = len(cfg_model.get("diagnostic_variables", []) or [])
+        total_ch = n_surf + n_upper_ch + n_diag
+        surface_weight = n_surf / total_ch
+        upper_air_weight = n_upper_ch / total_ch
+        diagnostic_weight = n_diag / total_ch
+
     return PanguPlasimLoss(
         surface_variables=list(cfg_model.surface_variables),
         upper_air_variable_names=list(cfg_model.upper_air_variables),
         diagnostic_variables=list(cfg_model.diagnostic_variables),
         num_lat=int(cfg_model.horizontal_resolution[0]),
         loss_type=str(cfg_loss.loss_type),
-        surface_weight=float(cfg_loss.surface_weight),
-        upper_air_weight=float(cfg_loss.upper_air_weight),
-        diagnostic_weight=float(cfg_loss.diagnostic_weight),
+        surface_weight=surface_weight,
+        upper_air_weight=upper_air_weight,
+        diagnostic_weight=diagnostic_weight,
         surface_var_weights=_maybe_dict(cfg_loss.surface_var_weights),
         upper_air_var_weights=_maybe_dict(cfg_loss.upper_air_var_weights),
         diagnostic_var_weights=_maybe_dict(cfg_loss.diagnostic_var_weights),

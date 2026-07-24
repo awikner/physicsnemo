@@ -20,13 +20,22 @@
 name: SfnoPlasim
 module: physicsnemo.experimental.models.sfno_plasim
 
-# Variable groups — match the `era5/` archive attrs. SST and sea-ice are
-# varying boundary fields here (not surface).
+# Variable groups — match the `era5/` archive attrs (full Pangu-S2S feature set:
+# 9 prognostic surface + 5 upper-air x 17 levels + 2 diagnostics). SST is now a
+# prognostic surface variable (matching the Pangu-Weather S2S set); only sea-ice
+# + incident solar remain as varying boundary forcing. (Earlier revisions trained
+# on only 4 surface + 1 diagnostic — the era5/ store has been re-converted with
+# the full set via tools/data/era5/pangu_h5_to_zarr.py.)
 surface_variables:
   - 2m_temperature
   - 10m_u_component_of_wind
   - 10m_v_component_of_wind
   - mean_sea_level_pressure
+  - surface_pressure
+  - sea_surface_temperature
+  - skin_temperature
+  - soil_temperature_level_1
+  - volumetric_soil_water_layer_1
 upper_air_variables:
   - temperature
   - u_component_of_wind
@@ -37,11 +46,11 @@ constant_boundary_variables:
   - land_sea_mask
   - geopotential_at_surface
 varying_boundary_variables:
-  - sea_surface_temperature
   - sea_ice_cover
   - toa_incident_solar_radiation
 diagnostic_variables:
   - total_precipitation_24hr
+  - mean_top_net_long_wave_radiation_flux
 
 # 17 ERA5 pressure levels (SFNO_S2S_0003 drops 200 hPa from the archive's 18).
 levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]

@@ -17,12 +17,21 @@
 name: ArchesWeather
 module: physicsnemo.experimental.models.archesweather
 
-# Variable groups — surface + upper-air match the `era5/` archive attrs.
+# Variable groups — surface + upper-air match the (re-augmented) `era5/` archive
+# attrs: 9 prognostic surface vars, matching the Pangu-Weather S2S set. SST is now
+# a prognostic surface variable (was varying boundary). NOTE: OLR
+# (mean_top_net_long_wave_radiation_flux) is a store DIAGNOSTIC — ArchesWeather-M
+# has no diagnostic head, so it is NOT predicted here (would require adding one).
 surface_variables:
   - 2m_temperature
   - 10m_u_component_of_wind
   - 10m_v_component_of_wind
   - mean_sea_level_pressure
+  - surface_pressure
+  - sea_surface_temperature
+  - skin_temperature
+  - soil_temperature_level_1
+  - volumetric_soil_water_layer_1
 upper_air_variables:
   - temperature
   - u_component_of_wind
@@ -32,13 +41,16 @@ upper_air_variables:
 constant_boundary_variables:
   - land_sea_mask
   - geopotential_at_surface
-# Accepted but IGNORED by ArchesWeather.forward (no SST/SIC/TISR forcing). Kept
-# so build_datapipe's NaN-fill handles the store's varying fields.
+# Accepted but IGNORED by ArchesWeather.forward (no SIC/TISR forcing). Kept so
+# build_datapipe's NaN-fill handles the store's varying fields. (SST moved to
+# surface_variables above — now predicted, matching Pangu-S2S.)
 varying_boundary_variables:
-  - sea_surface_temperature
   - sea_ice_cover
   - toa_incident_solar_radiation
-# ArchesWeather-M has NO diagnostic head — must be empty.
+# ArchesWeather-M has NO diagnostic head — must be empty. The re-augmented store
+# now carries 2 diagnostics (total_precipitation_24hr,
+# mean_top_net_long_wave_radiation_flux); both are ignored here. Predicting OLR
+# would require adding a diagnostic head to the model.
 diagnostic_variables: []
 
 # 17 ERA5 pressure levels (drops 200 hPa from the archive's 18, like sfno_era5).
