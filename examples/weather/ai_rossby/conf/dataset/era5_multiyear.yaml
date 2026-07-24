@@ -43,13 +43,22 @@ persistent_workers: True
 pin_memory: True
 shuffle: True
 
-# ERA5 land/ocean NaN fill: SST over land, sea-ice off the ocean.
+# ERA5 land/ocean mask fill — SAME per-variable values as PanguWeather v2.0
+# (data_loader_multifiles.py _fill_mask: sst=270, ts/skin=270, sic=0, soil=0).
+# Applied to surface + diagnostic + boundary groups (SST is a prognostic surface
+# var here, so its land-NaN must be filled with the Pangu value, not 0/mean).
 nan_fill_default: 0.0
 nan_fill_values:
-  sea_surface_temperature: 271.15
+  sea_surface_temperature: 270.0
+  skin_temperature: 270.0
+  soil_temperature_level_1: 270.0
+  volumetric_soil_water_layer_1: 0.0
   sea_ice_cover: 0.0
 
-# ERA5 stats don't carry land_sea_mask / geopotential_at_surface /
-# total_precipitation_24hr stats, so leave these off.
+# land_sea_mask / geopotential_at_surface have no stats in the norm store, so
+# constant-boundary normalization stays off. The diagnostic stats (precip + OLR)
+# ARE present, so normalize the diagnostic group — otherwise OLR enters the loss
+# in raw W/m^2 (std ~46) and dominates the (normalized, ~unit) surface/upper-air
+# terms. Inference must use the same normalize_diagnostic=True.
 normalize_constant_boundary: False
-normalize_diagnostic: False
+normalize_diagnostic: True
