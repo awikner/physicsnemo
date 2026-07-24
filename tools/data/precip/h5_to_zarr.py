@@ -11,19 +11,25 @@ Two daily-precip sources are handled through the same code path (selected by
 
 ``imerg``
     Global 180x360 daily ``total_precipitation_24hr`` (mm) on the ERA5 grid.
-    The source H5 rows/cols are ASSUMED to already be in ERA5 order (lat
-    89.5 -> -89.5 N->S, lon 0 -> 359 E); the exact lat/lon coords are copied
-    from an ERA5 reference store (``--ref-store``) so IMERG aligns cell-for-cell
-    with ERA5.  The assumption is recorded in the store attr
-    ``grid_assumption`` and a cheap tropics-vs-poles sanity check is logged (and
-    stored in ``grid_orientation_check``); a loud warning is emitted if it looks
-    flipped.
+    The source H5 rows are stored S->N (row 0 = South Pole), so they are FLIPPED
+    along latitude on ingest (``data[:, ::-1, :]``) to N->S order (lat 89.5 ->
+    -89.5); the exact lat/lon coords are copied from an ERA5 reference store
+    (``--ref-store``) so IMERG aligns cell-for-cell with the (N->S) ERA5 grid.
+    The flip is recorded in the store attr ``grid_assumption``.  A cheap
+    tropics-vs-poles sanity check is logged (and stored in
+    ``grid_orientation_check``); NOTE it is symmetric about the equator so it can
+    only catch a scrambled grid, NOT a pure N<->S flip -- the ingest flip is what
+    guarantees N->S orientation (verified against corrected ERA5 precip: spatial
+    corr ~0.94 as-is vs ~0.40 flipped).
 
 ``imd``
     India-region 33x35 daily rainfall on its native grid.  ``RAINFALL`` is
-    renamed to ``total_precipitation_24hr``; lat/lon are taken verbatim from
-    ``--coords-nc`` (``coordinates.nc``).  NaN (ocean / no-station cells,
-    ~69% of the domain) is preserved as the store fill value.
+    renamed to ``total_precipitation_24hr``; lat/lon come from ``--coords-nc``
+    (``coordinates.nc``).  The IMD grid is stored S->N (lat 6.5 -> 38.5); BOTH the
+    lat coord and the data are flipped to N->S on ingest so the store shares the
+    project convention (ERA5/Pangu/IMERG) while staying internally consistent.
+    NaN (ocean / no-station cells, ~69% of the domain) is preserved as the store
+    fill value.
 
 Output store (shared ai-rossby ``ClimateZarrStoreLayout`` schema)
 -----------------------------------------------------------------
@@ -298,9 +304,22 @@ def convert(args: argparse.Namespace) -> dict:
     times = year_data["times"]
     n_time, n_lat, n_lon = data.shape
 
+    # IMERG source rows are S->N (row 0 = South Pole); flip to N->S so they match
+    # the N->S lat coord copied from --ref-store (ERA5). IMD keeps its native grid
+    # (lat taken verbatim from --coords-nc, data already matches it).
+    if args.dataset_name == "imerg":
+        data = data[:, ::-1, :]
+
     coords_res = _resolve_coords(args, (n_lat, n_lon))
     lat = coords_res["lat"]
     lon = coords_res["lon"]
+
+    # IMD source grid is S->N (lat ascending from --coords-nc); reorient to N->S to
+    # match the project convention (ERA5/Pangu/IMERG). Flip BOTH the lat coord and
+    # the data so the store stays internally consistent.
+    if args.dataset_name == "imd" and lat.size > 1 and lat[0] < lat[-1]:
+        lat = lat[::-1]
+        data = data[:, ::-1, :]
 
     attrs: dict = {
         "era5_zarr_schema_version": ERA5_ZARR_SCHEMA_VERSION,
@@ -326,9 +345,9 @@ def convert(args: argparse.Namespace) -> dict:
     orient: Optional[dict] = None
     if args.dataset_name == "imerg":
         attrs["grid_assumption"] = (
-            "IMERG source rows/cols assumed already in ERA5 order (lat 89.5->-89.5 "
-            "N->S, lon 0->359 E); lat/lon copied from --ref-store to align "
-            "cell-for-cell with ERA5."
+            "IMERG source rows are S->N (row 0 = South Pole); FLIPPED to N->S on "
+            "ingest (data[:, ::-1, :]) to match the N->S lat coord copied from "
+            "--ref-store (aligns cell-for-cell with ERA5)."
         )
         orient = grid_orientation_check(data, lat)
         attrs["grid_orientation_check"] = (
