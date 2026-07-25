@@ -1711,6 +1711,12 @@ def main(cfg: DictConfig) -> None:
     nan_fill = NanFillTransform(
         constant_boundary_variables=list(cfg.model.constant_boundary_variables),
         varying_boundary_variables=list(cfg.model.varying_boundary_variables),
+        # Surface + diagnostic fills (Pangu mask values) — SST is a prognostic
+        # SURFACE variable, so its land-NaN must be filled before the model or
+        # the autoregressive rollout goes all-NaN after one step (train.py's
+        # build_datapipe got this wiring 2026-07-24; inference missed it).
+        surface_variables=list(cfg.model.surface_variables),
+        diagnostic_variables=list(cfg.model.get("diagnostic_variables", []) or []),
         fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
         default=float(data.nan_fill_default),
     )
