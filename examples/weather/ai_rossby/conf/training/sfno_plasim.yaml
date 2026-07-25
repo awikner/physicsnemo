@@ -26,6 +26,9 @@ ema:
   enabled: False
   decay: 0.999
   warmup_epochs: 6
+  # Validate with the EMA weights (matches inference use_ema=true). Explicit for
+  # the SFNO ERA5 runs; False validates the raw training weights instead.
+  validate_with_ema: True
 
 stages:
   - name: default

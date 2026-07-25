@@ -1137,7 +1137,13 @@ def main(cfg: DictConfig) -> None:
             # --- Validation (optional) ----------------------------------
             if val_datapipe is not None:
                 val_datapipe.set_epoch(global_epoch)
-                if ema is not None:
+                # Validate with the EMA weights (config: training.ema.validate_with_ema,
+                # default True — matches inference, which runs use_ema=true). Set False
+                # to validate the raw training weights instead.
+                ema_val = ema is not None and bool(
+                    cfg_train.ema.get("validate_with_ema", True)
+                )
+                if ema_val:
                     ema.apply_to(inner_model)
                 model.eval()
                 with LaunchLogger("valid", epoch=global_epoch) as log:
@@ -1193,7 +1199,7 @@ def main(cfg: DictConfig) -> None:
                             )
 
                     log.log_epoch({"val_loss": val_loss, **rollout_metrics})
-                if ema is not None:
+                if ema_val:
                     ema.restore(inner_model)
                 model.train()
 
