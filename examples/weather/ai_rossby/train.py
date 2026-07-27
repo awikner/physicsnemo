@@ -670,6 +670,8 @@ def build_loss(cfg: DictConfig) -> PanguPlasimLoss:
             surface_graphcast_weights=_maybe_dict(cfg_loss.get("surface_graphcast_weights")),
             delta_scaler_path=_resolve_path(cfg_loss.get("delta_scaler_path")),
             latitude_weighted=bool(cfg_loss.get("latitude_weighted", True)),
+            diagnostic_variables=list(cfg_model.get("diagnostic_variables", []) or []),
+            diagnostic_weight=float(cfg_loss.get("diagnostic_weight", 1.0)),
         )
 
     # Optional: weight every variable-LEVEL channel equally. Each group term is a
@@ -805,6 +807,25 @@ def main(cfg: DictConfig) -> None:
 
     # --- Model + DDP ------------------------------------------------------
     model = build_model(cfg.model).to(dist.device)
+
+    # Optional warm start: initialize weights from a prior run's .mdlus with
+    # strict=False, so architecture EXTENSIONS (e.g. the ArchesWeather
+    # diagnostic head added over a head-less checkpoint) keep their fresh
+    # initialization while every matching parameter loads. Applies only to a
+    # fresh run — the normal ./checkpoints resume below takes precedence when
+    # a run checkpoint exists.
+    warm_start = cfg.training.get("warm_start_path", None)
+    if warm_start and not (Path("./checkpoints").exists() and any(Path("./checkpoints").iterdir())):
+        from physicsnemo import Module as _PMModule
+
+        src = _PMModule.from_checkpoint(to_absolute_path(str(warm_start)))
+        missing, unexpected = model.load_state_dict(src.state_dict(), strict=False)
+        logger.info(
+            f"warm start from {warm_start}: "
+            f"{len(missing)} missing (fresh) params, {len(unexpected)} unexpected"
+        )
+        del src
+
     if dist.world_size > 1:
         # bucket_cap_mb / static_graph are opt-in (None/False preserves the
         # prior PyTorch-default behavior). Motivated by profiling that showed

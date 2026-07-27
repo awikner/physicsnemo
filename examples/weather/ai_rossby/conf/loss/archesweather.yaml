@@ -23,3 +23,9 @@ surface_graphcast_weights:
 # the original recipe, e.g.:
 #   ${oc.env:AI_ROSSBY_DATA}/era5/archesweather_delta_scaler.json
 delta_scaler_path: null
+
+# Diagnostic-head term (ai-rossby extension; precip + OLR in normalized space):
+# total = surface + upper_air + diagnostic_weight * mean(diag MSE). geoarches
+# has no diagnostic head, so this weight has no upstream reference; 1.0 gives
+# the 2-channel diagnostic group parity with one graphcast-weighted group.
+diagnostic_weight: 1.0

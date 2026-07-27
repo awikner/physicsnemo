@@ -239,6 +239,8 @@ class ArchesWeatherLoss(torch.nn.Module):
         surface_graphcast_weights: Optional[Mapping[str, float]] = None,
         delta_scaler_path: Optional[str] = None,
         latitude_weighted: bool = True,
+        diagnostic_variables: Optional[list[str]] = None,
+        diagnostic_weight: float = 1.0,
     ) -> None:
         super().__init__()
         self._surface_names = list(surface_variables)
@@ -246,6 +248,12 @@ class ArchesWeatherLoss(torch.nn.Module):
         self._levels = [float(x) for x in levels]
         self._num_lat = int(num_lat)
         self.latitude_weighted = bool(latitude_weighted)
+        # Diagnostic head term (ai-rossby extension; geoarches has no
+        # diagnostic head so no reference weighting exists): a plain
+        # channel-mean lat-weighted MSE over the (normalized) diagnostic
+        # channels, added as `diagnostic_weight * mean`.
+        self._diag_names = list(diagnostic_variables or [])
+        self.diagnostic_weight = float(diagnostic_weight)
         self._cached: dict[tuple, torch.Tensor] = {}
 
         n_surf = len(self._surface_names)
@@ -305,7 +313,6 @@ class ArchesWeatherLoss(torch.nn.Module):
         out_diagnostic: Optional[torch.Tensor] = None,
         target_diagnostic: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
-        del out_diagnostic, target_diagnostic  # ArchesWeather-M has no diagnostic head
         device, dtype = out_surface.device, out_surface.dtype
         lat = self._lat(device, dtype) if self.latitude_weighted else None
 
@@ -324,12 +331,25 @@ class ArchesWeatherLoss(torch.nn.Module):
             u_coeff = u_coeff * lat.view(1, 1, 1, -1, 1)
         loss_upper_air = (u_err * u_coeff).mean()
 
-        total = loss_surface + loss_upper_air
+        loss_diag = torch.zeros((), device=device, dtype=dtype)
+        if (
+            self._diag_names
+            and out_diagnostic is not None
+            and isinstance(out_diagnostic, torch.Tensor)
+            and out_diagnostic.ndim >= 4
+            and target_diagnostic is not None
+        ):
+            d_err = (out_diagnostic - target_diagnostic).pow(2)  # (B, Cd, H, W)
+            if lat is not None:
+                d_err = d_err * lat.view(1, 1, -1, 1)
+            loss_diag = d_err.mean()
+
+        total = loss_surface + loss_upper_air + self.diagnostic_weight * loss_diag
         return {
             "loss": total,
             "surface": loss_surface.detach(),
             "upper_air": loss_upper_air.detach(),
-            "diagnostic": torch.zeros((), device=device, dtype=dtype),
+            "diagnostic": loss_diag.detach(),
         }
 
 

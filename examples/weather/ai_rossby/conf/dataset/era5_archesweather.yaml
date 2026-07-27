@@ -56,4 +56,6 @@ nan_fill_values:
   sea_ice_cover: 0.0
 
 normalize_constant_boundary: False
-normalize_diagnostic: False
+# Diagnostic head (precip + OLR) predicts in NORMALIZED space, same as the
+# SFNO recipe — stats are present (and patched) in the norm store.
+normalize_diagnostic: True
