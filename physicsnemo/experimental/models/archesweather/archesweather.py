@@ -87,6 +87,7 @@ class WeatherEncodeDecodeLayer(nn.Module):
         level_ch=5,
         n_concatenated_states=1,  # the t-24h previous state
         constant_dims=2,  # land_sea_mask + geopotential_at_surface
+        diag_ch=0,  # diagnostic head channels (precip, OLR); 0 = no head
     ) -> None:
         super().__init__()
         self.img_size = tuple(img_size)
@@ -137,6 +138,17 @@ class WeatherEncodeDecodeLayer(nn.Module):
         ICNR_init(self.surface_deconv.weight, initializer=nn.init.kaiming_normal_, upscale_factor=u)
         ICNR_init(self.level_deconv.weight, initializer=nn.init.kaiming_normal_, upscale_factor=u)
 
+        # Optional diagnostic head (e.g. 24h precip + OLR): a parallel decoder
+        # branch off the same surface-token plane. Added 2026-07-27; absent from
+        # geoarches ArchesWeather-M, so old checkpoints load with strict=False
+        # (warm start) leaving only this branch randomly initialized.
+        self.diag_ch = int(diag_ch)
+        if self.diag_ch > 0:
+            self.diag_deconv = nn.Conv2d(
+                out_emb_dim, diag_ch * u**2, kernel_size=3, stride=1, padding=1, bias=False
+            )
+            ICNR_init(self.diag_deconv.weight, initializer=nn.init.kaiming_normal_, upscale_factor=u)
+
     def _standardize_constant(self, constant: torch.Tensor) -> torch.Tensor:
         mean = self.const_mean.to(constant.device)[:, None, None]
         std = self.const_std.to(constant.device)[:, None, None]
@@ -183,6 +195,10 @@ class WeatherEncodeDecodeLayer(nn.Module):
         output_surface = self.pixelshuffle(output_surface)
         output_surface = output_surface.unsqueeze(-3)
 
+        output_diag = None
+        if self.diag_ch > 0:
+            output_diag = self.pixelshuffle(self.diag_deconv(surface)).unsqueeze(-3)
+
         # Split each level token back into p0 vertical planes, then drop the
         # zero-pad plane(s) at the front (faithful to the geoarches convention).
         n_tokens = level.shape[2]
@@ -203,9 +219,13 @@ class WeatherEncodeDecodeLayer(nn.Module):
             # Put back the removed south-pole row (nearest-neighbour).
             output_surface = torch.cat([output_surface, output_surface[..., -1:, :]], dim=-2)
             output_level = torch.cat([output_level, output_level[..., -1:, :]], dim=-2)
+            if output_diag is not None:
+                output_diag = torch.cat([output_diag, output_diag[..., -1:, :]], dim=-2)
 
         output_surface = output_surface.squeeze(-3)  # (B, surface_ch, H, W)
-        return output_surface, output_level
+        if output_diag is not None:
+            output_diag = output_diag.squeeze(-3)  # (B, diag_ch, H, W)
+        return output_surface, output_level, output_diag
 
 
 class ArchesWeatherCondBackbone(nn.Module):
@@ -338,11 +358,13 @@ class ArchesWeather(Module):
     Parameters
     ----------
     surface_variables, upper_air_variables, constant_boundary_variables,
-    varying_boundary_variables, diagnostic_variables : list of str
+    varying_boundary_variables, diagnostic_variables : list of str (see below)
         Variable-group channel names (same convention as :class:`SfnoPlasim`).
-        ``diagnostic_variables`` must be empty — ArchesWeather-M has no
-        diagnostic head. ``varying_boundary_variables`` is accepted for a
-        uniform config but the boundary tensor is ignored at forward time.
+        A non-empty ``diagnostic_variables`` (e.g. 24h precip + OLR) attaches a
+        diagnostic decoder head — an ai-rossby extension over geoarches
+        ArchesWeather-M; empty keeps the original head-less architecture.
+        ``varying_boundary_variables`` is accepted for a uniform config but the
+        boundary tensor is ignored at forward time.
     levels : list of float
         Vertical pressure levels (17 for our ERA5 recipe).
     horizontal_resolution : list of int
@@ -365,8 +387,10 @@ class ArchesWeather(Module):
     -------
     ``forward(surface_in, constant_boundary, varying_boundary, upper_air_in,
     *, surface_prev_in=None, upper_air_prev_in=None, calendar=None, ...)`` ->
-    ``(out_surface, out_upper_air, 0, 0, 0, 0)``. ``varying_boundary`` and the
-    ``target_*`` / ``train`` kwargs are accepted and ignored.
+    ``(out_surface, out_upper_air, out_diagnostic, 0, 0, 0)`` —
+    ``out_diagnostic`` is a scalar 0 when the model has no diagnostic head.
+    ``varying_boundary`` and the ``target_*`` / ``train`` kwargs are accepted
+    and ignored.
     """
 
     def __init__(
@@ -397,20 +421,17 @@ class ArchesWeather(Module):
     ) -> None:
         super().__init__(meta=MetaData())
 
-        if len(diagnostic_variables) > 0:
-            raise ValueError(
-                "ArchesWeather-M has no diagnostic head; diagnostic_variables "
-                f"must be empty, got {list(diagnostic_variables)!r}."
-            )
-
         self.surface_variables = list(surface_variables)
         self.upper_air_variables = list(upper_air_variables)
         self.constant_boundary_variables = list(constant_boundary_variables)
         self.varying_boundary_variables = list(varying_boundary_variables)
-        self.diagnostic_variables = []
+        # Diagnostic head (precip + OLR) — an ai-rossby extension over
+        # geoarches ArchesWeather-M (which has none). Empty list = no head,
+        # bit-identical to the original architecture.
+        self.diagnostic_variables = list(diagnostic_variables)
         self.levels = list(levels)
         self.horizontal_resolution = list(horizontal_resolution)
-        self.has_diagnostic = False
+        self.has_diagnostic = len(self.diagnostic_variables) > 0
         self.use_prev_state = bool(use_prev_state)
         self.add_input_state = bool(add_input_state)
 
@@ -429,6 +450,7 @@ class ArchesWeather(Module):
             level_ch=n_level,
             n_concatenated_states=1 if self.use_prev_state else 0,
             constant_dims=n_const,
+            diag_ch=len(self.diagnostic_variables),
         )
         if const_mean is not None:
             self.embedder.const_mean.copy_(torch.tensor(const_mean, dtype=torch.float32))
@@ -509,11 +531,15 @@ class ArchesWeather(Module):
         )
         cond_emb = self._cond_emb(calendar, bs, surface_in.device)
         x = self.backbone(x, cond_emb)
-        out_surface, out_upper_air = self.embedder.decode(x)
+        out_surface, out_upper_air, out_diag = self.embedder.decode(x)
 
         if self.add_input_state:
+            # Residual applies to the prognostic state only; the diagnostic
+            # head is a direct prediction (no input diagnostic state exists).
             out_surface = out_surface + surface_in
             out_upper_air = out_upper_air + upper_air_in
 
         zero = torch.tensor(0.0, device=surface_in.device, dtype=surface_in.dtype)
-        return (out_surface, out_upper_air, zero, zero, zero, zero)
+        if out_diag is None:
+            out_diag = zero
+        return (out_surface, out_upper_air, out_diag, zero, zero, zero)

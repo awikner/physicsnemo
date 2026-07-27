@@ -121,6 +121,29 @@ class _PressureLevelSubsetTransform:
         return out
 
 
+class _VaryingBoundarySubsetTransform:
+    """Select the model's varying-boundary channels from the store's set.
+
+    The dataset emits varying_boundary channels per the STORE attrs (e.g.
+    [sea_ice_cover, toa_incident_solar_radiation]), while the model may consume
+    a subset (Pangu-S2S parity: TISR only). Slices the channel axis of
+    ``varying_boundary`` (C, H, W) / ``varying_boundary_seq`` (T, C, H, W) to
+    the model's channels. Chain it FIRST (before NaN-fill + normalizer, which
+    are built from the MODEL's list).
+    """
+
+    def __init__(self, indices: list[int]) -> None:
+        self._idx = torch.tensor(list(indices), dtype=torch.long)
+
+    def __call__(self, sample: dict) -> dict:
+        out = dict(sample)
+        for key in ("varying_boundary", "varying_boundary_seq"):
+            v = out.get(key)
+            if v is not None and torch.is_tensor(v):
+                out[key] = v.index_select(v.ndim - 3, self._idx)
+        return out
+
+
 def _ddp_mean_scalars(values: dict, *, dist) -> dict:
     """All-reduce scalar metrics across ranks (mean), staying on-device.
 
@@ -562,7 +585,24 @@ def build_datapipe(
             level_to_idx = {float(lv): i for i, lv in enumerate(data_pressure_levels)}
             pressure_level_indices = [level_to_idx[float(lv)] for lv in model_levels]
 
+    # Varying-boundary channel subset (Pangu-S2S parity): the store may carry
+    # more varying channels (e.g. sea_ice_cover + TISR) than the model consumes
+    # (TISR only). Slice to the model's channels and align the normalizer to
+    # the SAME (model) list. Guarded like the level subset: only fires when the
+    # model's list is a strict subset of the store's.
+    varying_subset_indices: Optional[list[int]] = None
+    model_varying = [str(v) for v in (model.get("varying_boundary_variables", []) or [])]
+    data_varying = [
+        str(v)
+        for v in getattr(getattr(raw_dataset, "layout", None), "varying_boundary_variables", [])
+    ]
+    if model_varying and data_varying and model_varying != data_varying:
+        if set(model_varying).issubset(set(data_varying)):
+            varying_subset_indices = [data_varying.index(v) for v in model_varying]
+
     normalizer_kwargs: dict = {}
+    if varying_subset_indices is not None:
+        normalizer_kwargs["varying_boundary_variables"] = model_varying
     if pressure_level_indices is not None:
         normalizer_kwargs["pressure_levels"] = [float(lv) for lv in model_levels]
     if data.delta_std_path:
@@ -635,12 +675,15 @@ def build_datapipe(
     # When the model uses a subset of the data's pressure levels, trim the
     # upper-air tensors to those levels BEFORE the NaN-fill so every downstream
     # tensor (normalizer + model) is on the model's level set.
+    transforms = []
+    if varying_subset_indices is not None:
+        transforms.append(_VaryingBoundarySubsetTransform(varying_subset_indices))
     if pressure_level_indices is not None:
-        pipe.dataset.transform = ComposeTransform(
-            _PressureLevelSubsetTransform(pressure_level_indices), nan_fill
-        )
-    else:
-        pipe.dataset.transform = nan_fill
+        transforms.append(_PressureLevelSubsetTransform(pressure_level_indices))
+    transforms.append(nan_fill)
+    pipe.dataset.transform = (
+        transforms[0] if len(transforms) == 1 else ComposeTransform(*transforms)
+    )
     return pipe
 
 
@@ -670,6 +713,8 @@ def build_loss(cfg: DictConfig) -> PanguPlasimLoss:
             surface_graphcast_weights=_maybe_dict(cfg_loss.get("surface_graphcast_weights")),
             delta_scaler_path=_resolve_path(cfg_loss.get("delta_scaler_path")),
             latitude_weighted=bool(cfg_loss.get("latitude_weighted", True)),
+            diagnostic_variables=list(cfg_model.get("diagnostic_variables", []) or []),
+            diagnostic_weight=float(cfg_loss.get("diagnostic_weight", 1.0)),
         )
 
     # Optional: weight every variable-LEVEL channel equally. Each group term is a
@@ -805,6 +850,25 @@ def main(cfg: DictConfig) -> None:
 
     # --- Model + DDP ------------------------------------------------------
     model = build_model(cfg.model).to(dist.device)
+
+    # Optional warm start: initialize weights from a prior run's .mdlus with
+    # strict=False, so architecture EXTENSIONS (e.g. the ArchesWeather
+    # diagnostic head added over a head-less checkpoint) keep their fresh
+    # initialization while every matching parameter loads. Applies only to a
+    # fresh run — the normal ./checkpoints resume below takes precedence when
+    # a run checkpoint exists.
+    warm_start = cfg.training.get("warm_start_path", None)
+    if warm_start and not (Path("./checkpoints").exists() and any(Path("./checkpoints").iterdir())):
+        from physicsnemo import Module as _PMModule
+
+        src = _PMModule.from_checkpoint(to_absolute_path(str(warm_start)))
+        missing, unexpected = model.load_state_dict(src.state_dict(), strict=False)
+        logger.info(
+            f"warm start from {warm_start}: "
+            f"{len(missing)} missing (fresh) params, {len(unexpected)} unexpected"
+        )
+        del src
+
     if dist.world_size > 1:
         # bucket_cap_mb / static_graph are opt-in (None/False preserves the
         # prior PyTorch-default behavior). Motivated by profiling that showed

@@ -41,17 +41,18 @@ upper_air_variables:
 constant_boundary_variables:
   - land_sea_mask
   - geopotential_at_surface
-# Accepted but IGNORED by ArchesWeather.forward (no SIC/TISR forcing). Kept so
-# build_datapipe's NaN-fill handles the store's varying fields. (SST moved to
-# surface_variables above — now predicted, matching Pangu-S2S.)
+# Accepted but IGNORED by ArchesWeather.forward. Pangu-S2S parity
+# (PANGU_S2S_EMA.yaml): incident solar is the ONLY varying boundary —
+# sea_ice_cover is NOT a Pangu-S2S input and is excluded here too.
 varying_boundary_variables:
-  - sea_ice_cover
   - toa_incident_solar_radiation
-# ArchesWeather-M has NO diagnostic head — must be empty. The re-augmented store
-# now carries 2 diagnostics (total_precipitation_24hr,
-# mean_top_net_long_wave_radiation_flux); both are ignored here. Predicting OLR
-# would require adding a diagnostic head to the model.
-diagnostic_variables: []
+# Diagnostic head (ai-rossby extension over geoarches ArchesWeather-M, which
+# has none): precip + OLR are THE target variables for the monsoon project.
+# Warm-started checkpoints (pre-head) load with strict=False; only this head
+# trains from fresh initialization.
+diagnostic_variables:
+  - total_precipitation_24hr
+  - mean_top_net_long_wave_radiation_flux
 
 # 17 ERA5 pressure levels (drops 200 hPa from the archive's 18, like sfno_era5).
 levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
