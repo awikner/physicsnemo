@@ -45,8 +45,10 @@ upper_air_variables:
 constant_boundary_variables:
   - land_sea_mask
   - geopotential_at_surface
+# Pangu-S2S parity (PANGU_S2S_EMA.yaml): the ONLY varying boundary forcing is
+# incident solar. sea_ice_cover/snow_depth are commented out there too — sic is
+# NOT an input to Pangu-S2S and must not be one here.
 varying_boundary_variables:
-  - sea_ice_cover
   - toa_incident_solar_radiation
 diagnostic_variables:
   - total_precipitation_24hr
