@@ -116,6 +116,28 @@ class _PressureLevelSubsetTransform:
         return out
 
 
+class _VaryingBoundarySubsetTransform:
+    """Select the model's varying-boundary channels from the store's set.
+
+    Inference-side mirror of ``train._VaryingBoundarySubsetTransform``: the
+    store may carry more varying channels (e.g. sea_ice_cover + TISR) than the
+    model consumes (Pangu-S2S parity: TISR only). Slices the channel axis of
+    ``varying_boundary`` / ``varying_boundary_seq``. Chain FIRST, before the
+    NaN-fill + normalizer (both built from the MODEL's list).
+    """
+
+    def __init__(self, indices: list[int]) -> None:
+        self._idx = torch.tensor(list(indices), dtype=torch.long)
+
+    def __call__(self, sample: dict) -> dict:
+        out = dict(sample)
+        for key in ("varying_boundary", "varying_boundary_seq"):
+            v = out.get(key)
+            if v is not None and torch.is_tensor(v):
+                out[key] = v.index_select(v.ndim - 3, self._idx)
+        return out
+
+
 def _timestamp_ymdh(t) -> tuple[int, int, int, int]:
     """Return ``(year, month, day, hour)`` for a cftime OR ``np.datetime64``.
 
@@ -1697,7 +1719,27 @@ def main(cfg: DictConfig) -> None:
                 f"(indices={pressure_level_indices})"
             )
 
+    # Varying-boundary channel subset (mirror of build_datapipe in train.py):
+    # the store may carry more varying channels than the model consumes
+    # (Pangu-S2S parity: TISR only). Slice + align the normalizer to the
+    # MODEL's list.
+    varying_subset_indices: Optional[list[int]] = None
+    model_varying = [str(v) for v in (cfg.model.get("varying_boundary_variables", []) or [])]
+    data_varying = [
+        str(v)
+        for v in getattr(getattr(base_ds, "layout", None), "varying_boundary_variables", [])
+    ]
+    if model_varying and data_varying and model_varying != data_varying:
+        if set(model_varying).issubset(set(data_varying)):
+            varying_subset_indices = [data_varying.index(v) for v in model_varying]
+            logger.info(
+                f"varying-boundary subset active: model uses {model_varying} "
+                f"of {data_varying} (indices={varying_subset_indices})"
+            )
+
     normalizer_kwargs: dict = {}
+    if varying_subset_indices is not None:
+        normalizer_kwargs["varying_boundary_variables"] = model_varying
     if pressure_level_indices is not None:
         normalizer_kwargs["pressure_levels"] = [float(lv) for lv in model_levels]
     normalizer = PlasimNormalizer.from_dataset(
@@ -1720,17 +1762,21 @@ def main(cfg: DictConfig) -> None:
         fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
         default=float(data.nan_fill_default),
     )
-    # Trim the upper-air tensors to the model's levels BEFORE the NaN-fill so
-    # every downstream tensor (normalizer + model) is on the model's level set.
+    # Trim varying-boundary channels + upper-air levels to the model's sets
+    # BEFORE the NaN-fill so every downstream tensor (normalizer + model)
+    # matches cfg.model.
+    _transforms = []
+    if varying_subset_indices is not None:
+        _transforms.append(_VaryingBoundarySubsetTransform(varying_subset_indices))
     if pressure_level_indices is not None:
-        base_ds.transform = ComposeTransform(
-            _PressureLevelSubsetTransform(pressure_level_indices), nan_fill
-        )
+        _transforms.append(_PressureLevelSubsetTransform(pressure_level_indices))
         # Report the model's physical level VALUES in the output ``level`` coord
         # (see ``_extract_layout``); a plain attribute, no dataset mutation.
         base_ds._inference_level_coord = [float(lv) for lv in model_levels]
-    else:
-        base_ds.transform = nan_fill
+    _transforms.append(nan_fill)
+    base_ds.transform = (
+        _transforms[0] if len(_transforms) == 1 else ComposeTransform(*_transforms)
+    )
 
     # --- Inference config ---------------------------------------------------
     # IC selection: either an explicit list of integer time indices
