@@ -85,18 +85,28 @@ inits are 00Z). `tools/verify_precip_alignment.py` results:
 | graphcast | 0 (by construction) | week-2 signal too weak to discriminate (Δcorr ≤ 0.01); shares the converter convention pangu verified |
 | aifs_single_v2 | 0 (by construction) | same (stores only have leads ≥ 7, where skill ≈ 0) |
 
-### Data-quality flags (for the model-evaluation team)
+### Latitude-orientation incident — FOUND AND REPAIRED 2026-07-28
 
-1. **sfno_era5 precipitation looks broken/unskilled**: pattern correlation
-   with IMERG ≈ 0 even at 2-day lead, 5–6× wet bias in the monsoon box, and
-   ~0 spatial correlation with pangu's precip globally/tropics at the same
-   (init, lead). The dynamical fields are unaffected. Keep as an expert
-   (the gate + per-expert bias can suppress it) but treat its precip as
-   near-noise; worth checking the v3 checkpoint's precip diagnostic head.
-2. **Monsoon-box wet bias at week-2**: graphcast/aifs/sfno all run ~4× wet
-   vs IMERG (JJAS box mean); pangu ~1.3×. Exactly the shared bias the
-   per-expert bias fields target, but relevant for baseline comparisons.
-3. pangu's `mean_top_net_long_wave_radiation_flux` clamps at exactly 0 at
+A physical-orientation audit (July NH-vs-SH z500 asymmetry + ITCZ
+seasonality) found the **IMERG stores and all 25 pangu_s2s stores
+(source + harmonized) data-flipped in latitude** relative to their
+(correct) N→S coordinate. Root cause: ascending source latitudes swapped
+for a ref-store N→S label without flipping the data
+(`consolidate_hindcasts.py` pangu path — patched; IMERG had the analogous
+converter issue). Repaired **in place** with `flip_lat_zarr.py` on all
+clusters; norm stats (flip-invariant, unchanged) and the SEEPS climatology
+(+`clim_mean`) regenerated; audit now passes for every store
+(`~/mowe_tools/check_lat_orientation.py` on Derecho).
+
+**Retractions**: the earlier "sfno precip is broken" and "graphcast/aifs/
+sfno 4× wet bias" flags were artifacts of scoring correctly-oriented
+models against flipped truth (and pangu only *looked* aligned because it
+was flipped consistently with IMERG). Post-fix alignment numbers are in
+`~/mowe_tools/verify_postflip.log`.
+
+### Remaining data-quality notes
+
+1. pangu's `mean_top_net_long_wave_radiation_flux` clamps at exactly 0 at
    its upper tail (sfno's does not).
 
 ## Setup order (one-time, on Derecho)
