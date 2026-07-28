@@ -309,6 +309,18 @@ def load_pangu_init(path: Path) -> dict:
     diagnostic = _order_group(diagnostic, list(DIAGNOSTIC_ALIASES))
     upper = _order_group(upper, list(UPPER_AIR_ALIASES))
 
+    # Normalize orientation to lat N->S BEFORE resolve_coords may swap in a
+    # ref-store coordinate: an ascending source lat with un-flipped data was
+    # exactly how the 2000-2024 pangu_s2s stores ended upside-down relative
+    # to their (ref-store) N->S label (found + repaired 2026-07-28).
+    if lat is not None and lat.size > 1 and float(lat[0]) < float(lat[-1]):
+        logger.info("%s: source lat ascending; flipping data + coord to N->S",
+                    path.name)
+        lat = np.asarray(lat)[::-1]
+        surface = {k: v[..., ::-1, :] for k, v in surface.items()}
+        diagnostic = {k: v[..., ::-1, :] for k, v in diagnostic.items()}
+        upper = {k: v[..., ::-1, :] for k, v in upper.items()}
+
     return {
         "init_dt": _parse_pangu_init_dt(path.name),
         "surface": surface,
