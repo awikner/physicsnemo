@@ -25,6 +25,10 @@ pip install --quiet \
     timm jaxtyping einops tensordict s3fs nvtx \
     treelib termcolor gitpython warp-lang pytest
 pip install --quiet -e . --no-deps
+# tensordict et al. may have dragged in a newer torch; re-pin LAST
+# (fork guidance: torch<2.11 — 2.11/2.12 regress DDP).
+pip install --quiet --force-reinstall "torch==2.10.1" \
+    --index-url https://download.pytorch.org/whl/cu126
 
 python - <<'EOF'
 import torch

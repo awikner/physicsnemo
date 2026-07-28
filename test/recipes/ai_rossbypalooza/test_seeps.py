@@ -165,3 +165,46 @@ def test_months_from_hours():
 def test_missing_climatology_names_generator(tmp_path):
     with pytest.raises(FileNotFoundError, match="compute_seeps_climatology"):
         SeepsClimatology(tmp_path / "nope.zarr")
+
+
+def test_streaming_monthly_rmse_acc():
+    from validation import StreamingMonthlyRmseAcc
+
+    h, w = 4, 6
+    bins = {(2021, 6): 0, (2021, 7): 1}
+    clim = torch.zeros(12, h, w)
+    clim[5] = 2.0  # June climatology = 2 mm/day
+    acc_w = torch.ones(h, w)
+    m = StreamingMonthlyRmseAcc(
+        bins=bins, clim_mean=clim, region_weights=acc_w,
+        device=torch.device("cpu"),
+    )
+    # June: pred anomalies exactly equal target anomalies -> ACC 1, RMSE 0.
+    target = torch.rand(3, h, w) * 5
+    months = torch.tensor([6, 6, 6])
+    m.update(0, target.clone(), target, months)
+    # July: pred = -target anomalies (clim 0) -> ACC -1; RMSE = 2*|target|.
+    t2 = torch.rand(2, h, w) + 1.0
+    m.update(1, -t2, t2, torch.tensor([7, 7]))
+    rmse, acc, wt = m.finalize()
+    torch.testing.assert_close(rmse[0], torch.tensor(0.0))
+    torch.testing.assert_close(acc[0], torch.tensor(1.0), atol=1e-5, rtol=0)
+    torch.testing.assert_close(acc[1], torch.tensor(-1.0), atol=1e-5, rtol=0)
+    expected_rmse = (4 * t2**2).mean().sqrt()
+    torch.testing.assert_close(rmse[1], expected_rmse, rtol=1e-5, atol=1e-5)
+    assert wt[0] > 0 and wt[1] > 0
+
+
+def test_years_from_hours():
+    import cftime
+
+    from seeps import years_from_hours_since_1900
+
+    epoch = cftime.DatetimeGregorian(1900, 1, 1)
+    hs = [
+        int((cftime.DatetimeGregorian(y, m, d) - epoch).total_seconds() // 3600)
+        for (y, m, d) in [(2020, 3, 9), (2024, 12, 31), (2025, 1, 3)]
+    ]
+    assert years_from_hours_since_1900(torch.tensor(hs)).tolist() == [
+        2020, 2024, 2025,
+    ]

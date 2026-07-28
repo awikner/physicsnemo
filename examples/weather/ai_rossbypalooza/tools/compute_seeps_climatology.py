@@ -25,7 +25,9 @@ Per calendar month and gridpoint:
 * ``t2``  — the light/heavy boundary: the 2/3 quantile of *wet-day*
   amounts (light is climatologically twice as likely as heavy). NaN where
   a gridpoint has no wet days (those cells fail the p1 validity window
-  anyway).
+  anyway);
+* ``clim_mean`` — the mean precip (mm/day), used as the anomaly reference
+  for the monthly lat-weighted ACC validation metric.
 
 Output: small zarr ``(month, lat, lon)`` with vars ``p1`` / ``t2``,
 consumed by ``seeps.SeepsClimatology``. Login-node safe: plain
@@ -75,8 +77,8 @@ def month_fields(
     *,
     var: str,
     dry_threshold: float,
-) -> tuple[np.ndarray, np.ndarray, int]:
-    """(p1, t2, n_days) for one calendar month across all years."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """(p1, t2, clim_mean, n_days) for one calendar month across all years."""
     chunks = []
     for year in years:
         store = imerg_root / f"{year}.zarr"
@@ -104,7 +106,13 @@ def month_fields(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="All-NaN slice")
         t2 = np.nanquantile(wet, 2.0 / 3.0, axis=0)
-    return p1.astype("float32"), t2.astype("float32"), data.shape[0]
+        clim_mean = np.nanmean(np.where(finite, data, np.nan), axis=0)
+    return (
+        p1.astype("float32"),
+        t2.astype("float32"),
+        clim_mean.astype("float32"),
+        data.shape[0],
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -134,8 +142,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p1 = np.empty((12, lat.size, lon.size), dtype="float32")
     t2 = np.empty_like(p1)
+    clim_mean = np.empty_like(p1)
     for month in range(1, 13):
-        p1[month - 1], t2[month - 1], n = month_fields(
+        p1[month - 1], t2[month - 1], clim_mean[month - 1], n = month_fields(
             args.imerg_root,
             years,
             month,
@@ -148,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         {
             "p1": (("month", "lat", "lon"), p1),
             "t2": (("month", "lat", "lon"), t2),
+            "clim_mean": (("month", "lat", "lon"), clim_mean),
         },
         coords={
             "month": ("month", np.arange(1, 13, dtype="int32")),

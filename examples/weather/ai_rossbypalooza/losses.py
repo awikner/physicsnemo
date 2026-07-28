@@ -35,7 +35,7 @@ Both losses take ``(pred_norm, target_norm, target_mm)``:
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import torch
@@ -70,9 +70,17 @@ def region_weights(
     box: Sequence[float],
     *,
     lat_weighted: bool = True,
+    extra_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """(H, W) float32 weights: box mask x cos(lat), zero outside."""
+    """(H, W) float32 weights: box mask [x extra_mask] x cos(lat).
+
+    ``extra_mask`` (bool, (H, W)) intersects the box — e.g. the IMD
+    data-availability mask so training/metrics only see gridpoints with
+    IMD gauge coverage.
+    """
     mask = region_mask(lat, lon, box)
+    if extra_mask is not None:
+        mask = mask & extra_mask.to(torch.bool)
     w = mask.to(torch.float64)
     if lat_weighted:
         cos = torch.cos(
@@ -82,6 +90,62 @@ def region_weights(
     if float(w.sum()) <= 0:
         raise ValueError("region weights sum to zero")
     return w.to(torch.float32)
+
+
+def imd_valid_mask(
+    imd_store: str,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    *,
+    var: str = "total_precipitation_24hr",
+    min_finite_frac: float = 0.99,
+    coord_tol: float = 1e-3,
+) -> torch.Tensor:
+    """(H, W) bool mask of gridpoints with IMD gauge coverage.
+
+    The IMD analysis lives on a native 1-degree India grid (lat 6.5..38.5,
+    lon 66.5..100.5 — cell centers identical to the global IMERG/ERA5 1-deg
+    grid) with ~69% NaN over ocean / station-free cells. A gridpoint is
+    "valid" when its finite fraction over the store's records is at least
+    ``min_finite_frac`` (the NaN pattern is a static coverage mask).
+    Coordinates are matched by value, so grid orientation is irrelevant.
+    """
+    import xarray as xr
+
+    with xr.open_zarr(imd_store, consolidated=True) as ds:
+        vals = ds[var].values  # (T, h, w) native India grid
+        imd_lat = ds["lat"].values.astype("float64")
+        imd_lon = ds["lon"].values.astype("float64")
+    frac = np.isfinite(vals).mean(axis=0)
+    valid_native = frac >= float(min_finite_frac)
+
+    lat = np.asarray(lat, dtype="float64")
+    lon = np.asarray(lon, dtype="float64")
+    mask = np.zeros((lat.size, lon.size), dtype=bool)
+    lat_idx = np.full(imd_lat.size, -1)
+    lon_idx = np.full(imd_lon.size, -1)
+    for i, v in enumerate(imd_lat):
+        j = np.argmin(np.abs(lat - v))
+        if abs(lat[j] - v) <= coord_tol:
+            lat_idx[i] = j
+    for i, v in enumerate(imd_lon):
+        j = np.argmin(np.abs(lon - v))
+        if abs(lon[j] - v) <= coord_tol:
+            lon_idx[i] = j
+    if (lat_idx < 0).all() or (lon_idx < 0).all():
+        raise ValueError(
+            f"IMD grid ({imd_lat[0]}..{imd_lat[-1]}) does not align with the "
+            f"target grid — expected shared 1-degree cell centers"
+        )
+    for i in range(imd_lat.size):
+        if lat_idx[i] < 0:
+            continue
+        for k in range(imd_lon.size):
+            if lon_idx[k] >= 0 and valid_native[i, k]:
+                mask[lat_idx[i], lon_idx[k]] = True
+    if not mask.any():
+        raise ValueError("IMD validity mask is empty")
+    return torch.from_numpy(mask)
 
 
 def _squeeze_channel(x: torch.Tensor) -> torch.Tensor:
@@ -130,6 +194,7 @@ class RegionalPrecipMSE(nn.Module):
         precip_std: float = 1.0,
         precip_transform=None,
         lat_weighted: bool = True,
+        extra_mask=None,
     ) -> None:
         super().__init__()
         if space not in ("normalized", "physical"):
@@ -139,7 +204,10 @@ class RegionalPrecipMSE(nn.Module):
         self.precip_std = float(precip_std)
         self.precip_transform = precip_transform
         self.register_buffer(
-            "weights", region_weights(lat, lon, box, lat_weighted=lat_weighted)
+            "weights",
+            region_weights(
+                lat, lon, box, lat_weighted=lat_weighted, extra_mask=extra_mask
+            ),
         )
 
     def forward(
@@ -182,6 +250,7 @@ class RegionalPrecipLogMSE(nn.Module):
         precip_transform=None,
         epsilon_mm: float = 0.1,
         lat_weighted: bool = True,
+        extra_mask=None,
     ) -> None:
         super().__init__()
         if epsilon_mm <= 0:
@@ -191,7 +260,10 @@ class RegionalPrecipLogMSE(nn.Module):
         self.precip_transform = precip_transform
         self.epsilon_mm = float(epsilon_mm)
         self.register_buffer(
-            "weights", region_weights(lat, lon, box, lat_weighted=lat_weighted)
+            "weights",
+            region_weights(
+                lat, lon, box, lat_weighted=lat_weighted, extra_mask=extra_mask
+            ),
         )
 
     def forward(
@@ -215,7 +287,15 @@ class RegionalPrecipLogMSE(nn.Module):
 
 
 def build_loss(
-    cfg_loss, *, lat, lon, box, precip_mean, precip_std, precip_transform=None
+    cfg_loss,
+    *,
+    lat,
+    lon,
+    box,
+    precip_mean,
+    precip_std,
+    precip_transform=None,
+    extra_mask=None,
 ) -> nn.Module:
     """Dispatcher on ``cfg.loss.name`` (ai_rossby ``build_loss`` convention)."""
     name = str(cfg_loss.get("name", "regional_mse"))
@@ -230,6 +310,7 @@ def build_loss(
             precip_std=precip_std,
             precip_transform=precip_transform,
             lat_weighted=lat_weighted,
+            extra_mask=extra_mask,
         )
     if name == "regional_log_mse":
         return RegionalPrecipLogMSE(
@@ -241,5 +322,6 @@ def build_loss(
             precip_transform=precip_transform,
             epsilon_mm=float(cfg_loss.get("epsilon_mm", 0.1)),
             lat_weighted=lat_weighted,
+            extra_mask=extra_mask,
         )
     raise ValueError(f"unknown loss name '{name}'")

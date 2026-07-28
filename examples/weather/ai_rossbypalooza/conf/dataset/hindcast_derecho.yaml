@@ -24,6 +24,12 @@ master_channels:
   - mean_sea_level_pressure
   - surface_pressure
 
+# IMD gauge coverage: the training loss and the monthly validation
+# RMSE/ACC only see gridpoints where the IMD analysis is non-NaN.
+imd:
+  store: /glade/derecho/scratch/awikner/physicsnemo-zarr/imd/2015.zarr
+  min_finite_frac: 0.99
+
 truth:
   root: /glade/derecho/scratch/awikner/physicsnemo-zarr/imerg
   var: total_precipitation_24hr
@@ -65,7 +71,7 @@ train:
 
 val:
   years: [2020, 2024]
-  init_months: [6, 7, 8, 9]
+  init_months: [3, 4, 5, 6, 7, 8, 9]
   lead_days: [8, 14]
   min_experts: 1
 

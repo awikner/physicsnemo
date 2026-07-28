@@ -137,6 +137,14 @@ class SeepsClimatology:
                 ds["p1"].values.astype(np.float32)
             )  # (12, H, W)
             self.t2 = torch.from_numpy(ds["t2"].values.astype(np.float32))
+            # Monthly mean precip (mm/day): anomaly reference for ACC.
+            # Absent in stores written before 2026-07-28; monthly ACC then
+            # raises with a pointer to the regeneration tool.
+            self.clim_mean = (
+                torch.from_numpy(ds["clim_mean"].values.astype(np.float32))
+                if "clim_mean" in ds
+                else None
+            )
             self.lat = ds["lat"].values.astype(np.float64)
             self.lon = ds["lon"].values.astype(np.float64)
             self.dry_threshold_mm = float(
@@ -146,6 +154,8 @@ class SeepsClimatology:
     def to(self, device: torch.device) -> "SeepsClimatology":
         self.p1 = self.p1.to(device)
         self.t2 = self.t2.to(device)
+        if self.clim_mean is not None:
+            self.clim_mean = self.clim_mean.to(device)
         return self
 
 
@@ -218,5 +228,14 @@ def months_from_hours_since_1900(hours: torch.Tensor) -> torch.Tensor:
     epoch = cftime.DatetimeGregorian(1900, 1, 1, 0)
     out = [
         (epoch + datetime.timedelta(hours=int(h))).month for h in hours.tolist()
+    ]
+    return torch.tensor(out, dtype=torch.int64, device=hours.device)
+
+
+def years_from_hours_since_1900(hours: torch.Tensor) -> torch.Tensor:
+    """Calendar years for int hours since 1900-01-01 00Z (standard calendar)."""
+    epoch = cftime.DatetimeGregorian(1900, 1, 1, 0)
+    out = [
+        (epoch + datetime.timedelta(hours=int(h))).year for h in hours.tolist()
     ]
     return torch.tensor(out, dtype=torch.int64, device=hours.device)

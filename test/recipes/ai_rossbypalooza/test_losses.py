@@ -157,3 +157,70 @@ def test_physical_space_with_log_transform():
     )
     out = loss(pred_norm, torch.zeros_like(target_mm), target_mm)
     torch.testing.assert_close(out, torch.tensor(36.0), rtol=1e-4, atol=1e-3)
+
+
+# --------------------------------------------------------------------------- #
+# IMD-coverage region (training mask + monthly metrics region)
+# --------------------------------------------------------------------------- #
+
+
+def _write_imd_like_store(path, lat_vals, lon_vals, valid):
+    import xarray as xr
+
+    t = 10
+    data = np.where(valid[None], 3.0, np.nan).repeat(t, axis=0).reshape(
+        t, len(lat_vals), len(lon_vals)
+    ).astype("float32")
+    ds = xr.Dataset(
+        {"total_precipitation_24hr": (("time", "lat", "lon"), data)},
+        coords={
+            "time": np.arange(t),
+            "lat": np.asarray(lat_vals, dtype="float32"),
+            "lon": np.asarray(lon_vals, dtype="float32"),
+        },
+    )
+    ds.to_zarr(path, mode="w", zarr_format=3, consolidated=True)
+    return path
+
+
+def test_imd_valid_mask_maps_onto_global_grid(tmp_path):
+    from losses import imd_valid_mask
+
+    # IMD-like subgrid: lat 25..15 (N->S), lon 70..75 — shared 5-deg centers
+    # with the LAT/LON test grid.
+    imd_lat = [25.0, 20.0, 15.0]
+    imd_lon = [70.0, 75.0]
+    valid = np.array([[True, False], [True, True], [False, False]])
+    store = _write_imd_like_store(tmp_path / "imd.zarr", imd_lat, imd_lon, valid)
+    mask = imd_valid_mask(str(store), LAT, LON, min_finite_frac=0.99)
+    assert mask.shape == (15, 72)
+    la = {v: i for i, v in enumerate(LAT)}
+    lo = {v: i for i, v in enumerate(LON)}
+    assert mask[la[25.0], lo[70.0]]
+    assert not mask[la[25.0], lo[75.0]]
+    assert mask[la[20.0], lo[70.0]] and mask[la[20.0], lo[75.0]]
+    assert not mask[la[15.0], lo[70.0]]
+    assert int(mask.sum()) == 3
+
+
+def test_region_weights_extra_mask_and_loss(tmp_path):
+    from losses import imd_valid_mask
+
+    imd_lat = [25.0, 20.0]
+    imd_lon = [70.0]
+    valid = np.array([[True], [True]])
+    store = _write_imd_like_store(tmp_path / "imd2.zarr", imd_lat, imd_lon, valid)
+    mask = imd_valid_mask(str(store), LAT, LON)
+    w = region_weights(LAT, LON, BOX, extra_mask=mask)
+    assert int((w > 0).sum()) == 2  # only the two IMD points survive the box
+    # Loss ignores errors outside the IMD mask.
+    loss = RegionalPrecipMSE(LAT, LON, BOX, space="normalized", extra_mask=mask)
+    target = torch.zeros(1, 15, 72)
+    pred = torch.zeros(1, 15, 72)
+    la = {v: i for i, v in enumerate(LAT)}
+    lo = {v: i for i, v in enumerate(LON)}
+    pred[0, la[10.0], lo[80.0]] = 100.0  # inside box, outside IMD mask
+    torch.testing.assert_close(loss(pred, target, target), torch.tensor(0.0))
+    pred[0, la[20.0], lo[70.0]] = 2.0  # on an IMD point
+    out = loss(pred, target, target)
+    assert out.item() > 0

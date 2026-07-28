@@ -51,7 +51,7 @@ from physicsnemo.utils.logging import LaunchLogger, PythonLogger
 
 from datapipes.factory import build_dataset
 from datapipes.sampler import MixturePairSampler
-from losses import build_loss, region_weights
+from losses import build_loss, imd_valid_mask, region_weights
 from mowe_precip import MoWEPrecipGate, expert_dropout, mix
 from seeps import SeepsClimatology
 from validation import MixtureValidator
@@ -207,6 +207,19 @@ def run(cfg: DictConfig) -> None:
     # ---------------- loss / optimizer ----------------
     region = list(cfg.region.lat) + list(cfg.region.lon)
     box = (region[0], region[1], region[2], region[3])
+    # Optional IMD-coverage restriction: with dataset.imd.store set, the
+    # training loss (and the monthly validation metrics) only see the
+    # gridpoints where the IMD gauge analysis has data.
+    imd_mask = None
+    imd_cfg = cfg.dataset.get("imd", None)
+    if imd_cfg is not None and imd_cfg.get("store"):
+        imd_mask = imd_valid_mask(
+            str(imd_cfg.store),
+            train_ds.lat,
+            train_ds.lon,
+            min_finite_frac=float(imd_cfg.get("min_finite_frac", 0.99)),
+        )
+        plog.info(f"IMD-coverage mask: {int(imd_mask.sum())} gridpoints")
     loss_fn = build_loss(
         cfg.loss,
         lat=train_ds.lat,
@@ -215,6 +228,7 @@ def run(cfg: DictConfig) -> None:
         precip_mean=train_ds.precip_mean,
         precip_std=train_ds.precip_std,
         precip_transform=train_ds.precip_transform,
+        extra_mask=imd_mask,
     ).to(dist.device)
 
     cfg_train = cfg.training
@@ -244,6 +258,16 @@ def run(cfg: DictConfig) -> None:
             to_absolute_path(str(cfg.validation.seeps_climatology))
         )
         val_lead_days = tuple(cfg.dataset.val.lead_days)
+        monthly_weights = None
+        if imd_mask is not None:
+            # Monthly RMSE/ACC over the IMD-coverage region only (cos-lat
+            # weighted; the mask itself defines the region).
+            monthly_weights = region_weights(
+                val_ds.lat,
+                val_ds.lon,
+                (-90.0, 90.0, 0.0, 360.0),
+                extra_mask=imd_mask,
+            )
         validator = MixtureValidator(
             expert_names=val_ds.expert_names,
             lead_days=(int(val_lead_days[0]), int(val_lead_days[1])),
@@ -253,6 +277,8 @@ def run(cfg: DictConfig) -> None:
             precip_std=val_ds.precip_std,
             precip_transform=val_ds.precip_transform,
             device=dist.device,
+            monthly_region_weights=monthly_weights,
+            val_years=tuple(int(y) for y in cfg.dataset.val.years),
         )
 
     # ---------------- resume ----------------
