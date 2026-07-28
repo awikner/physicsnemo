@@ -36,4 +36,4 @@ torchrun --standalone --nproc-per-node="$NGPU" \
     dataset.loader.num_workers=8 \
     wandb.enabled="${WANDB:-false}" \
     ${EXTRA:-}
-echo "[$(date)] training exit code $?"
+rc=$?; echo "[$(date)] training exit code $rc"; exit $rc

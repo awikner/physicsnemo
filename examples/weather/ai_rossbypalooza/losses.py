@@ -103,11 +103,14 @@ def imd_valid_mask(
 ) -> torch.Tensor:
     """(H, W) bool mask of gridpoints with IMD gauge coverage.
 
-    The IMD analysis lives on a native 1-degree India grid (lat 6.5..38.5,
-    lon 66.5..100.5 — cell centers identical to the global IMERG/ERA5 1-deg
-    grid) with ~69% NaN over ocean / station-free cells. A gridpoint is
-    "valid" when its finite fraction over the store's records is at least
-    ``min_finite_frac`` (the NaN pattern is a static coverage mask).
+    The IMD analysis lives on a native 1-degree India grid with ~69% NaN
+    over ocean / station-free cells. A gridpoint is "valid" when its finite
+    fraction over the store's records is at least ``min_finite_frac`` (the
+    NaN pattern is a static coverage mask). Latitudes share the global
+    half-degree cell centers; IMD LONGITUDES are offset by half a cell
+    (66.5, 67.5, ... vs the global integer centers), so each valid IMD
+    cell marks every overlapping global column (those within half a cell
+    width) — the mask dilates by at most one column at region edges.
     Coordinates are matched by value, so grid orientation is irrelevant.
     """
     import xarray as xr
@@ -121,28 +124,28 @@ def imd_valid_mask(
 
     lat = np.asarray(lat, dtype="float64")
     lon = np.asarray(lon, dtype="float64")
+    half = 0.5 + coord_tol  # half a 1-degree cell
+
+    def overlapping(coords: np.ndarray, v: float) -> np.ndarray:
+        d = np.abs(coords - v)
+        exact = np.nonzero(d <= coord_tol)[0]
+        return exact if exact.size else np.nonzero(d <= half)[0]
+
     mask = np.zeros((lat.size, lon.size), dtype=bool)
-    lat_idx = np.full(imd_lat.size, -1)
-    lon_idx = np.full(imd_lon.size, -1)
-    for i, v in enumerate(imd_lat):
-        j = np.argmin(np.abs(lat - v))
-        if abs(lat[j] - v) <= coord_tol:
-            lat_idx[i] = j
-    for i, v in enumerate(imd_lon):
-        j = np.argmin(np.abs(lon - v))
-        if abs(lon[j] - v) <= coord_tol:
-            lon_idx[i] = j
-    if (lat_idx < 0).all() or (lon_idx < 0).all():
+    lat_rows = [overlapping(lat, v) for v in imd_lat]
+    lon_cols = [overlapping(lon, v) for v in imd_lon]
+    if not any(r.size for r in lat_rows) or not any(c.size for c in lon_cols):
         raise ValueError(
-            f"IMD grid ({imd_lat[0]}..{imd_lat[-1]}) does not align with the "
-            f"target grid — expected shared 1-degree cell centers"
+            f"IMD grid (lat {imd_lat[0]}..{imd_lat[-1]}, "
+            f"lon {imd_lon[0]}..{imd_lon[-1]}) does not overlap the target "
+            f"1-degree grid"
         )
-    for i in range(imd_lat.size):
-        if lat_idx[i] < 0:
+    for i, rows in enumerate(lat_rows):
+        if not rows.size:
             continue
-        for k in range(imd_lon.size):
-            if lon_idx[k] >= 0 and valid_native[i, k]:
-                mask[lat_idx[i], lon_idx[k]] = True
+        for k, cols in enumerate(lon_cols):
+            if cols.size and valid_native[i, k]:
+                mask[np.ix_(rows, cols)] = True
     if not mask.any():
         raise ValueError("IMD validity mask is empty")
     return torch.from_numpy(mask)

@@ -224,3 +224,26 @@ def test_region_weights_extra_mask_and_loss(tmp_path):
     pred[0, la[20.0], lo[70.0]] = 2.0  # on an IMD point
     out = loss(pred, target, target)
     assert out.item() > 0
+
+
+def test_imd_valid_mask_half_offset_longitudes(tmp_path):
+    """Real IMD lons sit at half-degrees vs integer global lons: each valid
+    cell marks the overlapping neighbor columns instead of failing."""
+    from losses import imd_valid_mask
+
+    glat = np.linspace(39.5, 5.5, 35)  # half-degree centers like IMERG
+    glon = np.arange(60.0, 105.0, 1.0)  # INTEGER centers like IMERG
+    imd_lat = [25.5, 24.5]
+    imd_lon = [70.5, 71.5]  # half-offset from glon
+    valid = np.array([[True, False], [False, True]])
+    store = _write_imd_like_store(tmp_path / "imd3.zarr", imd_lat, imd_lon, valid)
+    mask = imd_valid_mask(str(store), glat, glon)
+    la = {v: i for i, v in enumerate(glat)}
+    lo = {v: i for i, v in enumerate(glon)}
+    # (25.5, 70.5) valid -> columns 70 AND 71 marked on the 25.5 row.
+    assert mask[la[25.5], lo[70.0]] and mask[la[25.5], lo[71.0]]
+    assert not mask[la[25.5], lo[72.0]]
+    # (24.5, 71.5) valid -> columns 71 and 72.
+    assert mask[la[24.5], lo[71.0]] and mask[la[24.5], lo[72.0]]
+    assert not mask[la[24.5], lo[70.0]]
+    assert int(mask.sum()) == 4

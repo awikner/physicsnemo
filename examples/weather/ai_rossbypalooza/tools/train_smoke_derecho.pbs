@@ -33,4 +33,4 @@ python /glade/work/awikner/physicsnemo/examples/weather/ai_rossbypalooza/train.p
     validation.every_n_epochs=2 \
     checkpoint_save_interval=2 \
     wandb.enabled=false
-echo "[$(date)] smoke training exit code $?"
+rc=$?; echo "[$(date)] smoke training exit code $rc"; exit $rc
