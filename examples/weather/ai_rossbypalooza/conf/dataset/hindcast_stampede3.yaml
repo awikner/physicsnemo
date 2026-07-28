@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hindcast mixture dataset — Stampede3 paths (tar-replicated 2026-07-28 from
+# the Derecho masters). Identical to hindcast_derecho.yaml otherwise; select
+# with `dataset=hindcast_stampede3`.
+
+master_channels:
+  - geopotential/500
+  - geopotential/850
+  - specific_humidity/850
+  - u_component_of_wind/850
+  - v_component_of_wind/850
+  - u_component_of_wind/250
+  - mean_sea_level_pressure
+  - surface_pressure
+
+truth:
+  root: /scratch/09979/awikner/physicsnemo-zarr/imerg
+  var: total_precipitation_24hr
+
+normalization:
+  dynamical_mean: /scratch/09979/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_mean.zarr
+  dynamical_std: /scratch/09979/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_std.zarr
+  precip_stats: /scratch/09979/awikner/physicsnemo-zarr/normalization/imerg_precip_stats_log.zarr
+
+experts:
+  - name: pangu_s2s
+    schema: harmonized
+    root: /scratch/09979/awikner/hindcasts_mowe/pangu_s2s
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+  - name: sfno_era5
+    schema: harmonized
+    root: /scratch/09979/awikner/hindcasts_mowe/sfno_era5
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+  - name: graphcast
+    schema: harmonized
+    root: /scratch/09979/awikner/hindcasts_mowe/graphcast
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+  - name: aifs_single_v2
+    schema: harmonized
+    root: /scratch/09979/awikner/hindcasts_mowe/aifs_single_v2
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+
+# Model v1 split: train on ALL available inits 2000-2019 (year-round);
+# validate 2020 onward, JJAS inits only.
+train:
+  years: [2000, 2019]
+  init_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  lead_days: [8, 14]
+  min_experts: 1
+
+val:
+  years: [2020, 2024]
+  init_months: [6, 7, 8, 9]
+  lead_days: [8, 14]
+  min_experts: 1
+
+loader:
+  batch_size: 4            # per GPU
+  num_workers: 8
+  prefetch_factor: 2
+  persistent_workers: true
+  pin_memory: true
+  shuffle: true
+  num_samples_per_epoch: null
+  zarr_concurrency: 6
+  nan_expert_threshold: 0.5
