@@ -1,0 +1,36 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Derecho FULL MoWE Method-0 training: 4x A100 (one node), model v1
+# (log-precip space, train 2000-2019 all months, val 2020+ JJAS).
+#   qsub train_mowe_derecho.pbs
+# Variants:
+#   qsub -v EXTRA="loss=regional_log_mse run_name=mowe_v1_logmse" ...
+#   qsub -v EXTRA="training=all_experts run_name=mowe_v1_allexp" ...
+# Resume: re-qsub with the same run_name — checkpoints live in
+# $RUNDIR/outputs/<run_name>/checkpoints and are picked up automatically.
+#PBS -A UCHI0018
+#PBS -q main
+#PBS -l select=1:ncpus=64:ngpus=4
+#PBS -l walltime=12:00:00
+#PBS -N mowe_train_v1
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/mowe_runs/train_v1.log
+
+set -uo pipefail
+module load ncarenv cuda python 2>/dev/null || module load cuda
+cd /glade/work/awikner/physicsnemo
+source .venv/bin/activate
+
+RUNDIR=/glade/derecho/scratch/awikner/mowe_runs
+mkdir -p "$RUNDIR"
+cd "$RUNDIR"
+
+torchrun --standalone --nproc-per-node=4 \
+    /glade/work/awikner/physicsnemo/examples/weather/ai_rossbypalooza/train.py \
+    run_name="${RUN_NAME:-mowe_v1}" \
+    dataset.loader.num_workers=8 \
+    wandb.enabled="${WANDB:-false}" \
+    ${EXTRA:-}
+echo "[$(date)] training exit code $?"

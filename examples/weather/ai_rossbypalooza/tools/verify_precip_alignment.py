@@ -104,6 +104,9 @@ def main(argv=None) -> int:
     p.add_argument("--taus", type=int, nargs="+", default=[8, 11, 14])
     p.add_argument("--n-inits", type=int, default=6)
     p.add_argument("--offsets", type=int, nargs="+", default=[-1, 0, 1])
+    p.add_argument("--months", type=int, nargs="+", default=[6, 7, 8, 9],
+                   help="init months to sample (default JJAS — the monsoon "
+                        "box has little precip variance off-season)")
     args = p.parse_args(argv)
 
     cfg = yaml.safe_load(args.dataset_yaml.read_text())
@@ -140,12 +143,15 @@ def main(argv=None) -> int:
             idx = build_sample_index(
                 [adapter], truth,
                 years=tuple(train_block["years"]),
-                init_months=list(train_block["init_months"]),
+                init_months=list(args.months),
                 lead_days=(min(args.taus), max(args.taus)),
             )
-            rows = [r for r in idx.pairs if int(r["tau"]) in set(args.taus)]
-            step = max(1, len(rows) // (args.n_inits * len(args.taus)))
-            rows = rows[::step][: args.n_inits * len(args.taus)]
+            # Sample PER TAU (a single strided slice can alias onto one tau).
+            rows = []
+            for t in args.taus:
+                t_rows = [r for r in idx.pairs if int(r["tau"]) == t]
+                step = max(1, len(t_rows) // args.n_inits)
+                rows.extend(t_rows[::step][: args.n_inits])
             corrs, ratios = {t: [] for t in args.taus}, {t: [] for t in args.taus}
             roots = {name: e["root"]}
             for r in rows:

@@ -1,0 +1,35 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Derecho 1-GPU MoWE training SMOKE test: 2 short epochs + one validation
+# pass (regional RMSE/bias/SEEPS vs expert baselines) on the harmonized
+# stores, checkpointing to scratch. Precursor to the full multi-GPU run.
+#   qsub train_smoke_derecho.pbs
+#PBS -A UCHI0018
+#PBS -q main
+#PBS -l select=1:ncpus=64:ngpus=1
+#PBS -l walltime=02:00:00
+#PBS -N mowe_train_smoke
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/mowe_runs/smoke.log
+
+set -uo pipefail
+module load ncarenv cuda python 2>/dev/null || module load cuda
+cd /glade/work/awikner/physicsnemo
+source .venv/bin/activate
+
+RUNDIR=/glade/derecho/scratch/awikner/mowe_runs
+mkdir -p "$RUNDIR"
+cd "$RUNDIR"
+
+python /glade/work/awikner/physicsnemo/examples/weather/ai_rossbypalooza/train.py \
+    run_name=mowe_smoke \
+    training.max_epochs=2 \
+    'dataset.loader.num_samples_per_epoch=512' \
+    dataset.loader.num_workers=8 \
+    'dataset.val.years=[2020,2020]' \
+    validation.every_n_epochs=2 \
+    checkpoint_save_interval=2 \
+    wandb.enabled=false
+echo "[$(date)] smoke training exit code $?"

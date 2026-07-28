@@ -63,21 +63,41 @@ daily accumulation in m — verified empirically 2026-07-28, see the plan).
 | IMERG daily precip (mm/day, 1°, 2000-06→2025-04) | `physicsnemo-zarr/imerg/{YYYY}.zarr` | `tools/data/precip/h5_to_zarr.py` |
 | IMD gauge analysis (land, native 33×35 grid; not used by the loader yet) | `physicsnemo-zarr/imd/{YYYY}.zarr` | same |
 | ERA5 normalization (mean/std, 18 plev) | `physicsnemo-zarr/era5/normalization_pangu_s2s_{mean,std}.zarr` | `tools/data/era5/build_normalization_zarr.py` |
-| IMERG precip norm stats — mean 2.154, std 6.958 mm/day (2001–2018) | `physicsnemo-zarr/normalization/imerg_precip_stats.zarr` | `tools/compute_precip_norm.py` (done 2026-07-28) |
-| SEEPS climatology (p1, t2 per month × gridpoint, 2001–2018) | `physicsnemo-zarr/normalization/imerg_seeps_climatology.zarr` | `tools/compute_seeps_climatology.py` (done 2026-07-28) |
+| **Model v1** IMERG precip norm stats in log space — mean −6.379, std 0.858 in `log(1e-3 + P[m/24h])` (2000–2019) | `physicsnemo-zarr/normalization/imerg_precip_stats_log.zarr` | `tools/compute_precip_norm.py --log-epsilon 1e-3 --log-units m` (done 2026-07-28) |
+| Linear precip stats — mean 2.154, std 6.958 mm/day (2001–2018; superseded by the log store for v1) | `physicsnemo-zarr/normalization/imerg_precip_stats.zarr` | `tools/compute_precip_norm.py` |
+| SEEPS climatology (p1, t2 per month × gridpoint, **2000–2019**) | `physicsnemo-zarr/normalization/imerg_seeps_climatology.zarr` | `tools/compute_seeps_climatology.py` (recomputed 2026-07-28) |
 
 Units note: harmonized expert precip is in **m per 24 h** (ERA5 units); the
 IMERG truth is **mm/day**. The loader's `PrecipSpec(units="m")` bridges them
 (everything is mm/day inside the model/metrics).
 
-## Day-alignment convention
+## Day-alignment convention — VERIFIED 2026-07-28
 
 A sample at (init, τ) pairs each expert's daily precip for
 `[init+(τ−1)·24h, init+τ·24h)` with the IMERG record stamped
 `date(init) + (τ−1)` days (records stamped 00Z on day X cover `[X, X+1)`;
-inits are 00Z). The per-expert `day_offset` knob in
-`conf/dataset/hindcast_derecho.yaml` is pinned by
-`tools/verify_precip_alignment.py` (run against the harmonized stores).
+inits are 00Z). `tools/verify_precip_alignment.py` results:
+
+| expert | day_offset | evidence |
+|---|---|---|
+| pangu_s2s | **0 (confirmed)** | decisive at short leads: corr 0.61/0.59/0.48 at τ=2/3/4 for offset 0 vs ≤0.37 for ±1 |
+| sfno_era5 | 0 (undeterminable — see flag below) | corr ≈ 0 at ALL leads/offsets |
+| graphcast | 0 (by construction) | week-2 signal too weak to discriminate (Δcorr ≤ 0.01); shares the converter convention pangu verified |
+| aifs_single_v2 | 0 (by construction) | same (stores only have leads ≥ 7, where skill ≈ 0) |
+
+### Data-quality flags (for the model-evaluation team)
+
+1. **sfno_era5 precipitation looks broken/unskilled**: pattern correlation
+   with IMERG ≈ 0 even at 2-day lead, 5–6× wet bias in the monsoon box, and
+   ~0 spatial correlation with pangu's precip globally/tropics at the same
+   (init, lead). The dynamical fields are unaffected. Keep as an expert
+   (the gate + per-expert bias can suppress it) but treat its precip as
+   near-noise; worth checking the v3 checkpoint's precip diagnostic head.
+2. **Monsoon-box wet bias at week-2**: graphcast/aifs/sfno all run ~4× wet
+   vs IMERG (JJAS box mean); pangu ~1.3×. Exactly the shared bias the
+   per-expert bias fields target, but relevant for baseline comparisons.
+3. pangu's `mean_top_net_long_wave_radiation_flux` clamps at exactly 0 at
+   its upper tail (sfno's does not).
 
 ## Setup order (one-time, on Derecho)
 
