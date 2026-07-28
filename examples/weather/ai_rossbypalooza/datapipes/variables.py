@@ -39,15 +39,24 @@ from typing import Optional, Sequence
 
 # --------------------------------------------------------------------------- #
 # Alias tables: canonical ERA5 name -> accepted aliases (matched lowercase).
-# Copied from tools/data/hindcast/consolidate_hindcasts.py (examples/ must not
-# import tools/); keep the two in sync when adding aliases.
+# Base set copied from tools/data/hindcast/consolidate_hindcasts.py (examples/
+# must not import tools/), extended with the short names found in the DSI
+# archives (2d, tcw, stl1/2, swvl1/2, sst, skt).
 # --------------------------------------------------------------------------- #
 SURFACE_ALIASES: dict[str, list[str]] = {
     "2m_temperature": ["2m_temperature", "t2m", "2t", "tas", "temperature_2m", "air_temperature_2m"],
+    "2m_dewpoint_temperature": ["2m_dewpoint_temperature", "d2m", "2d", "dewpoint_2m"],
     "10m_u_component_of_wind": ["10m_u_component_of_wind", "u10", "10u", "uas", "10m_u_wind"],
     "10m_v_component_of_wind": ["10m_v_component_of_wind", "v10", "10v", "vas", "10m_v_wind"],
     "mean_sea_level_pressure": ["mean_sea_level_pressure", "msl", "mslp", "air_pressure_at_mean_sea_level"],
     "surface_pressure": ["surface_pressure", "sp", "ps", "surface_air_pressure", "pres"],
+    "sea_surface_temperature": ["sea_surface_temperature", "sst"],
+    "skin_temperature": ["skin_temperature", "skt"],
+    "soil_temperature_level_1": ["soil_temperature_level_1", "stl1"],
+    "soil_temperature_level_2": ["soil_temperature_level_2", "stl2"],
+    "volumetric_soil_water_layer_1": ["volumetric_soil_water_layer_1", "swvl1"],
+    "volumetric_soil_water_layer_2": ["volumetric_soil_water_layer_2", "swvl2"],
+    "total_column_water": ["total_column_water", "tcw"],
 }
 DIAGNOSTIC_ALIASES: dict[str, list[str]] = {
     "total_precipitation_24hr": [
@@ -134,6 +143,41 @@ def levels_match(a: float, b: float) -> bool:
     """By-value level comparison with the ClimateNormalizer tolerance rule."""
     tol = max(LEVEL_TOL, LEVEL_TOL * abs(b))
     return math.isclose(a, b, rel_tol=0.0, abs_tol=tol)
+
+
+def harmonized_name(canonical: str, level_hpa: Optional[float] = None) -> str:
+    """The harmonized-store naming convention: ERA5 long name, integer-style
+    ``_{level:g}`` suffix for pressure-level variables (``geopotential_500``)."""
+    if level_hpa is None:
+        return canonical
+    return f"{canonical}_{level_hpa:g}"
+
+
+#: ERA5 reference units for the harmonized stores (written as per-variable
+#: ``units`` attrs). Keyed by the level-free canonical name. Accumulated /
+#: mean-rate variables always refer to the PRECEDING 24 hours.
+CANONICAL_UNITS: dict[str, str] = {
+    "2m_temperature": "K",
+    "2m_dewpoint_temperature": "K",
+    "sea_surface_temperature": "K",
+    "skin_temperature": "K",
+    "soil_temperature_level_1": "K",
+    "soil_temperature_level_2": "K",
+    "temperature": "K",
+    "10m_u_component_of_wind": "m s**-1",
+    "10m_v_component_of_wind": "m s**-1",
+    "u_component_of_wind": "m s**-1",
+    "v_component_of_wind": "m s**-1",
+    "geopotential": "m**2 s**-2",
+    "specific_humidity": "kg kg**-1",
+    "mean_sea_level_pressure": "Pa",
+    "surface_pressure": "Pa",
+    "volumetric_soil_water_layer_1": "m**3 m**-3",
+    "volumetric_soil_water_layer_2": "m**3 m**-3",
+    "total_column_water": "kg m**-2",
+    "total_precipitation_24hr": "m",  # accumulated over the preceding 24 h
+    "mean_top_net_long_wave_radiation_flux": "W m**-2",  # 24 h mean
+}
 
 
 @dataclass(frozen=True)

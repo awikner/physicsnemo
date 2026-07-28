@@ -461,6 +461,99 @@ class SchemaBAdapter(ExpertAdapter):
         return block
 
 
+class HarmonizedAdapter(ExpertAdapter):
+    """Unified ``hindcasts_mowe`` stores (tools/harmonize_hindcasts.py).
+
+    ``(init_time, lead_time, lat, lon)`` with ``lead_time`` in whole days as
+    coordinate *values* (0 = IC where present), every variable a flat 2-D
+    field under the canonical ERA5 long name (``geopotential_500``),
+    accumulated/mean variables referring to the preceding 24 h in ERA5
+    units (tp in m). The one adapter every configured expert should use once
+    its harmonized stores exist.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._lead_index: dict[int, int] = {}
+        self._signature: tuple | None = None
+
+    def _grid_error(self, store: Path, ds) -> str:
+        return (
+            f"expert '{self.name}': {store} grid "
+            f"({ds.sizes['lat']}x{ds.sizes['lon']}) does not match the "
+            f"target grid — regenerate with tools/harmonize_hindcasts.py"
+        )
+
+    def _discover_store(self, year: int, ds) -> None:
+        variables = sorted(str(v) for v in ds.data_vars)
+        leads = [int(v) for v in ds["lead_time"].values]
+        sig = (tuple(variables), tuple(leads))
+        if self._signature is None:
+            self._signature = sig
+            self._lead_index = {d: i for i, d in enumerate(leads)}
+            self._resolve_channels(variables)
+        elif sig != self._signature:
+            raise ValueError(
+                f"expert '{self.name}': {year}.zarr variables or lead axis "
+                f"differ from the first year's — harmonized archives must be "
+                f"homogeneous across years"
+            )
+
+    def _resolve_channels(self, variables: list[str]) -> None:
+        if self.precip.var not in variables:
+            raise ValueError(
+                f"expert '{self.name}': precip var '{self.precip.var}' not "
+                f"among the store variables {variables}"
+            )
+        if self.precip.axis != "daily":
+            raise ValueError(
+                f"expert '{self.name}': harmonized stores are daily; precip "
+                f"axis must be 'daily'"
+            )
+        for v in variables:
+            if v == self.precip.var or v.lower() in self.exclude_variables:
+                continue
+            parsed = parse_flat_name(v)
+            if parsed is None:
+                logger.debug("%s: unmapped variable '%s'", self.name, v)
+                continue
+            idx = self.layout.index_of(*parsed)
+            if idx is not None:
+                self._dyn_channels[v] = idx
+
+    def _validate_discovery(self) -> None:
+        pass
+
+    def lead_supported(self, tau_days: int) -> bool:
+        self._require_discovered()
+        needed = [*self.precip.lead_values(tau_days), tau_days]
+        # Lead 0 is the IC (where present), never a forecast.
+        return all(d >= 1 and d in self._lead_index for d in needed)
+
+    def plan(self, year: int, init_idx: int, tau_days: int) -> list[ReadRequest]:
+        leads = [self._lead_index[d] for d in self.precip.lead_values(tau_days)]
+        reqs = [
+            ReadRequest(
+                (self.name, year, self.precip.var),
+                (init_idx, leads if len(leads) > 1 else leads[0]),
+            )
+        ]
+        t_idx = self._lead_index[tau_days]
+        for v in self._dyn_channels:
+            reqs.append(ReadRequest((self.name, year, v), (init_idx, t_idx)))
+        return reqs
+
+    def assemble(self, arrays: list[np.ndarray], tau_days: int) -> np.ndarray:
+        precip_slabs = np.asarray(arrays[0], dtype=np.float32)
+        if precip_slabs.ndim == 2:
+            precip_slabs = precip_slabs[np.newaxis]
+        block = self._empty_block(precip_slabs.shape[-2:])
+        block[0] = self.precip.to_mm_per_day(precip_slabs)
+        for slab, idx in zip(arrays[1:], self._dyn_channels.values()):
+            block[idx] = slab
+        return block
+
+
 def build_adapter(
     name: str,
     schema: str,
@@ -470,14 +563,21 @@ def build_adapter(
     *,
     exclude_variables: Sequence[str] = (),
 ) -> ExpertAdapter:
-    """Config-string factory: ``schema`` is ``"dsi"`` or ``"consolidated"``."""
-    if schema == "dsi":
-        cls = SchemaAAdapter
-    elif schema == "consolidated":
-        cls = SchemaBAdapter
-    else:
+    """Config-string factory: ``schema`` in {"harmonized", "dsi", "consolidated"}.
+
+    "harmonized" is the normal training path; the raw-archive adapters remain
+    for tooling that reads the originals (e.g. verify_precip_alignment).
+    """
+    classes = {
+        "harmonized": HarmonizedAdapter,
+        "dsi": SchemaAAdapter,
+        "consolidated": SchemaBAdapter,
+    }
+    if schema not in classes:
         raise ValueError(
             f"expert '{name}': unknown schema '{schema}' "
-            f"(expected 'dsi' or 'consolidated')"
+            f"(expected one of {sorted(classes)})"
         )
-    return cls(name, root, layout, precip, exclude_variables=exclude_variables)
+    return classes[schema](
+        name, root, layout, precip, exclude_variables=exclude_variables
+    )

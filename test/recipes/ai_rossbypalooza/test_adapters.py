@@ -19,11 +19,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
-import zarr
 
 from datapipes.adapters import SchemaAAdapter, SchemaBAdapter, build_adapter
 from datapipes.precip import PrecipSpec
@@ -33,27 +30,11 @@ from datapipes.testing import (
     GRID_LAT,
     GRID_LON,
     coded_value,
+    resolve,
     write_schema_a_store,
     write_schema_b_store,
 )
 from datapipes.variables import ChannelLayout
-
-
-def resolve(reqs, roots: dict[str, Path]) -> list[np.ndarray]:
-    """Resolve ReadRequests against stores on disk (sync zarr)."""
-    out = []
-    for r in reqs:
-        owner, year, var = r.array_key
-        grp = zarr.open_group(str(Path(roots[owner]) / f"{year}.zarr"), mode="r")
-        arr = grp[var]
-        sel = tuple(
-            np.asarray(i) if isinstance(i, list) else i for i in r.index
-        )
-        if any(isinstance(i, np.ndarray) for i in sel):
-            out.append(arr.oindex[sel])
-        else:
-            out.append(arr[sel])
-    return out
 
 
 VAR_CODES_A = {"2t": 0, "z_500": 1, "tp": 2, "swvl1": 3}

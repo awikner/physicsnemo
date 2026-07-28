@@ -48,8 +48,12 @@ from datapipes.variables import (
         ("T_850", ("temperature", 850.0)),  # case-insensitive
         ("geopotential", ("geopotential", None)),  # 3-D name, level from coord
         ("z_50000", ("geopotential", 500.0)),  # Pa level auto-converted
-        ("swvl1", None),  # soil water: unknown, ignored
-        ("stl1", None),
+        ("swvl1", ("volumetric_soil_water_layer_1", None)),
+        ("stl1", ("soil_temperature_level_1", None)),
+        ("soil_temperature_level_1", ("soil_temperature_level_1", None)),
+        ("u_component_of_wind_250", ("u_component_of_wind", 250.0)),
+        ("2d", ("2m_dewpoint_temperature", None)),
+        ("tcw", ("total_column_water", None)),
         ("unknown_var", None),
         ("z_abc", None),  # non-numeric suffix, not upper-air
     ],

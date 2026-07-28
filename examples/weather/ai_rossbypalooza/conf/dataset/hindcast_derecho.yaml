@@ -4,21 +4,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Hindcast mixture dataset — Derecho paths (Derecho copies ONLY; nothing
-# reads from the DSI cluster). DSI-schema experts point at the 1-degree
-# stores produced by tools/regrid_dsi_to_1deg.py.
-#
-# !!! Every expert's `precip:` spec (axis / kind / units / day_offset) below
-# is a PLACEHOLDER until pinned by tools/verify_precip_alignment.py — run it
-# once on Derecho and record the verified values here and in DATA.md.
+# reads from the DSI cluster). All experts read the unified harmonized
+# stores under hindcasts_mowe/ produced by tools/harmonize_hindcasts.py
+# (canonical flat names, lead_time in whole days, tp = trailing-24h
+# accumulation in m — ERA5 units), so the precip axis/kind/units below are
+# known by construction. `day_offset` (which IMERG day a given lead pairs
+# with) is still empirically pinned by tools/verify_precip_alignment.py.
 
 master_channels:
   - geopotential/500
   - temperature/850
-  - specific_humidity/700
+  - specific_humidity/850
   - u_component_of_wind/850
   - v_component_of_wind/850
   - 2m_temperature
   - mean_sea_level_pressure
+  - surface_pressure
 
 truth:
   root: /glade/derecho/scratch/awikner/physicsnemo-zarr/imerg
@@ -32,37 +33,21 @@ normalization:
 
 experts:
   - name: pangu_s2s
-    schema: consolidated
-    root: /glade/derecho/scratch/awikner/physicsnemo-zarr/hindcasts/pangu_s2s
-    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: mm, day_offset: 0}
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/pangu_s2s
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
   - name: sfno_era5
-    schema: consolidated
-    root: /glade/derecho/scratch/awikner/physicsnemo-zarr/hindcasts/sfno_era5
-    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: mm, day_offset: 0}
-  - name: graphcast_e2s
-    schema: dsi
-    root: /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr/graphcast_e2s
-    precip: {var: tp, axis: daily, kind: accum, units: m, day_offset: 0}
-  - name: aurora_e2s
-    schema: dsi
-    root: /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr/aurora_e2s
-    precip: {var: tp, axis: daily, kind: accum, units: m, day_offset: 0}
-  - name: aifs_single_v1
-    schema: dsi
-    root: /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr/aifs_single_v1
-    precip: {var: tp, axis: daily, kind: accum, units: m, day_offset: 0}
-  - name: aifs_single_v1p1
-    schema: dsi
-    root: /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr/aifs_single_v1p1
-    precip: {var: tp, axis: daily, kind: accum, units: m, day_offset: 0}
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/sfno_era5
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+  - name: graphcast
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/graphcast
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
   - name: aifs_single_v2
-    schema: dsi
-    root: /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr/aifs_single_v2
-    precip: {var: tp, axis: daily, kind: accum, units: m, day_offset: 0}
-  - name: graphcast_wb2
-    schema: dsi
-    root: /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr/graphcast_wb2
-    precip: {var: tp, axis: 6h, kind: accum, units: m, step_hours: 6, day_offset: 0}
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/aifs_single_v2
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
 
 train:
   years: [2001, 2018]

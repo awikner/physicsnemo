@@ -54,6 +54,27 @@ def coded_value(var_code: int, init_idx: int, lead: float) -> float:
     return float(var_code) * 10000.0 + float(init_idx) * 100.0 + float(lead)
 
 
+def resolve(reqs, roots) -> list[np.ndarray]:
+    """Resolve adapter ReadRequests against stores on disk (sync zarr).
+
+    Test-side stand-in for the dataset's async gather: ``roots`` maps
+    owner name -> archive root holding ``{year}.zarr``.
+    """
+    import zarr
+
+    out = []
+    for r in reqs:
+        owner, year, var = r.array_key
+        grp = zarr.open_group(str(Path(roots[owner]) / f"{year}.zarr"), mode="r")
+        arr = grp[var]
+        sel = tuple(np.asarray(i) if isinstance(i, list) else i for i in r.index)
+        if any(isinstance(i, np.ndarray) for i in sel):
+            out.append(np.asarray(arr.oindex[sel], dtype=np.float32))
+        else:
+            out.append(np.asarray(arr[sel], dtype=np.float32))
+    return out
+
+
 def _time_encoding(year: int) -> dict:
     return {
         "units": f"hours since {year}-01-01 00:00:00",

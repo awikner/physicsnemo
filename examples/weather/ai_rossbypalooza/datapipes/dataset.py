@@ -258,7 +258,12 @@ class HindcastMixtureDataset(Dataset):
             block = self.experts[ei].assemble(arrays[off : off + n], tau)
             supplied = block[self._channel_masks_np[ei]]
             finite_frac = float(np.isfinite(supplied).mean())
-            if finite_frac < self.nan_expert_threshold:
+            # An expert whose PRECIP channel is entirely non-finite is
+            # useless in the mixture regardless of its other channels
+            # (e.g. merged-graphcast inits whose wb2-sourced precip lacks
+            # the full 24h window at the shortest lead).
+            precip_dead = not np.isfinite(block[0]).any()
+            if finite_frac < self.nan_expert_threshold or precip_dead:
                 live[ei] = False
                 self._nan_demotions += 1
                 if self._nan_demotions <= 20 or self._nan_demotions % 100 == 0:
