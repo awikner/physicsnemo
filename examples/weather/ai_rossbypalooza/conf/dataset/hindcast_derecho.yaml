@@ -51,7 +51,9 @@ experts:
   - name: sfno_era5
     schema: harmonized
     root: /glade/derecho/scratch/awikner/hindcasts_mowe/sfno_era5
-    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+    # day_offset 1: sfno's precip head is forward-looking (verified
+    # empirically 2026-07-28 post lat-fix: corr 0.52 vs 0.43 at tau=2).
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 1}
   - name: graphcast
     schema: harmonized
     root: /glade/derecho/scratch/awikner/hindcasts_mowe/graphcast
