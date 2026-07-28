@@ -11,13 +11,16 @@
 # known by construction. `day_offset` (which IMERG day a given lead pairs
 # with) is still empirically pinned by tools/verify_precip_alignment.py.
 
+# Gate predictor channels — drawn from the user's master variable list
+# (every harmonized store is filtered to that list; see
+# tools/mowe_subset_variables.txt).
 master_channels:
   - geopotential/500
-  - temperature/850
+  - geopotential/850
   - specific_humidity/850
   - u_component_of_wind/850
   - v_component_of_wind/850
-  - 2m_temperature
+  - u_component_of_wind/250
   - mean_sea_level_pressure
   - surface_pressure
 

@@ -28,35 +28,33 @@ under **`hindcasts_mowe/{model}/{YYYY}.zarr`**:
 Not converted (still in the raw archives only): aifs_single_v1, aifs_single_v1p1,
 aurora_e2s — descoped 2026-07-28.
 
-### Pangu/SFNO subset (`tools/mowe_subset_variables.txt`)
+### The master variable list (`tools/mowe_subset_variables.txt`)
 
+**Every harmonized store is filtered to this 21-variable list** — variables
+outside it are not converted at all:
 `mean_sea_level_pressure`, `sea_surface_temperature`,
 `soil_temperature_level_1`, `surface_pressure`,
 `volumetric_soil_water_layer_1`, `total_precipitation_24hr`,
 `mean_top_net_long_wave_radiation_flux`, `specific_humidity_{1000,925,850,700,600}`,
 `u/v_component_of_wind_{850,500,250}`, `geopotential_{850,500,250}`.
 
-### Variables per harmonized expert
+### Variables per harmonized expert (intersection with the list)
 
-- `aifs_single_v2` (24): `2m_temperature`, `2m_dewpoint_temperature`,
-  `surface_pressure`, `soil_temperature_level_{1,2}`,
-  `volumetric_soil_water_layer_{1,2}`, `total_column_water`,
-  `specific_humidity_{1000,925,850}`, `temperature_{1000,925,850}`,
-  `u/v_component_of_wind_{50,200,850}`, `geopotential_{200,500,850}`,
+- `aifs_single_v2` (11): `surface_pressure`, `soil_temperature_level_1`,
+  `volumetric_soil_water_layer_1`, `specific_humidity_{1000,925,850}`,
+  `u/v_component_of_wind_850`, `geopotential_{500,850}`,
   `total_precipitation_24hr`.
-- `graphcast` (20): `2m_temperature`, `mean_sea_level_pressure`,
-  `specific_humidity_{1000,925,850}`, `temperature_{1000,925,850}`,
-  `u/v_component_of_wind_{50,200,850}`, `geopotential_{200,500,850}`,
-  `u_component_of_wind_250` + `geopotential_50` (wb2-only),
-  `total_precipitation_24hr`.
-- `pangu_s2s` / `sfno_era5` (21): the subset above. (No 2 m temperature or
-  upper-air temperature — excluded by the subset spec.)
+- `graphcast` (10): `mean_sea_level_pressure`,
+  `specific_humidity_{1000,925,850}`, `u/v_component_of_wind_850`,
+  `geopotential_{500,850}`, `u_component_of_wind_250` (wb2-only; NaN on
+  e2s-only inits), `total_precipitation_24hr`.
+- `pangu_s2s` / `sfno_era5` (21): the full list.
 
 Conversion provenance: the only value-changing transforms were
 `graphcast_wb2 total_precipitation_6hr` → trailing-24h sum, the 0.25°→1°
 conservative regrid of the two DSI models, and NaN-ing lead-0 diagnostics;
-everything else was rename/reshape (all archives already carried tp as daily
-accumulation in m — verified empirically 2026-07-28, see the plan).
+everything else was rename/reshape/drop (all archives already carried tp as
+daily accumulation in m — verified empirically 2026-07-28, see the plan).
 
 ## Truth and derived stores
 

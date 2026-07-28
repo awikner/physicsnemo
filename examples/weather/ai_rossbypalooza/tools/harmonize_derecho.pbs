@@ -37,6 +37,8 @@ mkdir -p "$OUT"
 echo "[$(date)] harmonize start task=$TASK years=$YEARS NP=$NP depth=$DEPTH host=$(hostname)"
 
 SRC2=""
+# Every task is filtered to the user's master variable list — models keep
+# only the intersection of their variables with mowe_subset_variables.txt.
 case "$TASK" in
   graphcast)
     ARGS=(--source dsi --model graphcast
@@ -47,11 +49,11 @@ case "$TASK" in
     ARGS=(--source dsi --model aifs_single_v2 --src-root "$DSI/aifs_single_v2")
     SRC1="$DSI/aifs_single_v2" ;;
   pangu_s2s|sfno_era5)
-    ARGS=(--source consolidated --model "$TASK" --src-root "$CONS/$TASK"
-          --variables-file "$TOOLS/mowe_subset_variables.txt")
+    ARGS=(--source consolidated --model "$TASK" --src-root "$CONS/$TASK")
     SRC1="$CONS/$TASK" ;;
   *) echo "unknown TASK=$TASK"; exit 2 ;;
 esac
+ARGS+=(--variables-file "$TOOLS/mowe_subset_variables.txt")
 
 python "$TOOLS/harmonize_hindcasts.py" "${ARGS[@]}" \
     --years "$YEARS" --out-root "$OUT" --ref-store "$REF" \

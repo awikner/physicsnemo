@@ -224,6 +224,33 @@ def test_consolidated_subset_flatten(tmp_path, ref_store):
     assert rc == 1
 
 
+def test_dsi_variable_list_filter(tmp_path, ref_store, dsi_pair):
+    """--variables in dsi mode drops everything outside the master list."""
+    e2s, wb2 = dsi_pair
+    out_root = tmp_path / "mowe_filtered"
+    rc = harmonize_main([
+        "--source", "dsi", "--model", "graphcast",
+        "--src-root", str(e2s), "--src-root", str(wb2),
+        "--src-label", "e2s", "--src-label", "wb2",
+        "--variables", "total_precipitation_24hr", "geopotential_500",
+        "u_component_of_wind_250", "sea_surface_temperature",  # sst absent
+        "--out-root", str(out_root), "--ref-store", str(ref_store),
+        "--n-workers", "1", "--commit", "test",
+    ])
+    assert rc == 0
+    ds = xr.open_zarr(
+        out_root / "graphcast" / "2001.zarr", consolidated=True,
+        decode_timedelta=False,
+    )
+    # Intersection only: 2m_temperature / q_850 dropped; absent sst simply
+    # missing (available per-model coverage varies).
+    assert sorted(ds.data_vars) == [
+        "geopotential_500",
+        "total_precipitation_24hr",
+        "u_component_of_wind_250",
+    ]
+
+
 def test_sentinel_skip(tmp_path, ref_store, dsi_pair):
     e2s, wb2 = dsi_pair
     out_root = _run_dsi(tmp_path, ref_store, e2s, wb2)

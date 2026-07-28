@@ -148,9 +148,13 @@ def _open(store: Path) -> xr.Dataset:
 # DSI source: per-store variable plans
 # --------------------------------------------------------------------------- #
 class DsiSource:
-    """One DSI yearly store: name mapping + per-(var, day) read/assemble."""
+    """One DSI yearly store: name mapping + per-(var, day) read/assemble.
 
-    def __init__(self, label: str, store: Path) -> None:
+    ``keep`` restricts the harmonized output to that set of names (the
+    user's master variable list); None keeps everything mappable.
+    """
+
+    def __init__(self, label: str, store: Path, keep: set[str] | None = None) -> None:
         self.label = label
         self.store = store
         self.ds = _open(store)
@@ -181,6 +185,14 @@ class DsiSource:
                     logger.info("%s: unmapped variable '%s' skipped", store, native)
                     continue
                 out = harmonized_name(*parsed)
+            if keep is not None and out not in keep:
+                logger.debug(
+                    "%s: '%s' -> '%s' not in the variable list, dropped",
+                    store,
+                    native,
+                    out,
+                )
+                continue
             if out in self.mapping:
                 logger.warning(
                     "%s: '%s' duplicates harmonized '%s'", store, native, out
@@ -233,9 +245,10 @@ def harmonize_dsi_year(
     model: str,
     commit: str,
     overwrite: bool,
+    keep: set[str] | None = None,
 ) -> dict:
     _register_codecs()
-    sources = [DsiSource(label, p) for label, p in src_stores]
+    sources = [DsiSource(label, p, keep=keep) for label, p in src_stores]
     try:
         # Union of harmonized variables; the first source listing a variable
         # defines it (values still come from the highest-priority source
@@ -246,6 +259,10 @@ def harmonize_dsi_year(
                 if v not in variables:
                     variables.append(v)
         variables.sort()
+        if not variables:
+            raise ValueError(
+                f"{dst_store}: no source variable survives the variable list"
+            )
         days = sorted({d for s in sources for d in s.lead_days()})
         # Union of inits; primary source per init = first source having it.
         init_keys = sorted({k for s in sources for k in s.inits})
@@ -551,6 +568,7 @@ def _worker(job: dict) -> dict:
                 model=job["model"],
                 commit=job["commit"],
                 overwrite=job["overwrite"],
+                keep=set(job["variables"]) if job["variables"] else None,
             )
         else:
             summary = harmonize_consolidated_year(
@@ -584,9 +602,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="label per --src-root for the init_source coord "
                         "(default: root basename)")
     p.add_argument("--variables", nargs="+", default=None,
-                   help="consolidated mode: harmonized variable names to keep")
+                   help="harmonized variable names to keep (required for "
+                        "consolidated; optional filter for dsi)")
     p.add_argument("--variables-file", type=Path, default=None,
-                   help="consolidated mode: file with one variable per line")
+                   help="file with one variable name per line (same role)")
     p.add_argument("--out-root", type=Path, required=True)
     p.add_argument("--ref-store", type=Path, required=True,
                    help="store providing the target lat/lon (an IMERG year)")
@@ -609,16 +628,19 @@ def main(argv: list[str] | None = None) -> int:
     dst_lon = ref["lon"].values.astype("float64")
     ref.close()
 
+    # The variable list is REQUIRED in consolidated mode (defines the
+    # subset) and optional in dsi mode (filters the harmonized union down
+    # to the master list; unmatched entries are simply absent per model).
     variables: list[str] = []
+    if args.variables_file is not None:
+        variables += [
+            ln.strip()
+            for ln in args.variables_file.read_text().splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+    if args.variables:
+        variables += list(args.variables)
     if args.source == "consolidated":
-        if args.variables_file is not None:
-            variables += [
-                ln.strip()
-                for ln in args.variables_file.read_text().splitlines()
-                if ln.strip() and not ln.strip().startswith("#")
-            ]
-        if args.variables:
-            variables += list(args.variables)
         if not variables:
             raise SystemExit("consolidated mode needs --variables[-file]")
         if len(args.src_root) != 1:
