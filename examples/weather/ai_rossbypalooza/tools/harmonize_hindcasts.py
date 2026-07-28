@@ -417,18 +417,20 @@ def harmonize_consolidated_year(
             "dtype": "int64",
         }
         dst_store.parent.mkdir(parents=True, exist_ok=True)
+        upper_natives = sorted({s[1] for s in subset.values() if s[0] == "level"})
         for i in range(len(init_dts)):
+            # One chunk decode per 3-D native variable per init; every
+            # requested level slices from the cached array.
+            upper_cache = {
+                nv: ds[nv].isel(init_time=i).values for nv in upper_natives
+            }
             step_vars = {}
             for v in out_vars:
                 spec = subset[v]
                 if spec[0] == "scalar":
                     slab = ds[spec[1]].isel(init_time=i).values
                 else:
-                    slab = (
-                        ds[spec[1]]
-                        .isel(init_time=i, pressure_level=spec[2])
-                        .values
-                    )
+                    slab = upper_cache[spec[1]][:, spec[2]]
                 slab = np.asarray(slab, dtype=np.float32)
                 if v in TRAILING_24H_VARS and days and days[0] == 0:
                     # Lead 0 is the IC: a trailing-24h forecast is undefined.
