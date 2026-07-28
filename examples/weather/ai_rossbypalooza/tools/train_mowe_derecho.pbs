@@ -4,6 +4,7 @@
 #
 # Derecho FULL MoWE Method-0 training: 4x A100 (one node), model v1
 # (log-precip space, train 2000-2019 all months, val 2020+ JJAS).
+#   mkdir -p /glade/derecho/scratch/awikner/mowe_runs   # PBS -o needs the dir
 #   qsub train_mowe_derecho.pbs
 # Variants:
 #   qsub -v EXTRA="loss=regional_log_mse run_name=mowe_v1_logmse" ...
