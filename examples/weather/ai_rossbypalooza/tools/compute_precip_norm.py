@@ -43,6 +43,10 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+_RECIPE_DIR = Path(__file__).resolve().parents[1]
+if str(_RECIPE_DIR) not in sys.path:
+    sys.path.insert(0, str(_RECIPE_DIR))
+
 logger = logging.getLogger("compute_precip_norm")
 
 SCRIPT_REL_PATH = "examples/weather/ai_rossbypalooza/tools/compute_precip_norm.py"
@@ -66,8 +70,20 @@ def compute_stats(
     *,
     var: str = "total_precipitation_24hr",
     months: list[int] | None = None,
+    log_epsilon: float | None = None,
+    log_units: str = "m",
 ) -> tuple[float, float, int]:
-    """Streaming (count, sum, sumsq) over the yearly stores; finite cells only."""
+    """Streaming (count, sum, sumsq) over the yearly stores; finite cells only.
+
+    With ``log_epsilon`` set, statistics are computed in the model-v1
+    transformed space ``log(epsilon + P[log_units])`` (IMERG values are
+    mm/day; ``log_units="m"`` divides by 1000 first).
+    """
+    transform = None
+    if log_epsilon is not None:
+        from datapipes.precip import LogPrecipTransform
+
+        transform = LogPrecipTransform(epsilon=log_epsilon, units=log_units)
     count = 0
     total = 0.0
     total_sq = 0.0
@@ -86,6 +102,8 @@ def compute_stats(
             ds.close()
         finite = np.isfinite(vals)
         v = vals[finite].astype(np.float64)
+        if transform is not None:
+            v = transform.forward(np.clip(v, 0.0, None))
         count += v.size
         total += float(v.sum())
         total_sq += float((v**2).sum())
@@ -104,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--months", default=None,
                    help="optional month filter, e.g. 5,6,7,8,9 (default: all)")
     p.add_argument("--var", default="total_precipitation_24hr")
+    p.add_argument("--log-epsilon", type=float, default=None,
+                   help="model v1: compute stats in log(epsilon + P) space")
+    p.add_argument("--log-units", default="m", choices=("m", "mm"),
+                   help="units the log offset applies in (default m)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--commit", default="unknown")
     args = p.parse_args(argv)
@@ -114,22 +136,36 @@ def main(argv: list[str] | None = None) -> int:
         [int(m) for m in args.months.split(",")] if args.months else None
     )
     mean, std, count = compute_stats(
-        args.imerg_root, years, var=args.var, months=months
+        args.imerg_root,
+        years,
+        var=args.var,
+        months=months,
+        log_epsilon=args.log_epsilon,
+        log_units=args.log_units,
     )
-    logger.info("mean=%.6f mm/day std=%.6f mm/day n=%d", mean, std, count)
+    if args.log_epsilon is not None:
+        units = f"log({args.log_epsilon:g} + P[{args.log_units}/24h])"
+    else:
+        units = "mm/day"
+    logger.info("mean=%.6f std=%.6f (%s) n=%d", mean, std, units, count)
 
+    attrs = {
+        "schema_version": "1.0",
+        "source": str(args.imerg_root),
+        "source_years": f"{years[0]}-{years[-1]}",
+        "source_months": str(months) if months else "all",
+        "n_samples": count,
+        "units": units,
+        "generator": f"{SCRIPT_REL_PATH}@{args.commit}",
+    }
+    if args.log_epsilon is not None:
+        attrs["transform"] = "log"
+        attrs["log_epsilon"] = float(args.log_epsilon)
+        attrs["log_units"] = args.log_units
     ds = xr.Dataset(
         {args.var: (("stat",), np.array([mean, std], dtype="float64"))},
         coords={"stat": ("stat", np.array(["mean", "std"]))},
-        attrs={
-            "schema_version": "1.0",
-            "source": str(args.imerg_root),
-            "source_years": f"{years[0]}-{years[-1]}",
-            "source_months": str(months) if months else "all",
-            "n_samples": count,
-            "units": "mm/day",
-            "generator": f"{SCRIPT_REL_PATH}@{args.commit}",
-        },
+        attrs=attrs,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     ds.to_zarr(args.out, mode="w", zarr_format=3, consolidated=True)

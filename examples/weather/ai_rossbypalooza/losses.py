@@ -88,6 +88,25 @@ def _squeeze_channel(x: torch.Tensor) -> torch.Tensor:
     return x.squeeze(1) if x.ndim == 4 and x.shape[1] == 1 else x
 
 
+def denormalize_precip(
+    x_norm: torch.Tensor,
+    *,
+    mean: float,
+    std: float,
+    transform=None,
+) -> torch.Tensor:
+    """Normalized precip -> physical mm/day.
+
+    ``transform`` is the dataset's optional ``LogPrecipTransform`` (model
+    v1): stats then live in log space and the inverse maps back to mm/day
+    (clamped at 0). ``None`` = plain linear stats in mm/day.
+    """
+    x = x_norm * std + mean
+    if transform is None:
+        return x
+    return transform.inverse(x)
+
+
 def _weighted_regional_mean(
     err: torch.Tensor, weights: torch.Tensor, finite: torch.Tensor
 ) -> torch.Tensor:
@@ -109,6 +128,7 @@ class RegionalPrecipMSE(nn.Module):
         space: str = "normalized",
         precip_mean: float = 0.0,
         precip_std: float = 1.0,
+        precip_transform=None,
         lat_weighted: bool = True,
     ) -> None:
         super().__init__()
@@ -117,6 +137,7 @@ class RegionalPrecipMSE(nn.Module):
         self.space = space
         self.precip_mean = float(precip_mean)
         self.precip_std = float(precip_std)
+        self.precip_transform = precip_transform
         self.register_buffer(
             "weights", region_weights(lat, lon, box, lat_weighted=lat_weighted)
         )
@@ -131,9 +152,16 @@ class RegionalPrecipMSE(nn.Module):
         t_norm = _squeeze_channel(target_norm)
         t_mm = _squeeze_channel(target_mm)
         if self.space == "physical":
-            pred = pred * self.precip_std + self.precip_mean
+            pred = denormalize_precip(
+                pred,
+                mean=self.precip_mean,
+                std=self.precip_std,
+                transform=self.precip_transform,
+            )
             target = t_mm
         else:
+            # With the model-v1 log transform, "normalized" space is the
+            # standardized log(eps + P) space.
             target = t_norm
         finite = torch.isfinite(target)
         err = (pred - torch.nan_to_num(target)) ** 2
@@ -151,6 +179,7 @@ class RegionalPrecipLogMSE(nn.Module):
         *,
         precip_mean: float,
         precip_std: float,
+        precip_transform=None,
         epsilon_mm: float = 0.1,
         lat_weighted: bool = True,
     ) -> None:
@@ -159,6 +188,7 @@ class RegionalPrecipLogMSE(nn.Module):
             raise ValueError(f"epsilon_mm must be positive, got {epsilon_mm}")
         self.precip_mean = float(precip_mean)
         self.precip_std = float(precip_std)
+        self.precip_transform = precip_transform
         self.epsilon_mm = float(epsilon_mm)
         self.register_buffer(
             "weights", region_weights(lat, lon, box, lat_weighted=lat_weighted)
@@ -170,8 +200,11 @@ class RegionalPrecipLogMSE(nn.Module):
         target_norm: torch.Tensor,
         target_mm: torch.Tensor,
     ) -> torch.Tensor:
-        pred_mm = (
-            _squeeze_channel(pred_norm) * self.precip_std + self.precip_mean
+        pred_mm = denormalize_precip(
+            _squeeze_channel(pred_norm),
+            mean=self.precip_mean,
+            std=self.precip_std,
+            transform=self.precip_transform,
         ).clamp(min=0.0)
         t_mm = _squeeze_channel(target_mm)
         finite = torch.isfinite(t_mm)
@@ -181,7 +214,9 @@ class RegionalPrecipLogMSE(nn.Module):
         return _weighted_regional_mean(err, self.weights, finite)
 
 
-def build_loss(cfg_loss, *, lat, lon, box, precip_mean, precip_std) -> nn.Module:
+def build_loss(
+    cfg_loss, *, lat, lon, box, precip_mean, precip_std, precip_transform=None
+) -> nn.Module:
     """Dispatcher on ``cfg.loss.name`` (ai_rossby ``build_loss`` convention)."""
     name = str(cfg_loss.get("name", "regional_mse"))
     lat_weighted = bool(cfg_loss.get("lat_weighted", True))
@@ -193,6 +228,7 @@ def build_loss(cfg_loss, *, lat, lon, box, precip_mean, precip_std) -> nn.Module
             space=str(cfg_loss.get("space", "normalized")),
             precip_mean=precip_mean,
             precip_std=precip_std,
+            precip_transform=precip_transform,
             lat_weighted=lat_weighted,
         )
     if name == "regional_log_mse":
@@ -202,6 +238,7 @@ def build_loss(cfg_loss, *, lat, lon, box, precip_mean, precip_std) -> nn.Module
             box,
             precip_mean=precip_mean,
             precip_std=precip_std,
+            precip_transform=precip_transform,
             epsilon_mm=float(cfg_loss.get("epsilon_mm", 0.1)),
             lat_weighted=lat_weighted,
         )

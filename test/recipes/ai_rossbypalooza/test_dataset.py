@@ -282,3 +282,48 @@ def test_dataloader_workers(env, num_workers, ctx):
     # Same data as single-process reads (order is sequential without sampler).
     s0 = ds[0]
     torch.testing.assert_close(batches[0]["expert_inputs"][0], s0["expert_inputs"])
+
+
+def test_log_transform_pipeline(env, tmp_path):
+    """Model v1: precip channel + target standardized in log(1e-3 + P[m])."""
+    from datapipes.precip import LogPrecipTransform
+
+    experts, truth, layout, stats = env
+    log_stats = write_stats_store(
+        tmp_path / "imerg_stats_log.zarr",
+        surface={"total_precipitation_24hr": (-6.0, 1.5)},
+        log_epsilon=1e-3,
+        log_units="m",
+    )
+    era5 = tmp_path / "era5_stats.zarr"
+    from datapipes.stats import ChannelStats as CS
+
+    stats_log = CS(era5, era5, log_stats, layout)
+    ds = HindcastMixtureDataset(
+        experts, truth, layout, stats_log,
+        years=(2001, 2001), init_months=(6,), lead_days=(8, 9),
+    )
+    assert isinstance(ds.precip_transform, LogPrecipTransform)
+    i = _find_pair(ds, (2001, 6, 1, 0), 8)
+    s = ds[i]
+    t = ds.precip_transform
+    # Expert precip channel: (log(1e-3 + mm/1000) - mean) / std.
+    raw_mm = coded_value(2, 0, 8)
+    expected = (np.log(1e-3 + raw_mm / 1000.0) - (-6.0)) / 1.5
+    np.testing.assert_allclose(s["expert_inputs"][0, 0].numpy(), expected, rtol=1e-5)
+    # Target round-trips to physical mm/day through the inverse transform.
+    import torch as _torch
+
+    from losses import denormalize_precip
+
+    back = denormalize_precip(
+        s["target"], mean=ds.precip_mean, std=ds.precip_std, transform=t
+    )
+    _torch.testing.assert_close(back, s["target_mm"], rtol=1e-4, atol=1e-4)
+    # Dynamical channels unaffected by the precip transform.
+    raw = coded_value(1, 0, 192)
+    np.testing.assert_allclose(
+        s["expert_inputs"][0, 1].numpy(),
+        (raw - Z500_STATS[0]) / Z500_STATS[1],
+        rtol=1e-5,
+    )

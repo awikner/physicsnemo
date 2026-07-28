@@ -327,11 +327,14 @@ def write_stats_store(
     surface: dict[str, tuple[float, float]],
     upper: dict[str, dict[float, tuple[float, float]]] | None = None,
     level_units: str = "Pa",
+    log_epsilon: float | None = None,
+    log_units: str = "m",
 ) -> Path:
     """Write a combined normalization-stats zarr (``stat`` coord {mean,std}).
 
     ``upper`` maps canonical name -> {level_hPa: (mean, std)}; the coord is
     written in ``level_units`` ("Pa" exercises the auto-detect divide-by-100).
+    ``log_epsilon`` marks the store as model-v1 log-space precip stats.
     """
     path = Path(path)
     data_vars: dict = {}
@@ -351,7 +354,13 @@ def write_stats_store(
                 if lv in spec:
                     arr[0, j], arr[1, j] = spec[lv]
             data_vars[name] = (("stat", "pressure_level"), arr)
-    ds = xr.Dataset(data_vars, coords=coords, attrs={"schema_version": "1.0"})
+    attrs: dict = {"schema_version": "1.0"}
+    if log_epsilon is not None:
+        attrs.update(
+            {"transform": "log", "log_epsilon": float(log_epsilon),
+             "log_units": log_units}
+        )
+    ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
     path.parent.mkdir(parents=True, exist_ok=True)
     ds.to_zarr(path, mode="w", zarr_format=3, consolidated=True)
     return path

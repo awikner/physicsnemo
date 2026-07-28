@@ -119,3 +119,38 @@ def test_invalid_specs_raise():
         PrecipSpec("tp", axis="daily", kind="accum", units="kg m-2 s-1")
     with pytest.raises(ValueError, match="must divide 24"):
         PrecipSpec("tp", axis="6h", kind="accum", units="m", step_hours=7)
+
+
+# --------------------------------------------------------------------------- #
+# LogPrecipTransform (model v1)
+# --------------------------------------------------------------------------- #
+
+
+def test_log_transform_roundtrip_numpy_and_torch():
+    import torch
+
+    from datapipes.precip import LogPrecipTransform
+
+    t = LogPrecipTransform(epsilon=1e-3, units="m")
+    mm = np.array([0.0, 0.5, 5.0, 50.0, 200.0], dtype=np.float64)
+    y = t.forward(mm)
+    # log(1e-3 + P[m]): dry day -> log(1e-3), 50 mm -> log(0.051).
+    np.testing.assert_allclose(y[0], np.log(1e-3), rtol=1e-12)
+    np.testing.assert_allclose(y[3], np.log(1e-3 + 0.05), rtol=1e-12)
+    np.testing.assert_allclose(t.inverse(y), mm, rtol=1e-10, atol=1e-10)
+    tt = torch.tensor(mm)
+    ty = t.forward(tt)
+    np.testing.assert_allclose(ty.numpy(), y, rtol=1e-10)
+    torch.testing.assert_close(t.inverse(ty), tt, rtol=1e-8, atol=1e-8)
+    # Inverse clamps below-dry-floor values at 0 mm.
+    assert t.inverse(np.array([-20.0]))[0] == 0.0
+    assert t.inverse(torch.tensor([-20.0]))[0] == 0.0
+
+
+def test_log_transform_validation():
+    from datapipes.precip import LogPrecipTransform
+
+    with pytest.raises(ValueError, match="units"):
+        LogPrecipTransform(units="inches")
+    with pytest.raises(ValueError, match="epsilon"):
+        LogPrecipTransform(epsilon=0.0)

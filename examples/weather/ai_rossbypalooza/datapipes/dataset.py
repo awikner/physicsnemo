@@ -179,6 +179,16 @@ class HindcastMixtureDataset(Dataset):
         return self.stats.precip_std
 
     @property
+    def precip_transform(self):
+        """Optional log(eps + P) transform (model v1); None = linear.
+
+        When present, the precip channel and ``target`` are
+        ``(transform.forward(mm) - mean) / std`` with stats computed in the
+        transformed space; ``target_mm`` stays physical mm/day.
+        """
+        return getattr(self.stats, "precip_transform", None)
+
+    @property
     def pairs(self) -> np.ndarray:
         return self.index.pairs
 
@@ -279,6 +289,11 @@ class HindcastMixtureDataset(Dataset):
                 continue
             x[ei] = block
 
+        # Optional precip log-transform (model v1) BEFORE standardizing —
+        # the stats were computed in the transformed space.
+        transform = self.precip_transform
+        if transform is not None:
+            x[:, 0] = transform.forward(x[:, 0])
         # Normalize -> zero-fill NaN -> re-zero unsupplied channels and dead
         # experts, so "missing" is exactly 0 in z-space (the channel mean).
         x = (x - self.stats.mean[None]) / self.stats.std[None]
@@ -291,7 +306,10 @@ class HindcastMixtureDataset(Dataset):
         target_mm = arrays[-1]
         if target_mm.ndim != 2:
             target_mm = target_mm.reshape(h, w)
-        target = (target_mm - self.stats.precip_mean) / self.stats.precip_std
+        target_t = (
+            transform.forward(target_mm) if transform is not None else target_mm
+        )
+        target = (target_t - self.stats.precip_mean) / self.stats.precip_std
 
         init_dt = cftime.DatetimeGregorian(*self.index.init_keys[init_row])
         init_hours = _hours_since_1900(init_dt)

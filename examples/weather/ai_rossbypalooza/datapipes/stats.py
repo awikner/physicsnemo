@@ -34,6 +34,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from .precip import LogPrecipTransform
 from .variables import ChannelLayout, levels_match
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,15 @@ class ChannelStats:
                 )
             mean[0] = float(p_mean[precip_var].values)
             std[0] = float(p_std[precip_var].values)
+            # Model v1: stats may be computed in log(eps + P) space — the
+            # store records the transform and the datapipe must apply the
+            # SAME one to every precip value before standardizing.
+            self.precip_transform: LogPrecipTransform | None = None
+            if str(pstats.attrs.get("transform", "")) == "log":
+                self.precip_transform = LogPrecipTransform(
+                    epsilon=float(pstats.attrs["log_epsilon"]),
+                    units=str(pstats.attrs.get("log_units", "m")),
+                )
 
         # ---- dynamical channels from the ERA5 stats store(s): either one
         # combined store (stat coord {mean,std}; pass the same path twice)

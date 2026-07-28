@@ -31,8 +31,11 @@ truth:
 normalization:
   dynamical_mean: /glade/derecho/scratch/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_mean.zarr
   dynamical_std: /glade/derecho/scratch/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_std.zarr
-  # Written by tools/compute_precip_norm.py (IMERG train years).
-  precip_stats: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_precip_stats.zarr
+  # Model v1: precip is log-transformed as log(1e-3 + P[m/24h]) and ALL
+  # precip normalization lives in that space — this store (written by
+  # tools/compute_precip_norm.py --log-epsilon 1e-3 --log-units m over the
+  # training years) carries the transform metadata the datapipe applies.
+  precip_stats: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_precip_stats_log.zarr
 
 experts:
   - name: pangu_s2s
@@ -52,14 +55,16 @@ experts:
     root: /glade/derecho/scratch/awikner/hindcasts_mowe/aifs_single_v2
     precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
 
+# Model v1 split: train on ALL available inits 2000-2019 (year-round);
+# validate 2020 onward, JJAS inits only (monsoon-season metrics).
 train:
-  years: [2001, 2018]
-  init_months: [5, 6, 7, 8, 9]
+  years: [2000, 2019]
+  init_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   lead_days: [8, 14]
   min_experts: 1
 
 val:
-  years: [2019, 2021]
+  years: [2020, 2024]
   init_months: [6, 7, 8, 9]
   lead_days: [8, 14]
   min_experts: 1

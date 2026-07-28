@@ -87,3 +87,25 @@ def test_bad_std_raises(tmp_path, stats_paths):
     )
     with pytest.raises(ValueError, match="non-positive normalization std"):
         ChannelStats(era5, era5, precip, ChannelLayout(["2t"]))
+
+
+def test_log_transform_metadata_roundtrip(tmp_path, stats_paths):
+    era5, _ = stats_paths
+    precip_log = write_stats_store(
+        tmp_path / "imerg_stats_log.zarr",
+        surface={"total_precipitation_24hr": (-6.0, 1.2)},
+        log_epsilon=1e-3,
+        log_units="m",
+    )
+    s = ChannelStats(era5, era5, precip_log, ChannelLayout(["2t"]))
+    assert s.precip_transform is not None
+    assert s.precip_transform.epsilon == 1e-3
+    assert s.precip_transform.units == "m"
+    assert s.precip_mean == -6.0
+    # A store without transform attrs stays linear.
+    plain = write_stats_store(
+        tmp_path / "imerg_stats_plain.zarr",
+        surface={"total_precipitation_24hr": (3.0, 8.0)},
+    )
+    s2 = ChannelStats(era5, era5, plain, ChannelLayout(["2t"]))
+    assert s2.precip_transform is None

@@ -214,6 +214,7 @@ def run(cfg: DictConfig) -> None:
         box=box,
         precip_mean=train_ds.precip_mean,
         precip_std=train_ds.precip_std,
+        precip_transform=train_ds.precip_transform,
     ).to(dist.device)
 
     cfg_train = cfg.training
@@ -250,6 +251,7 @@ def run(cfg: DictConfig) -> None:
             seeps_climatology=seeps_clim,
             precip_mean=val_ds.precip_mean,
             precip_std=val_ds.precip_std,
+            precip_transform=val_ds.precip_transform,
             device=dist.device,
         )
 

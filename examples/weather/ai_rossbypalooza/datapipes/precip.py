@@ -37,6 +37,50 @@ import numpy as np
 
 #: Multiplicative factor to mm for stored *depth* units.
 _DEPTH_TO_MM = {"m": 1000.0, "mm": 1.0}
+
+
+@dataclass(frozen=True)
+class LogPrecipTransform:
+    """``log(epsilon + P)`` transform for precipitation (model v1).
+
+    ``units`` is the unit system the offset lives in — "m" means
+    ``log(1e-3 + P[m])`` (1e-3 m == 1 mm, a natural dry floor). The
+    pipeline's working unit stays mm/day: :meth:`forward` maps mm/day into
+    log space and :meth:`inverse` maps log space back to mm/day (clamped
+    at 0). All precip normalization statistics are computed in this
+    transformed space. Works on numpy arrays and torch tensors.
+    """
+
+    epsilon: float = 1e-3
+    units: str = "m"
+
+    def __post_init__(self) -> None:
+        if self.units not in _DEPTH_TO_MM:
+            raise ValueError(f"units must be one of {tuple(_DEPTH_TO_MM)}")
+        if self.epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {self.epsilon}")
+
+    @property
+    def _mm_scale(self) -> float:
+        return 1.0 / _DEPTH_TO_MM[self.units]  # mm -> transform units
+
+    def forward(self, precip_mm):
+        """mm/day -> log(epsilon + P[units])."""
+        x = precip_mm * self._mm_scale
+        if isinstance(x, np.ndarray) or np.isscalar(precip_mm):
+            return np.log(self.epsilon + x)
+        import torch
+
+        return torch.log(self.epsilon + x)
+
+    def inverse(self, y):
+        """log space -> mm/day, clamped at 0."""
+        if isinstance(y, np.ndarray) or np.isscalar(y):
+            out = (np.exp(y) - self.epsilon) / self._mm_scale
+            return np.clip(out, 0.0, None)
+        import torch
+
+        return ((torch.exp(y) - self.epsilon) / self._mm_scale).clamp(min=0.0)
 #: Rate units: kg m-2 s-1 is identically mm/s (1 kg water over 1 m^2 = 1 mm).
 _RATE_UNITS = ("kg m-2 s-1", "mm/s")
 

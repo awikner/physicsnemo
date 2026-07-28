@@ -29,6 +29,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
+from losses import denormalize_precip
 from mowe_precip import mix
 from seeps import (
     SeepsClimatology,
@@ -90,6 +91,7 @@ class MixtureValidator:
         seeps_climatology: SeepsClimatology,
         precip_mean: float,
         precip_std: float,
+        precip_transform=None,
         device: torch.device,
         n_weight_map_samples: int = 2,
     ) -> None:
@@ -100,6 +102,7 @@ class MixtureValidator:
         self.seeps_clim = seeps_climatology
         self.precip_mean = float(precip_mean)
         self.precip_std = float(precip_std)
+        self.precip_transform = precip_transform
         self.device = device
         self.n_weight_map_samples = int(n_weight_map_samples)
 
@@ -142,11 +145,18 @@ class MixtureValidator:
             )
 
             weights, biases = model(x, mask, taus)
-            pred_mm = (
-                mix(weights, biases, x[:, :, 0]) * self.precip_std
-                + self.precip_mean
+            pred_mm = denormalize_precip(
+                mix(weights, biases, x[:, :, 0]),
+                mean=self.precip_mean,
+                std=self.precip_std,
+                transform=self.precip_transform,
             )
-            expert_mm = x[:, :, 0] * self.precip_std + self.precip_mean
+            expert_mm = denormalize_precip(
+                x[:, :, 0],
+                mean=self.precip_mean,
+                std=self.precip_std,
+                transform=self.precip_transform,
+            )
             live = mask > 0
             eq_mm = (expert_mm * live.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
             eq_mm = eq_mm / live.sum(dim=1).clamp(min=1).unsqueeze(-1).unsqueeze(-1)

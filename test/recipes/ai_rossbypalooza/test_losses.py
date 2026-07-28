@@ -139,3 +139,21 @@ def test_build_loss_dispatcher():
     assert log.epsilon_mm == 0.5
     with pytest.raises(ValueError, match="unknown loss"):
         build_loss({"name": "huber"}, **kw)
+
+
+def test_physical_space_with_log_transform():
+    from datapipes.precip import LogPrecipTransform
+
+    t = LogPrecipTransform(epsilon=1e-3, units="m")
+    mean, std = -6.0, 1.5
+    loss = RegionalPrecipMSE(
+        LAT, LON, BOX, space="physical",
+        precip_mean=mean, precip_std=std, precip_transform=t,
+    )
+    target_mm = torch.full((1, 15, 72), 10.0)
+    # Normalized prediction that decodes exactly to 4 mm/day.
+    pred_norm = torch.full(
+        (1, 15, 72), (float(np.log(1e-3 + 0.004)) - mean) / std
+    )
+    out = loss(pred_norm, torch.zeros_like(target_mm), target_mm)
+    torch.testing.assert_close(out, torch.tensor(36.0), rtol=1e-4, atol=1e-3)
