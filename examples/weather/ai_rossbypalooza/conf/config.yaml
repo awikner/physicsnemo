@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MoWE Method 0 (gate over frozen experts) — top-level config.
+
+defaults:
+  - _self_
+  - dataset: hindcast_derecho
+  - model: mowe_precip
+  - loss: regional_mse
+  - training: default
+  - validation: default
+
+hydra:
+  job:
+    chdir: True
+  run:
+    dir: ./outputs/${run_name}
+
+run_name: mowe_method0
+seed: 42
+start_epoch: 0
+checkpoint_save_interval: 5
+
+# The monsoon evaluation domain — the single source of truth for the region
+# box consumed by the loss AND validation (SEEPS/RMSE/bias).
+region:
+  name: south_asia_monsoon
+  lat: [5.0, 35.0]
+  lon: [60.0, 100.0]
+
+wandb:
+  enabled: false
+  project: ai-rossbypalooza
+  entity: null
+  name: ${run_name}
+  mode: online
+  init_timeout: 300

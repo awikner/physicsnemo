@@ -80,7 +80,8 @@ class ChannelStats:
 
     def __init__(
         self,
-        dyn_stats_path: str | Path,
+        dyn_mean_path: str | Path,
+        dyn_std_path: str | Path,
         precip_stats_path: str | Path,
         layout: ChannelLayout,
         *,
@@ -110,9 +111,12 @@ class ChannelStats:
             mean[0] = float(p_mean[precip_var].values)
             std[0] = float(p_std[precip_var].values)
 
-        # ---- dynamical channels from the ERA5 stats store
-        with _open_stats(dyn_stats_path) as dstats:
-            d_mean, d_std = _stat_slices(dstats)
+        # ---- dynamical channels from the ERA5 stats store(s): either one
+        # combined store (stat coord {mean,std}; pass the same path twice)
+        # or the separate _mean.zarr / _std.zarr pair.
+        with _open_stats(dyn_mean_path) as m_ds, _open_stats(dyn_std_path) as s_ds:
+            d_mean, _ = _stat_slices(m_ds)
+            _, d_std = _stat_slices(s_ds)
             for i, ch in enumerate(layout.channels, start=1):
                 if ch.canonical not in d_mean:
                     raise KeyError(

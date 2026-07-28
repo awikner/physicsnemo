@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Regional log-MSE: MSE(log1p(clamp(P,0)/eps)) in mm/day over the monsoon
+# box — compresses the heavy tail so moderate/heavy intensities matter.
+name: regional_log_mse
+epsilon_mm: 0.1
+lat_weighted: true

@@ -92,7 +92,7 @@ def env(tmp_path):
         surface={"total_precipitation_24hr": PRECIP_STATS},
     )
     layout = ChannelLayout(["z/500", "2t"])
-    stats = ChannelStats(era5_stats, precip_stats, layout)
+    stats = ChannelStats(era5_stats, era5_stats, precip_stats, layout)
     experts = [
         SchemaAAdapter(
             "model_a", a_root, layout,

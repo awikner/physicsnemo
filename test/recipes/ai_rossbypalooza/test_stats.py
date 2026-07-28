@@ -48,7 +48,7 @@ def stats_paths(tmp_path):
 def test_assembly_order_and_values(stats_paths):
     era5, precip = stats_paths
     layout = ChannelLayout(["z/500", "t/850", "2t"])
-    s = ChannelStats(era5, precip, layout)
+    s = ChannelStats(era5, era5, precip, layout)
     assert s.mean.shape == s.std.shape == (4, 1, 1)
     np.testing.assert_allclose(
         s.mean.ravel(), [3.0, 54000.0, 280.0, 280.0]
@@ -62,21 +62,21 @@ def test_missing_level_raises(stats_paths):
     era5, precip = stats_paths
     layout = ChannelLayout(["z/200"])
     with pytest.raises(ValueError, match="no level near 200"):
-        ChannelStats(era5, precip, layout)
+        ChannelStats(era5, era5, precip, layout)
 
 
 def test_missing_variable_raises(stats_paths):
     era5, precip = stats_paths
     layout = ChannelLayout(["q/500"])
     with pytest.raises(KeyError, match="specific_humidity"):
-        ChannelStats(era5, precip, layout)
+        ChannelStats(era5, era5, precip, layout)
 
 
 def test_missing_precip_store_names_generator(stats_paths, tmp_path):
     era5, _ = stats_paths
     layout = ChannelLayout(["2t"])
     with pytest.raises(FileNotFoundError, match="compute_precip_norm"):
-        ChannelStats(era5, tmp_path / "nope.zarr", layout)
+        ChannelStats(era5, era5, tmp_path / "nope.zarr", layout)
 
 
 def test_bad_std_raises(tmp_path, stats_paths):
@@ -86,4 +86,4 @@ def test_bad_std_raises(tmp_path, stats_paths):
         surface={"2m_temperature": (280.0, 0.0)},
     )
     with pytest.raises(ValueError, match="non-positive normalization std"):
-        ChannelStats(era5, precip, ChannelLayout(["2t"]))
+        ChannelStats(era5, era5, precip, ChannelLayout(["2t"]))

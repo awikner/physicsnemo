@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MoWEPrecipGate architecture. input_size / in_channels / n_experts are
+# derived from the dataset at runtime — only hyperparameters live here.
+name: mowe_precip
+params:
+  patch_size: [4, 4]        # 180x360 -> 45x90 = 4050 tokens
+  hidden_size: 384
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 4.0
+  attention_backend: timm   # transformer_engine on H100/A100 if available
+  layernorm_backend: torch
+  noise_dim: null           # deterministic gate (Method 0 baseline)

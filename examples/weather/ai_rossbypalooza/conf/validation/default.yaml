@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Validation: regional RMSE / bias / SEEPS per lead day for the gate vs
+# per-expert and equal-weight baselines.
+enabled: true
+every_n_epochs: 1
+# Written by tools/compute_seeps_climatology.py (IMERG train years).
+seeps_climatology: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_seeps_climatology.zarr

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default training: union of init times, missing experts masked, random
+# expert dropout so one checkpoint tolerates any expert subset at inference.
+max_epochs: 60
+warmup_epochs: 2
+min_lr_ratio: 0.02
+amp: bf16
+grad_clip_norm: 1.0
+expert_dropout: 0.15
+optimizer:
+  lr: 3.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 0.05
