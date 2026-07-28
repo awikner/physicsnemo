@@ -289,7 +289,11 @@ def main(argv: list[str] | None = None) -> int:
     for m in args.model:
         if m == "all":
             models.extend(
-                sorted(d.name for d in args.src_root.iterdir() if d.is_dir())
+                sorted(
+                    d.name
+                    for d in args.src_root.iterdir()
+                    if d.is_dir() and not d.name.startswith(".")
+                )
             )
         else:
             models.append(m)

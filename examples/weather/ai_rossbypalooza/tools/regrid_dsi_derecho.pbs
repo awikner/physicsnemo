@@ -1,0 +1,56 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Derecho develop-queue job: conservatively regrid every DSI hindcast store
+# (hindcasts_dsi/zarr/<model>/<year>.zarr) to 1 degree on the IMERG/ERA5 grid
+# under hindcasts_dsi_1deg/zarr/, in parallel across stores. Local Lustre
+# only. Resumable via .regrid_done sentinels; self-resubmits (up to
+# MAX_RESUBMITS) while unfinished stores remain.
+#   qsub regrid_dsi_derecho.pbs
+# Expects the tool deployed as:
+#   $HOME/mowe_tools/tools/regrid_dsi_to_1deg.py
+#   $HOME/mowe_tools/datapipes/{__init__.py,regrid.py}
+#PBS -N dsi_regrid_1deg
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=64:mem=235GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/hindcasts_dsi_1deg/regrid.log
+
+set -uo pipefail
+module load conda
+conda activate hindcast_conv
+
+TOOL="$HOME/mowe_tools/tools/regrid_dsi_to_1deg.py"
+SRC=/glade/derecho/scratch/awikner/hindcasts_dsi/zarr
+OUT=/glade/derecho/scratch/awikner/hindcasts_dsi_1deg/zarr
+REF=/glade/derecho/scratch/awikner/physicsnemo-zarr/imerg/2001.zarr
+NP="${NP:-12}"
+DEPTH="${DEPTH:-0}"
+MAX_RESUBMITS="${MAX_RESUBMITS:-8}"
+# Each worker is one store; keep BLAS modest so NP workers don't oversubscribe.
+export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4
+
+mkdir -p "$(dirname "$OUT")"
+echo "[$(date)] regrid start host=$(hostname) NP=$NP depth=$DEPTH"
+
+python "$TOOL" \
+    --src-root "$SRC" \
+    --out-root "$OUT" \
+    --model all \
+    --ref-store "$REF" \
+    --n-workers "$NP" \
+    --commit "${COMMIT:-unknown}"
+rc=$?
+
+total=$(find "$SRC" -mindepth 2 -maxdepth 2 -name '*.zarr' -not -path '*/.*' | wc -l)
+done_n=$(ls "$OUT/.regrid_done"/*.done 2>/dev/null | wc -l)
+echo "[$(date)] regrid pass complete rc=$rc ($done_n/$total stores done)"
+
+if [ "$done_n" -lt "$total" ] && [ "$DEPTH" -lt "$MAX_RESUBMITS" ]; then
+    echo "[$(date)] resubmitting (depth $((DEPTH + 1)))"
+    qsub -v "NP=$NP,DEPTH=$((DEPTH + 1)),MAX_RESUBMITS=$MAX_RESUBMITS,COMMIT=${COMMIT:-unknown}" \
+        "$HOME/mowe_tools/tools/regrid_dsi_derecho.pbs"
+fi
