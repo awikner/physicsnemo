@@ -158,6 +158,7 @@ class HindcastMixtureDataset(Dataset):
         self._groups: dict = {}
         self._handles: dict = {}
         self._nan_demotions = 0
+        self._empty_samples = 0
 
     # ------------------------------------------------------------------ #
     # exposure for model / loss / metrics code
@@ -264,10 +265,12 @@ class HindcastMixtureDataset(Dataset):
         n_exp, n_chan = len(self.experts), self.layout.num_channels
         h, w = self.lat.size, self.lon.size
         x = np.zeros((n_exp, n_chan, h, w), dtype=np.float32)
+        finite_fracs = np.zeros(n_exp, dtype=np.float64)
         for ei, off, n in spans:
             block = self.experts[ei].assemble(arrays[off : off + n], tau)
             supplied = block[self._channel_masks_np[ei]]
             finite_frac = float(np.isfinite(supplied).mean())
+            finite_fracs[ei] = finite_frac
             # An expert whose PRECIP channel is entirely non-finite is
             # useless in the mixture regardless of its other channels
             # (e.g. merged-graphcast inits whose wb2-sourced precip lacks
@@ -288,6 +291,27 @@ class HindcastMixtureDataset(Dataset):
                     )
                 continue
             x[ei] = block
+
+        # The model contract requires at least one live expert. The index
+        # guarantees that from coordinates, but read-time NaN demotion can
+        # still empty a sample (e.g. a graphcast-only init whose day-7 precip
+        # window is incomplete). Reinstate the least-bad expert rather than
+        # letting the model raise mid-epoch; configure min_lead_day to avoid
+        # the situation in the first place.
+        if not live.any():
+            best = int(np.argmax(finite_fracs))
+            live[best] = True
+            self._empty_samples += 1
+            if self._empty_samples <= 10 or self._empty_samples % 100 == 0:
+                logger.error(
+                    "pair %d had NO live expert after NaN demotion; "
+                    "reinstating '%s' (finite fraction %.2f). %d such samples "
+                    "so far — check the expert lead ranges.",
+                    pair_idx,
+                    self.experts[best].name,
+                    finite_fracs[best],
+                    self._empty_samples,
+                )
 
         # Optional precip log-transform (model v1) BEFORE standardizing —
         # the stats were computed in the transformed space.

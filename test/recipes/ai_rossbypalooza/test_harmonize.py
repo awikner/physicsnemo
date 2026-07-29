@@ -290,3 +290,35 @@ def test_harmonized_adapter_reads_tool_output(tmp_path, ref_store, dsi_pair):
     np.testing.assert_allclose(block[2], coded_value(1, 0, 192), rtol=1e-6)  # q850 6h
     # u_250: NaN for this e2s-only init (handled downstream by the dataset).
     assert np.isnan(block[4]).all()
+
+
+def test_min_lead_day_excludes_an_expert_from_short_leads(
+    tmp_path, ref_store, dsi_pair
+):
+    """A per-expert min_lead_day removes it from the index at shorter leads.
+
+    This is how graphcast's day-7 precip is kept out of training: its
+    wb2-sourced inits have no complete 24h window at 168h, so lead 7 is NaN,
+    and on a wb2-only init that left the sample with zero live experts.
+    """
+    e2s, wb2 = dsi_pair
+    out_root = _run_dsi(tmp_path, ref_store, e2s, wb2)
+    layout = ChannelLayout(["z/500"])
+
+    def _adapter(**kw):
+        a = build_adapter(
+            "graphcast", "harmonized", out_root / "graphcast", layout,
+            HARMONIZED_PRECIP, **kw,
+        )
+        a.discover(GRID_LAT, GRID_LON)
+        return a
+
+    plain = _adapter()
+    clamped = _adapter(min_lead_day=9)
+    assert plain.lead_supported(8), "fixture should supply day 8"
+    assert not clamped.lead_supported(8), "min_lead_day did not exclude day 8"
+    # The clamp only removes short leads; longer ones behave as before.
+    for tau in (9, 10, 12):
+        assert clamped.lead_supported(tau) == plain.lead_supported(tau)
+    # A max clamp works symmetrically.
+    assert not _adapter(max_lead_day=7).lead_supported(8)

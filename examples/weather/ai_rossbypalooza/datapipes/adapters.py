@@ -102,12 +102,22 @@ class ExpertAdapter(ABC):
         precip: PrecipSpec,
         *,
         exclude_variables: Sequence[str] = (),
+        min_lead_day: int | None = None,
+        max_lead_day: int | None = None,
     ) -> None:
         self.name = name
         self.root = Path(root)
         self.layout = layout
         self.precip = precip
         self.exclude_variables = {v.lower() for v in exclude_variables}
+        # Optional per-expert clamp on the usable forecast-day range, for
+        # gaps that coordinates alone cannot reveal. graphcast needs
+        # min_lead_day=8: its wb2-sourced inits have no complete 24h precip
+        # window at day 7 (the window starts at 168h), so lead 7 is NaN for
+        # those inits, and on wb2-only inits that would leave the sample with
+        # zero live experts.
+        self.min_lead_day = min_lead_day
+        self.max_lead_day = max_lead_day
         self._discovered = False
         self._init_lookup: dict[InitKey, tuple[int, int]] = {}
         self._years: list[int] = []
@@ -192,6 +202,14 @@ class ExpertAdapter(ABC):
 
     @abstractmethod
     def lead_supported(self, tau_days: int) -> bool: ...
+
+    def _lead_day_allowed(self, tau_days: int) -> bool:
+        """Config clamp, applied by every adapter's ``lead_supported``."""
+        if self.min_lead_day is not None and tau_days < int(self.min_lead_day):
+            return False
+        if self.max_lead_day is not None and tau_days > int(self.max_lead_day):
+            return False
+        return True
 
     @abstractmethod
     def plan(self, year: int, init_idx: int, tau_days: int) -> list[ReadRequest]: ...
@@ -526,6 +544,8 @@ class HarmonizedAdapter(ExpertAdapter):
 
     def lead_supported(self, tau_days: int) -> bool:
         self._require_discovered()
+        if not self._lead_day_allowed(tau_days):
+            return False
         needed = [*self.precip.lead_values(tau_days), tau_days]
         # Lead 0 is the IC (where present), never a forecast.
         return all(d >= 1 and d in self._lead_index for d in needed)
@@ -562,6 +582,8 @@ def build_adapter(
     precip: PrecipSpec,
     *,
     exclude_variables: Sequence[str] = (),
+    min_lead_day: int | None = None,
+    max_lead_day: int | None = None,
 ) -> ExpertAdapter:
     """Config-string factory: ``schema`` in {"harmonized", "dsi", "consolidated"}.
 
@@ -579,5 +601,11 @@ def build_adapter(
             f"(expected one of {sorted(classes)})"
         )
     return classes[schema](
-        name, root, layout, precip, exclude_variables=exclude_variables
+        name,
+        root,
+        layout,
+        precip,
+        exclude_variables=exclude_variables,
+        min_lead_day=min_lead_day,
+        max_lead_day=max_lead_day,
     )

@@ -81,6 +81,8 @@ def build_dataset(cfg_dataset: Any, split: str) -> HindcastMixtureDataset:
                 layout,
                 precip,
                 exclude_variables=tuple(e.get("exclude_variables") or ()),
+                min_lead_day=e.get("min_lead_day"),
+                max_lead_day=e.get("max_lead_day"),
             )
         )
 

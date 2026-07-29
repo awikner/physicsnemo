@@ -46,6 +46,10 @@ experts:
     precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 1}
   - name: graphcast
     schema: harmonized
+    # Day 7 is unusable: the wb2-sourced inits have no complete 24h precip
+    # window at 168h, so lead 7 is NaN for them, and on a wb2-only init that
+    # would leave the sample with zero live experts.
+    min_lead_day: 8
     root: /scratch/09979/awikner/hindcasts_mowe/graphcast
     precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
   - name: aifs_single_v2
