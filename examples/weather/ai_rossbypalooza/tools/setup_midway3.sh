@@ -8,7 +8,7 @@
 set -euo pipefail
 REPO="${REPO:-/scratch/midway3/$USER/physicsnemo}"
 cd "$REPO"
-module load python 2>/dev/null || true
+module load python/3.11.9 2>/dev/null || module load python/3.11.5
 
 python3 -m venv .venv-mowe
 source .venv-mowe/bin/activate
