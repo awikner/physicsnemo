@@ -5,13 +5,27 @@
 
 # Default training: union of init times, missing experts masked, random
 # expert dropout so one checkpoint tolerates any expert subset at inference.
-max_epochs: 60
+max_epochs: 40
 warmup_epochs: 2
 min_lr_ratio: 0.02
 amp: bf16
 grad_clip_norm: 1.0
-expert_dropout: 0.15
+expert_dropout: 0.30
 optimizer:
   lr: 3.0e-4
   betas: [0.9, 0.999]
-  weight_decay: 0.05
+  weight_decay: 0.15
+
+# Stop once the gate stops generalising, and keep the best weights rather
+# than the last (the 384/8 run's final epoch was its most overfit).
+early_stopping:
+  enabled: true
+  patience: 8          # epochs without a new best validation loss
+  min_delta: 0.0
+
+# Weight EMA (PanguWeather convention); validation uses the EMA weights.
+ema:
+  enabled: true
+  decay: 0.999
+  warmup_epochs: 2
+  validate_with_ema: true

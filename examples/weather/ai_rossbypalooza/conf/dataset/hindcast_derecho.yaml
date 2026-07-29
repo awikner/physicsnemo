@@ -69,7 +69,11 @@ experts:
 train:
   years: [2000, 2019]
   init_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-  lead_days: [8, 14]
+  # 7-14, not 8-14: day 7 exists for all four experts (graphcast's wb2-sourced
+  # inits are NaN there and get auto-masked, ~25% of its inits). Day 15 is NOT
+  # usable -- sfno's precip head is forward-looking (day_offset 1) so tau=15
+  # needs lead 16, and the harmonised stores stop at 15.
+  lead_days: [7, 14]
   min_experts: 1
 
 val:

@@ -256,3 +256,71 @@ def test_gate_learns_on_synthetic_signal(smoke_cfg):
         losses.append(epoch_loss / len(loader))
     assert losses[-1] < losses[0], f"loss did not decrease: {losses}"
     del train_mod  # imported to assert the module loads alongside
+
+
+@pytest.mark.slow
+def test_best_checkpoint_and_early_stopping(smoke_cfg, monkeypatch):
+    """Best weights land in their own directory, and a validation loss that
+    stops improving ends the run before max_epochs.
+
+    The validator is stubbed to report a worsening loss -- on the synthetic
+    fixture the real loss improves every epoch, so early stopping would
+    (correctly) never fire.
+    """
+    import train as train_mod
+    import validation as validation_mod
+    from pathlib import Path
+
+    calls = {"n": 0}
+
+    def fake_run(self, model, loader):
+        calls["n"] += 1
+        # 1.0, then strictly worse every epoch.
+        return {"loss": 1.0 + 0.1 * (calls["n"] - 1)}, {"weight_maps": {}}
+
+    monkeypatch.setattr(validation_mod.MixtureValidator, "run", fake_run)
+
+    torch.manual_seed(0)
+    cfg = OmegaConf.merge(
+        smoke_cfg,
+        {
+            "training": {
+                "max_epochs": 8,
+                "early_stopping": {"enabled": True, "patience": 2, "min_delta": 0.0},
+                "ema": {
+                    "enabled": True,
+                    "decay": 0.9,
+                    "warmup_epochs": 0,
+                    "validate_with_ema": True,
+                },
+            },
+            "validation": {"every_n_epochs": 1},
+        },
+    )
+    train_mod.run(cfg)
+
+    # epoch 0 sets the best; epochs 1 and 2 do not improve -> stop at epoch 2.
+    assert calls["n"] == 3, f"expected 3 validations before stopping, got {calls['n']}"
+    assert list(Path("checkpoints_best").glob("*")), "no best-weights checkpoint"
+    assert list(Path("checkpoints").glob("*")), "no periodic/final checkpoint"
+
+
+@pytest.mark.slow
+def test_ema_disabled_path_still_trains(smoke_cfg):
+    """EMA off + early stopping off is the plain path and must still work."""
+    import train as train_mod
+    from pathlib import Path
+
+    torch.manual_seed(0)
+    cfg = OmegaConf.merge(
+        smoke_cfg,
+        {
+            "training": {
+                "max_epochs": 2,
+                "early_stopping": {"enabled": False},
+                "ema": {"enabled": False},
+            }
+        },
+    )
+    train_mod.run(cfg)
+    assert list(Path("checkpoints").glob("*")), "no checkpoint written"

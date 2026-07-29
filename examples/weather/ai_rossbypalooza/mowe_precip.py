@@ -82,6 +82,7 @@ class MoWEPrecipGate(DiT):
         attention_backend: str = "timm",
         layernorm_backend: str = "torch",
         noise_dim: Optional[int] = None,
+        drop_path: float = 0.0,
     ):
         if n_experts < 1:
             raise ValueError(f"n_experts must be >= 1, got {n_experts}")
@@ -96,6 +97,15 @@ class MoWEPrecipGate(DiT):
                 f"input_size {tuple(size)} must be divisible by "
                 f"patch_size {tuple(patch)}"
             )
+        # Stochastic depth: DiT wants one rate per block, so expand the
+        # scalar into the usual linearly-increasing schedule 0 -> drop_path.
+        if drop_path < 0 or drop_path >= 1:
+            raise ValueError(f"drop_path must be in [0, 1), got {drop_path}")
+        drop_path_rates = (
+            [drop_path * i / max(1, depth - 1) for i in range(depth)]
+            if drop_path > 0
+            else None
+        )
         # E blocks folded into channels + E constant mask planes.
         net_in_channels = n_experts * in_channels + n_experts
         super().__init__(
@@ -110,6 +120,7 @@ class MoWEPrecipGate(DiT):
             attention_backend=attention_backend,
             layernorm_backend=layernorm_backend,
             condition_dim=noise_dim,
+            drop_path_rates=drop_path_rates,
         )
         self.n_experts = n_experts
         self.block_channels = in_channels
@@ -164,15 +175,27 @@ def mix(
     weights: torch.Tensor,
     biases: torch.Tensor,
     expert_precip: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """``P_hat = sum_i w_i * (P_i + b_i)`` over the expert axis.
 
-    ``expert_precip`` is each expert's (normalized) precip channel,
+    ``expert_precip`` is each expert's precip channel in the mixing space,
     ``(B, E, H, W)``; ``weights`` / ``biases`` are the gate outputs,
     ``(B, [ens,] E, H, W)``. Returns ``(B, [ens,] H, W)``. Masked experts
     contribute nothing: their weight is exactly 0 and their bias is
     multiplied by it.
+
+    ``mask (B, E)`` is an optional belt-and-braces guard. A missing expert's
+    channel is zero-filled in z-space, which is NOT zero once inverted to
+    mm/day (it is exp(mean) - eps ~ 0.7 mm/day of phantom rain), so passing
+    the mask zeroes those entries explicitly rather than relying solely on
+    the masked softmax.
     """
+    if mask is not None:
+        m = mask.to(expert_precip.dtype)
+        expert_precip = expert_precip * m.view(
+            m.shape[0], m.shape[1], *([1] * (expert_precip.ndim - 2))
+        )
     if weights.ndim == 5:  # ensemble axis
         expert_precip = expert_precip.unsqueeze(1)
         return (weights * (expert_precip + biases)).sum(dim=2)

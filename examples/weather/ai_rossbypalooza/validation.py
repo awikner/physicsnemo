@@ -310,9 +310,9 @@ class MixtureValidator:
             )
             if self.mix_space == "physical":
                 pred_norm = None
-                pred_mm = mix(weights, biases, expert_mm).clamp(min=0.0)
+                pred_mm = mix(weights, biases, expert_mm, mask=mask).clamp(min=0.0)
             else:
-                pred_norm = mix(weights, biases, x[:, :, 0])
+                pred_norm = mix(weights, biases, x[:, :, 0], mask=mask)
                 pred_mm = denormalize_precip(
                     pred_norm,
                     mean=self.precip_mean,

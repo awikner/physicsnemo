@@ -50,6 +50,7 @@ from physicsnemo.utils import load_checkpoint, save_checkpoint
 from physicsnemo.utils.logging import LaunchLogger, PythonLogger
 
 from datapipes.factory import build_dataset
+from ema import ModelEMA
 from datapipes.sampler import MixturePairSampler
 from losses import (
     build_loss,
@@ -299,8 +300,26 @@ def run(cfg: DictConfig) -> None:
             mix_space=mix_space,
         )
 
+    ema_cfg = cfg_train.get("ema", None)
+    ema = None
+    if ema_cfg is not None and bool(ema_cfg.get("enabled", False)):
+        ema = ModelEMA(
+            inner_model,
+            decay=float(ema_cfg.get("decay", 0.999)),
+            warmup_epochs=int(ema_cfg.get("warmup_epochs", 2)),
+            steps_per_epoch=steps_per_epoch,
+        )
+        plog.info(
+            f"EMA enabled (decay {ema.decay}); validating with "
+            f"{'EMA' if bool(ema_cfg.get('validate_with_ema', True)) else 'raw'} weights"
+        )
+    validate_with_ema = ema is not None and bool(
+        ema_cfg.get("validate_with_ema", True)
+    )
+
     # ---------------- resume ----------------
     ckpt_dir = Path("./checkpoints")
+    best_dir = Path("./checkpoints_best")
     loaded_epoch = load_checkpoint(
         str(ckpt_dir),
         models=inner_model,
@@ -311,6 +330,13 @@ def run(cfg: DictConfig) -> None:
     start_epoch = max(int(cfg.get("start_epoch", 0)), loaded_epoch + 1 if loaded_epoch else 0)
     for _ in range(start_epoch * steps_per_epoch):
         scheduler.step()
+
+    es_cfg = cfg_train.get("early_stopping", None)
+    es_enabled = es_cfg is not None and bool(es_cfg.get("enabled", False))
+    es_patience = int(es_cfg.get("patience", 8)) if es_enabled else 0
+    es_min_delta = float(es_cfg.get("min_delta", 0.0)) if es_enabled else 0.0
+    best_loss = float("inf")
+    epochs_since_best = 0
 
     # ---------------- training loop ----------------
     for epoch in range(start_epoch, max_epochs):
@@ -345,7 +371,7 @@ def run(cfg: DictConfig) -> None:
                             std=train_ds.precip_std,
                             transform=train_ds.precip_transform,
                         )
-                    pred = mix(weights, biases, expert_precip)
+                    pred = mix(weights, biases, expert_precip, mask=mask)
                     loss = loss_fn(pred.float(), target, target_mm)
                 loss.backward()
                 if grad_clip > 0:
@@ -353,6 +379,8 @@ def run(cfg: DictConfig) -> None:
                         inner_model.parameters(), grad_clip
                     )
                 optimizer.step()
+                if ema is not None:
+                    ema.update(inner_model, epoch=epoch)
                 scheduler.step()
                 scalars = {"loss": loss, "lr": optimizer.param_groups[0]["lr"]}
                 # Composite loss: log the two terms so bias_weight is tunable
@@ -363,12 +391,36 @@ def run(cfg: DictConfig) -> None:
                 log.log_minibatch(_ddp_mean_scalars(scalars, dist=dist))
 
         # ---------------- validation ----------------
+        is_best = False
         if (
             validator is not None
             and (epoch + 1) % int(cfg.validation.get("every_n_epochs", 1)) == 0
         ):
             with LaunchLogger("valid", epoch=epoch + 1) as vlog:
-                metrics, extras = validator.run(model, val_loader)
+                if validate_with_ema:
+                    ema.apply_to(inner_model)
+                try:
+                    metrics, extras = validator.run(model, val_loader)
+                finally:
+                    if validate_with_ema:
+                        ema.restore(inner_model)
+                # `loss` is the training criterion on the val split -- the
+                # quantity early stopping and best-checkpoint selection use.
+                # It is all-reduced inside the validator, so every rank sees
+                # the same value and decides identically.
+                monitored = metrics.get("loss", None)
+                if monitored is not None:
+                    if monitored < best_loss - es_min_delta:
+                        best_loss = float(monitored)
+                        epochs_since_best = 0
+                        is_best = True
+                    else:
+                        epochs_since_best += 1
+                        is_best = False
+                    metrics["best_loss"] = best_loss
+                    metrics["epochs_since_best"] = float(epochs_since_best)
+                else:
+                    is_best = False
                 vlog.log_epoch(metrics)
                 if dist.rank == 0 and extras.get("weight_maps"):
                     import numpy as np
@@ -380,17 +432,44 @@ def run(cfg: DictConfig) -> None:
         # ---------------- checkpoint ----------------
         if dist.distributed and dist.world_size > 1:
             torch.distributed.barrier()
-        if (
-            dist.rank == 0
-            and (epoch + 1) % int(cfg.get("checkpoint_save_interval", 5)) == 0
-        ):
-            save_checkpoint(
-                str(ckpt_dir),
-                models=inner_model,
-                optimizer=optimizer,
-                scheduler=None,
-                epoch=epoch,
+        if dist.rank == 0:
+            if (epoch + 1) % int(cfg.get("checkpoint_save_interval", 5)) == 0:
+                save_checkpoint(
+                    str(ckpt_dir),
+                    models=inner_model,
+                    optimizer=optimizer,
+                    scheduler=None,
+                    epoch=epoch,
+                )
+            # Best-so-far weights kept separately: the LAST epoch is the most
+            # overfit one, so `checkpoints/` must not be what gets shipped.
+            if is_best:
+                if validate_with_ema:
+                    ema.apply_to(inner_model)
+                try:
+                    save_checkpoint(
+                        str(best_dir),
+                        models=inner_model,
+                        optimizer=optimizer,
+                        scheduler=None,
+                        epoch=epoch,
+                    )
+                finally:
+                    if validate_with_ema:
+                        ema.restore(inner_model)
+                plog.info(
+                    f"new best validation loss {best_loss:.4f} at epoch "
+                    f"{epoch} -> {best_dir}"
+                )
+
+        if es_enabled and epochs_since_best >= es_patience:
+            plog.info(
+                f"early stopping at epoch {epoch}: {epochs_since_best} epochs "
+                f"without improving on {best_loss:.4f} (patience {es_patience})"
             )
+            if dist.distributed and dist.world_size > 1:
+                torch.distributed.barrier()
+            break
 
     if dist.rank == 0:
         save_checkpoint(
@@ -398,9 +477,12 @@ def run(cfg: DictConfig) -> None:
             models=inner_model,
             optimizer=optimizer,
             scheduler=None,
-            epoch=max_epochs - 1,
+            epoch=epoch,
         )
-    plog.info("training complete")
+    plog.info(
+        f"training complete; best validation loss {best_loss:.4f} "
+        f"(best weights in {best_dir})"
+    )
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")

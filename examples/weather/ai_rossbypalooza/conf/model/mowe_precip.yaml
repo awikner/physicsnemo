@@ -8,13 +8,18 @@
 name: mowe_precip
 params:
   patch_size: [4, 4]        # 180x360 -> 45x90 = 4050 tokens
-  hidden_size: 384
-  depth: 8
-  num_heads: 8
+  # 192/4 (3.81M params) rather than 384/8 (24.0M): the 384/8 gate overfit
+  # hard -- validation loss bottomed at epoch 10 then rose 18% by epoch 32 --
+  # against only ~2900 independent initialisations, and the learned function
+  # is just 4 weights + 4 biases per gridpoint.
+  hidden_size: 192
+  depth: 4
+  num_heads: 6              # head dim 32
   mlp_ratio: 4.0
   attention_backend: timm   # transformer_engine on H100/A100 if available
   layernorm_backend: torch
   noise_dim: null           # deterministic gate (Method 0 baseline)
+  drop_path: 0.15           # stochastic depth, expanded to 0..0.15 over blocks
 
 # Space the expert precip fields are combined in:
 #   physical - invert the log transform first, so P_hat = sum_i w_i (P_i + b_i)
