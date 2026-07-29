@@ -8,4 +8,5 @@
 enabled: true
 every_n_epochs: 1
 # Written by tools/compute_seeps_climatology.py (IMERG train years).
-seeps_climatology: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_seeps_climatology.zarr
+# Cluster-specific path comes from the dataset config's normalization block.
+seeps_climatology: ${dataset.normalization.seeps_climatology}
