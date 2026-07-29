@@ -171,7 +171,18 @@ class StreamingMonthlyScores:
         self.seeps_w_sum[bin_index] += sw.sum()
 
     def finalize(self) -> dict[str, torch.Tensor]:
-        """Per-bin ``rmse``/``bias``/``acc``/``seeps``; empty bins are NaN."""
+        """Per-bin ``rmse``/``bias``/``acc``/``seeps``/``amp``; empty bins NaN.
+
+        ``amp`` is the anomaly-amplitude ratio sigma_pred / sigma_obs. It
+        matters because MSE decomposes as
+        ``bias^2 + (sp - st)^2 + 2*sp*st*(1 - r)``, so shrinking the forecast
+        anomaly toward zero kills the decorrelation term outright: shrinking
+        LOWERS MSE whenever r < 0.5, and the MSE-optimal amplitude is
+        ``sp = r * st``. With ACC near 0.29 a pure-MSE objective is therefore
+        rewarded for keeping only ~29% of observed variance -- exactly the
+        intensity compression this project exists to fix. amp ~ 1 means
+        intensity is preserved; amp ~ r means the loss is hedging.
+        """
         for t in (
             self.sq_sum,
             self.err_sum,
@@ -190,11 +201,20 @@ class StreamingMonthlyScores:
             self.s_pp.clamp(min=1e-12) * self.s_tt.clamp(min=1e-12)
         )
         seeps = self.seeps_sum / self.seeps_w_sum.clamp(min=1e-12)
+        amp = torch.sqrt(
+            self.s_pp.clamp(min=0.0) / self.s_tt.clamp(min=1e-12)
+        )
         empty = self.w_sum <= 0
-        for v in (rmse, bias, acc):
+        for v in (rmse, bias, acc, amp):
             v[empty] = float("nan")
         seeps[self.seeps_w_sum <= 0] = float("nan")
-        return {"rmse": rmse, "bias": bias, "acc": acc, "seeps": seeps}
+        return {
+            "rmse": rmse,
+            "bias": bias,
+            "acc": acc,
+            "seeps": seeps,
+            "amp": amp,
+        }
 
 
 class MixtureValidator:
@@ -208,7 +228,7 @@ class MixtureValidator:
     supervised there, so scoring anywhere else would measure untrained
     extrapolation. Emitted keys per source: ``rmse_lead{tau}``,
     ``bias_lead{tau}``, ``seeps_lead{tau}`` + ``{rmse,bias,seeps}_mean``
-    over leads, and ``imd_{rmse,bias,acc,seeps}_{MM}`` per calendar month
+    over leads, and ``imd_{rmse,bias,acc,seeps,amp}_{MM}`` per calendar month
     (pooled over all validation years) + ``imd_{...}_mean``. With
     ``loss_fn`` set, also ``{source}/loss`` and a bare ``loss`` (the gate's),
     the training criterion evaluated on the val split.

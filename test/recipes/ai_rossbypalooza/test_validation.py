@@ -361,3 +361,34 @@ def test_scale_mm_rejects_non_positive():
 
     with _pytest.raises(ValueError, match="scale_mm"):
         RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, space="physical", scale_mm=0.0)
+
+
+def test_amplitude_ratio_diagnostic(tmp_path):
+    """`amp` is sigma_pred/sigma_obs on anomalies -- the shrinkage diagnostic.
+    MSE is minimised at amp = ACC, so amp << 1 means the loss is hedging."""
+    from validation import StreamingMonthlyScores
+
+    clim = SeepsClimatology(_clim(tmp_path / "clim_amp.zarr"))
+    clim.clim_mean = torch.full((12, H, W), 3.0)
+    clim.clim_mean_daily = None      # exercise the monthly fallback path
+
+    torch.manual_seed(0)
+    obs_anom = torch.randn(4, H, W) * 5.0
+    obs = 3.0 + obs_anom
+
+    for factor in (1.0, 0.5, 0.29):
+        m = StreamingMonthlyScores(
+            bins={7: 0}, climatology=clim,
+            region_weights=torch.ones(H, W), device=torch.device("cpu"),
+        )
+        m.update(0, 3.0 + factor * obs_anom, obs, torch.tensor([7] * 4))
+        out = m.finalize()
+        # Perfectly correlated but shrunk: ACC stays 1, amp reports the shrink.
+        np.testing.assert_allclose(float(out["amp"][0]), factor, rtol=1e-4)
+        np.testing.assert_allclose(float(out["acc"][0]), 1.0, rtol=1e-4)
+    # Emitted for every month and as a mean, alongside the other scores.
+    v = _validator(tmp_path)
+    target = torch.rand(2, H, W) * 5.0
+    metrics, _ = v.run(_PickExpertZero(), [_batch(target, [0.0, 1.0], month=7)])
+    assert "gate/imd_amp_07" in metrics and "gate/imd_amp_mean" in metrics
+    assert "equal_weight/imd_amp_mean" in metrics
