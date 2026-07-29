@@ -171,7 +171,7 @@ def test_streaming_monthly_rmse_acc():
     from validation import StreamingMonthlyRmseAcc
 
     h, w = 4, 6
-    bins = {(2021, 6): 0, (2021, 7): 1}
+    bins = {6: 0, 7: 1}  # calendar-month bins, pooled over validation years
     clim = torch.zeros(12, h, w)
     clim[5] = 2.0  # June climatology = 2 mm/day
     acc_w = torch.ones(h, w)
@@ -179,10 +179,12 @@ def test_streaming_monthly_rmse_acc():
         bins=bins, clim_mean=clim, region_weights=acc_w,
         device=torch.device("cpu"),
     )
-    # June: pred anomalies exactly equal target anomalies -> ACC 1, RMSE 0.
+    # June, samples from two different years pooled into one bin:
+    # pred anomalies exactly equal target anomalies -> ACC 1, RMSE 0.
     target = torch.rand(3, h, w) * 5
     months = torch.tensor([6, 6, 6])
-    m.update(0, target.clone(), target, months)
+    m.update(0, target[:2].clone(), target[:2], months[:2])  # e.g. 2021 June
+    m.update(0, target[2:].clone(), target[2:], months[2:])  # e.g. 2022 June
     # July: pred = -target anomalies (clim 0) -> ACC -1; RMSE = 2*|target|.
     t2 = torch.rand(2, h, w) + 1.0
     m.update(1, -t2, t2, torch.tensor([7, 7]))

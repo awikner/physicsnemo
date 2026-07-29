@@ -35,7 +35,6 @@ from seeps import (
     SeepsClimatology,
     StreamingRegionalSEEPS,
     months_from_hours_since_1900,
-    years_from_hours_since_1900,
 )
 
 
@@ -75,18 +74,19 @@ class StreamingRegionalScore:
 
 
 class StreamingMonthlyRmseAcc:
-    """Per-(year, month) lat-weighted RMSE + anomaly correlation (ACC) over
+    """Per-calendar-month lat-weighted RMSE + anomaly correlation (ACC) over
     a masked region (the IMD-coverage gridpoints), streaming + DDP-safe.
 
     Anomalies are relative to the monthly climatological mean
     (``clim_mean (12, H, W)`` from the climatology store). Bins are the
-    calendar (year, month) of each sample's VALID day.
+    calendar month of each sample's VALID day, pooled over all validation
+    years (one RMSE/ACC per month, computed from every sample of that month).
     """
 
     def __init__(
         self,
         *,
-        bins: dict[tuple[int, int], int],
+        bins: dict[int, int],
         clim_mean: torch.Tensor,
         region_weights: torch.Tensor,
         device: torch.device,
@@ -143,7 +143,9 @@ class MixtureValidator:
     Sources scored: ``"gate"``, ``"equal_weight"`` (mean of live experts'
     precip), and each expert by name (only on samples where it is live).
     Emitted metric keys: ``{source}/rmse_lead{tau}``, ``.../bias_lead{tau}``,
-    ``.../seeps_lead{tau}``, plus ``.../{rmse,bias,seeps}_mean`` over leads.
+    ``.../seeps_lead{tau}``, plus ``.../{rmse,bias,seeps}_mean`` over leads;
+    with an IMD mask also ``.../imd_{rmse,acc}_{MM}`` per calendar month
+    (pooled over all validation years) and ``.../imd_{rmse,acc}_mean``.
     """
 
     def __init__(
@@ -159,7 +161,6 @@ class MixtureValidator:
         device: torch.device,
         n_weight_map_samples: int = 2,
         monthly_region_weights: torch.Tensor | None = None,
-        val_years: tuple[int, int] | None = None,
     ) -> None:
         self.expert_names = list(expert_names)
         self.lead_lo, self.lead_hi = int(lead_days[0]), int(lead_days[1])
@@ -171,26 +172,17 @@ class MixtureValidator:
         self.precip_transform = precip_transform
         self.device = device
         self.n_weight_map_samples = int(n_weight_map_samples)
-        # Monthly IMD-region RMSE/ACC: bins cover every (year, month) a
-        # valid day can land in (leads spill past Dec into year+1).
+        # Monthly IMD-region RMSE/ACC: one bin per calendar month of the
+        # valid day, pooled over all validation years.
         self.monthly_region_weights = monthly_region_weights
-        self.month_bins: dict[tuple[int, int], int] = {}
+        self.month_bins: dict[int, int] = {}
         if monthly_region_weights is not None:
-            if val_years is None:
-                raise ValueError("monthly metrics need val_years")
             if seeps_climatology.clim_mean is None:
                 raise ValueError(
                     "the climatology store lacks clim_mean — regenerate it "
                     "with tools/compute_seeps_climatology.py"
                 )
-            self.month_bins = {
-                (y, m): i
-                for i, (y, m) in enumerate(
-                    (y, m)
-                    for y in range(int(val_years[0]), int(val_years[1]) + 2)
-                    for m in range(1, 13)
-                )
-            }
+            self.month_bins = {m: m - 1 for m in range(1, 13)}
 
     def _sources(self) -> list[str]:
         return ["gate", "equal_weight", *self.expert_names]
@@ -240,9 +232,6 @@ class MixtureValidator:
             months = months_from_hours_since_1900(batch["valid_time"]).to(
                 self.device
             )
-            years = years_from_hours_since_1900(batch["valid_time"]).to(
-                self.device
-            )
 
             weights, biases = model(x, mask, taus)
             pred_mm = denormalize_precip(
@@ -286,13 +275,11 @@ class MixtureValidator:
                     weight_maps[key] = weights[sel][0].float().cpu().numpy()
 
             if monthly is not None:
-                ym = years * 100 + months
-                for code in ym.unique().tolist():
-                    y, m = int(code) // 100, int(code) % 100
-                    bi = self.month_bins.get((y, m))
+                for code in months.unique().tolist():
+                    bi = self.month_bins.get(int(code))
                     if bi is None:
                         continue
-                    sel = ym == code
+                    sel = months == code
                     t_mm = target_mm[sel]
                     m_sel = months[sel]
                     monthly["gate"].update(bi, pred_mm[sel], t_mm, m_sel)
@@ -323,12 +310,12 @@ class MixtureValidator:
             for s in self._sources():
                 m_rmse, m_acc, m_w = monthly[s].finalize()
                 vals_r, vals_a = [], []
-                for (y, m), bi in self.month_bins.items():
+                for m, bi in self.month_bins.items():
                     r, a = float(m_rmse[bi]), float(m_acc[bi])
                     if math.isnan(r):
                         continue
-                    metrics[f"{s}/imd_rmse_{y}-{m:02d}"] = r
-                    metrics[f"{s}/imd_acc_{y}-{m:02d}"] = a
+                    metrics[f"{s}/imd_rmse_{m:02d}"] = r
+                    metrics[f"{s}/imd_acc_{m:02d}"] = a
                     vals_r.append(r)
                     vals_a.append(a)
                 if vals_r:

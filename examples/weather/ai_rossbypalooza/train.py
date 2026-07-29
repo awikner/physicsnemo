@@ -280,7 +280,6 @@ def run(cfg: DictConfig) -> None:
             precip_transform=val_ds.precip_transform,
             device=dist.device,
             monthly_region_weights=monthly_weights,
-            val_years=tuple(int(y) for y in cfg.dataset.val.years),
         )
 
     # ---------------- resume ----------------
