@@ -60,9 +60,11 @@ logger = logging.getLogger("mowe_train")
 
 
 def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
-    """wandb on EVERY rank (thread-jitter symmetry keeps DDP collectives in
-    lockstep — see ai_rossby/train.py for the full rationale); only rank 0
-    is online and drives LaunchLogger. Must run BEFORE LaunchLogger.initialize."""
+    """wandb on EVERY rank so wandb.run exists everywhere for LaunchLogger;
+    only rank 0 is online and drives logging. Non-rank-0 uses mode="disabled"
+    (no-op run, no wandb-core service): concurrent offline-mode services on one
+    node fail port-file startup on Midway3 (wandb 0.28.1, ServicePollForToken).
+    Must run BEFORE LaunchLogger.initialize."""
     wb = cfg.get("wandb", None)
     if wb is None or not bool(wb.get("enabled", False)):
         return False
@@ -79,7 +81,7 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
         project=str(wb.get("project", "ai-rossbypalooza")),
         entity=str(_ent) if _ent else None,
         name=str(wb.get("name", cfg.get("run_name", "mowe"))),
-        mode=str(wb.get("mode", "offline")) if dist.rank == 0 else "offline",
+        mode=str(wb.get("mode", "offline")) if dist.rank == 0 else "disabled",
         config=OmegaConf.to_container(cfg, resolve=True),
         init_timeout=int(wb.get("init_timeout", 300)),
     )
