@@ -21,7 +21,8 @@ mean). The baselines are the bar the gate must beat.
 
 Streaming + DDP-safe (update/finalize with all-reduced sums), following
 ``examples/weather/ai_rossby/validate.py``. All scores are computed in
-physical mm/day over the region box.
+physical mm/day over the SAME region the training loss uses (monsoon box
+intersected with IMD gauge coverage) — the gate is only supervised there.
 """
 
 from __future__ import annotations
@@ -32,9 +33,12 @@ import torch.distributed as dist
 from losses import denormalize_precip
 from mowe_precip import mix
 from seeps import (
+    P1_MAX,
+    P1_MIN,
     SeepsClimatology,
     StreamingRegionalSEEPS,
     months_from_hours_since_1900,
+    seeps_penalty,
 )
 
 
@@ -73,33 +77,43 @@ class StreamingRegionalScore:
         return torch.sqrt(self.sq_sum / denom), self.err_sum / denom
 
 
-class StreamingMonthlyRmseAcc:
-    """Per-calendar-month lat-weighted RMSE + anomaly correlation (ACC) over
-    a masked region (the IMD-coverage gridpoints), streaming + DDP-safe.
+class StreamingMonthlyScores:
+    """Per-calendar-month lat-weighted RMSE, bias, anomaly correlation (ACC)
+    and SEEPS over the scoring region, streaming + DDP-safe.
 
     Anomalies are relative to the monthly climatological mean
     (``clim_mean (12, H, W)`` from the climatology store). Bins are the
     calendar month of each sample's VALID day, pooled over all validation
-    years (one RMSE/ACC per month, computed from every sample of that month).
+    years (one score per month, from every sample of that month).
+
+    SEEPS uses the same p1/t2 climatology and validity range as
+    :class:`seeps.StreamingRegionalSEEPS`, so its gridpoint set is the
+    region minus points whose climatological ``p1`` is outside
+    ``[P1_MIN, P1_MAX]`` — hence a separate weight total.
     """
 
     def __init__(
         self,
         *,
         bins: dict[int, int],
-        clim_mean: torch.Tensor,
+        climatology: SeepsClimatology,
         region_weights: torch.Tensor,
         device: torch.device,
     ) -> None:
         self.bins = dict(bins)
         n = len(self.bins)
         self.weights = region_weights.to(device=device, dtype=torch.float32)
-        self.clim_mean = clim_mean.to(device=device, dtype=torch.float32)
+        self.clim = climatology.to(device)
+        self.clim_mean = self.clim.clim_mean.to(dtype=torch.float32)
         self.sq_sum = torch.zeros(n, device=device)
+        self.err_sum = torch.zeros(n, device=device)
         self.s_pt = torch.zeros(n, device=device)
         self.s_pp = torch.zeros(n, device=device)
         self.s_tt = torch.zeros(n, device=device)
         self.w_sum = torch.zeros(n, device=device)
+        self.seeps_sum = torch.zeros(n, device=device)
+        self.seeps_w_sum = torch.zeros(n, device=device)
+        self._p1_valid = (self.clim.p1 >= P1_MIN) & (self.clim.p1 <= P1_MAX)
 
     @torch.no_grad()
     def update(
@@ -112,29 +126,54 @@ class StreamingMonthlyRmseAcc:
         finite = torch.isfinite(target_mm)
         w = self.weights.unsqueeze(0) * finite.float()
         t = torch.nan_to_num(target_mm)
-        clim = self.clim_mean[months.long() - 1]  # (B, H, W)
+        m = months.long() - 1
+        clim = self.clim_mean[m]  # (B, H, W)
         err = pred_mm - t
         p_anom = pred_mm - clim
         t_anom = t - clim
         self.sq_sum[bin_index] += (w * err**2).sum()
+        self.err_sum[bin_index] += (w * err).sum()
         self.s_pt[bin_index] += (w * p_anom * t_anom).sum()
         self.s_pp[bin_index] += (w * p_anom**2).sum()
         self.s_tt[bin_index] += (w * t_anom**2).sum()
         self.w_sum[bin_index] += w.sum()
 
-    def finalize(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(rmse, acc, weight_total) per bin; empty bins are NaN."""
-        for t in (self.sq_sum, self.s_pt, self.s_pp, self.s_tt, self.w_sum):
+        penalty = seeps_penalty(
+            pred_mm,
+            target_mm,
+            self.clim.p1[m].clamp(1e-6, 1.0 - 1e-6),
+            self.clim.t2[m],
+            dry_threshold_mm=self.clim.dry_threshold_mm,
+        )
+        sw = w * self._p1_valid[m].float()
+        self.seeps_sum[bin_index] += (penalty * sw).sum()
+        self.seeps_w_sum[bin_index] += sw.sum()
+
+    def finalize(self) -> dict[str, torch.Tensor]:
+        """Per-bin ``rmse``/``bias``/``acc``/``seeps``; empty bins are NaN."""
+        for t in (
+            self.sq_sum,
+            self.err_sum,
+            self.s_pt,
+            self.s_pp,
+            self.s_tt,
+            self.w_sum,
+            self.seeps_sum,
+            self.seeps_w_sum,
+        ):
             _all_reduce_sum(t)
         denom = self.w_sum.clamp(min=1e-12)
         rmse = torch.sqrt(self.sq_sum / denom)
+        bias = self.err_sum / denom
         acc = self.s_pt / torch.sqrt(
             self.s_pp.clamp(min=1e-12) * self.s_tt.clamp(min=1e-12)
         )
+        seeps = self.seeps_sum / self.seeps_w_sum.clamp(min=1e-12)
         empty = self.w_sum <= 0
-        rmse[empty] = float("nan")
-        acc[empty] = float("nan")
-        return rmse, acc, self.w_sum
+        for v in (rmse, bias, acc):
+            v[empty] = float("nan")
+        seeps[self.seeps_w_sum <= 0] = float("nan")
+        return {"rmse": rmse, "bias": bias, "acc": acc, "seeps": seeps}
 
 
 class MixtureValidator:
@@ -142,10 +181,14 @@ class MixtureValidator:
 
     Sources scored: ``"gate"``, ``"equal_weight"`` (mean of live experts'
     precip), and each expert by name (only on samples where it is live).
-    Emitted metric keys: ``{source}/rmse_lead{tau}``, ``.../bias_lead{tau}``,
-    ``.../seeps_lead{tau}``, plus ``.../{rmse,bias,seeps}_mean`` over leads;
-    with an IMD mask also ``.../imd_{rmse,acc}_{MM}`` per calendar month
-    (pooled over all validation years) and ``.../imd_{rmse,acc}_mean``.
+
+    Every metric uses the SAME ``region_weights`` as the training loss (the
+    monsoon box intersected with the IMD-coverage mask) — the gate is only
+    supervised there, so scoring anywhere else would measure untrained
+    extrapolation. Emitted keys per source: ``rmse_lead{tau}``,
+    ``bias_lead{tau}``, ``seeps_lead{tau}`` + ``{rmse,bias,seeps}_mean``
+    over leads, and ``imd_{rmse,bias,acc,seeps}_{MM}`` per calendar month
+    (pooled over all validation years) + ``imd_{...}_mean``.
     """
 
     def __init__(
@@ -160,7 +203,7 @@ class MixtureValidator:
         precip_transform=None,
         device: torch.device,
         n_weight_map_samples: int = 2,
-        monthly_region_weights: torch.Tensor | None = None,
+        monthly: bool | None = None,
     ) -> None:
         self.expert_names = list(expert_names)
         self.lead_lo, self.lead_hi = int(lead_days[0]), int(lead_days[1])
@@ -172,12 +215,14 @@ class MixtureValidator:
         self.precip_transform = precip_transform
         self.device = device
         self.n_weight_map_samples = int(n_weight_map_samples)
-        # Monthly IMD-region RMSE/ACC: one bin per calendar month of the
-        # valid day, pooled over all validation years.
-        self.monthly_region_weights = monthly_region_weights
+        # Monthly scores: one bin per calendar month of the valid day,
+        # pooled over all validation years.
+        # monthly=None: enable when the climatology carries clim_mean.
+        has_clim_mean = seeps_climatology.clim_mean is not None
+        self.monthly = has_clim_mean if monthly is None else bool(monthly)
         self.month_bins: dict[int, int] = {}
-        if monthly_region_weights is not None:
-            if seeps_climatology.clim_mean is None:
+        if self.monthly:
+            if not has_clim_mean:
                 raise ValueError(
                     "the climatology store lacks clim_mean — regenerate it "
                     "with tools/compute_seeps_climatology.py"
@@ -209,12 +254,12 @@ class MixtureValidator:
             for s in self._sources()
         }
         monthly = None
-        if self.monthly_region_weights is not None:
+        if self.monthly:
             monthly = {
-                s: StreamingMonthlyRmseAcc(
+                s: StreamingMonthlyScores(
                     bins=self.month_bins,
-                    clim_mean=self.seeps_clim.clim_mean,
-                    region_weights=self.monthly_region_weights,
+                    climatology=self.seeps_clim,
+                    region_weights=self.region_weights,
                     device=self.device,
                 )
                 for s in self._sources()
@@ -308,19 +353,19 @@ class MixtureValidator:
             import math
 
             for s in self._sources():
-                m_rmse, m_acc, m_w = monthly[s].finalize()
-                vals_r, vals_a = [], []
+                mvals = monthly[s].finalize()
+                pooled: dict[str, list[float]] = {k: [] for k in mvals}
                 for m, bi in self.month_bins.items():
-                    r, a = float(m_rmse[bi]), float(m_acc[bi])
-                    if math.isnan(r):
+                    if math.isnan(float(mvals["rmse"][bi])):
                         continue
-                    metrics[f"{s}/imd_rmse_{m:02d}"] = r
-                    metrics[f"{s}/imd_acc_{m:02d}"] = a
-                    vals_r.append(r)
-                    vals_a.append(a)
-                if vals_r:
-                    metrics[f"{s}/imd_rmse_mean"] = sum(vals_r) / len(vals_r)
-                    metrics[f"{s}/imd_acc_mean"] = sum(vals_a) / len(vals_a)
+                    for name, arr in mvals.items():
+                        v = float(arr[bi])
+                        metrics[f"{s}/imd_{name}_{m:02d}"] = v
+                        if not math.isnan(v):
+                            pooled[name].append(v)
+                for name, vals in pooled.items():
+                    if vals:
+                        metrics[f"{s}/imd_{name}_mean"] = sum(vals) / len(vals)
         if was_training:
             model.train()
         return metrics, {"weight_maps": weight_maps}

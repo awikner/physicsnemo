@@ -167,34 +167,57 @@ def test_missing_climatology_names_generator(tmp_path):
         SeepsClimatology(tmp_path / "nope.zarr")
 
 
-def test_streaming_monthly_rmse_acc():
-    from validation import StreamingMonthlyRmseAcc
+def test_streaming_monthly_scores(tmp_path):
+    from validation import StreamingMonthlyScores
 
     h, w = 4, 6
     bins = {6: 0, 7: 1}  # calendar-month bins, pooled over validation years
-    clim = torch.zeros(12, h, w)
-    clim[5] = 2.0  # June climatology = 2 mm/day
-    acc_w = torch.ones(h, w)
-    m = StreamingMonthlyRmseAcc(
-        bins=bins, clim_mean=clim, region_weights=acc_w,
+    clim = SeepsClimatology(_write_clim(tmp_path / "clim_m.zarr", h=h, w=w))
+    clim.clim_mean = torch.zeros(12, h, w)
+    clim.clim_mean[5] = 2.0  # June climatology = 2 mm/day
+    m = StreamingMonthlyScores(
+        bins=bins, climatology=clim, region_weights=torch.ones(h, w),
         device=torch.device("cpu"),
     )
-    # June, samples from two different years pooled into one bin:
-    # pred anomalies exactly equal target anomalies -> ACC 1, RMSE 0.
+    # June, samples from two different years pooled into one bin: pred
+    # anomalies exactly equal target anomalies -> ACC 1, RMSE 0, bias 0.
     target = torch.rand(3, h, w) * 5
     months = torch.tensor([6, 6, 6])
     m.update(0, target[:2].clone(), target[:2], months[:2])  # e.g. 2021 June
     m.update(0, target[2:].clone(), target[2:], months[2:])  # e.g. 2022 June
-    # July: pred = -target anomalies (clim 0) -> ACC -1; RMSE = 2*|target|.
-    t2 = torch.rand(2, h, w) + 1.0
+    # July: pred = -target anomalies (clim 0) -> ACC -1; RMSE = 2*|target|;
+    # bias = -2*target (dry); forecast dry vs heavy observed -> SEEPS 4.0.
+    t2 = torch.full((2, h, w), 10.0)
     m.update(1, -t2, t2, torch.tensor([7, 7]))
-    rmse, acc, wt = m.finalize()
-    torch.testing.assert_close(rmse[0], torch.tensor(0.0))
-    torch.testing.assert_close(acc[0], torch.tensor(1.0), atol=1e-5, rtol=0)
-    torch.testing.assert_close(acc[1], torch.tensor(-1.0), atol=1e-5, rtol=0)
-    expected_rmse = (4 * t2**2).mean().sqrt()
-    torch.testing.assert_close(rmse[1], expected_rmse, rtol=1e-5, atol=1e-5)
-    assert wt[0] > 0 and wt[1] > 0
+    out = m.finalize()
+    torch.testing.assert_close(out["rmse"][0], torch.tensor(0.0))
+    torch.testing.assert_close(out["bias"][0], torch.tensor(0.0), atol=1e-6, rtol=0)
+    torch.testing.assert_close(out["acc"][0], torch.tensor(1.0), atol=1e-5, rtol=0)
+    torch.testing.assert_close(out["acc"][1], torch.tensor(-1.0), atol=1e-5, rtol=0)
+    torch.testing.assert_close(out["rmse"][1], (4 * t2**2).mean().sqrt())
+    torch.testing.assert_close(out["bias"][1], torch.tensor(-20.0))
+    # p1 = 0.5: dry forecast / heavy obs penalty = 0.5 * 4/(1-p1) = 4.
+    torch.testing.assert_close(out["seeps"][1], torch.tensor(4.0))
+    torch.testing.assert_close(out["seeps"][0], torch.tensor(0.0))
+    # Months with no samples are NaN in every metric.
+    for k in ("rmse", "bias", "acc", "seeps"):
+        assert torch.isnan(out[k][0]).sum() == 0
+
+
+def test_monthly_scores_empty_bin_is_nan(tmp_path):
+    from validation import StreamingMonthlyScores
+
+    clim = SeepsClimatology(_write_clim(tmp_path / "clim_e.zarr"))
+    clim.clim_mean = torch.zeros(12, 4, 6)
+    m = StreamingMonthlyScores(
+        bins={6: 0, 12: 1}, climatology=clim,
+        region_weights=torch.ones(4, 6), device=torch.device("cpu"),
+    )
+    m.update(0, torch.rand(1, 4, 6), torch.rand(1, 4, 6), torch.tensor([6]))
+    out = m.finalize()
+    for k in ("rmse", "bias", "acc", "seeps"):
+        assert not torch.isnan(out[k][0]), k
+        assert torch.isnan(out[k][1]), k
 
 
 def test_years_from_hours():

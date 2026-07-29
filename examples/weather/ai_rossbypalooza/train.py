@@ -260,26 +260,26 @@ def run(cfg: DictConfig) -> None:
             to_absolute_path(str(cfg.validation.seeps_climatology))
         )
         val_lead_days = tuple(cfg.dataset.val.lead_days)
-        monthly_weights = None
-        if imd_mask is not None:
-            # Monthly RMSE/ACC over the IMD-coverage region only (cos-lat
-            # weighted; the mask itself defines the region).
-            monthly_weights = region_weights(
-                val_ds.lat,
-                val_ds.lon,
-                (-90.0, 90.0, 0.0, 360.0),
-                extra_mask=imd_mask,
-            )
+        # Score exactly where the loss trains: box (x IMD coverage). The gate
+        # emits weights globally but is only supervised in this region, so
+        # metrics anywhere else would measure untrained extrapolation.
+        val_weights = region_weights(
+            val_ds.lat, val_ds.lon, box, extra_mask=imd_mask
+        )
+        plog.info(
+            f"validation region: {int((val_weights > 0).sum())} gridpoints"
+            + (" (box n IMD coverage)" if imd_mask is not None else " (box)")
+        )
         validator = MixtureValidator(
             expert_names=val_ds.expert_names,
             lead_days=(int(val_lead_days[0]), int(val_lead_days[1])),
-            region_weights=region_weights(val_ds.lat, val_ds.lon, box),
+            region_weights=val_weights,
             seeps_climatology=seeps_clim,
             precip_mean=val_ds.precip_mean,
             precip_std=val_ds.precip_std,
             precip_transform=val_ds.precip_transform,
             device=dist.device,
-            monthly_region_weights=monthly_weights,
+            monthly=True,
         )
 
     # ---------------- resume ----------------

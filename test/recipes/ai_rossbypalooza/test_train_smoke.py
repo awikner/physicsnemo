@@ -77,6 +77,10 @@ def smoke_cfg(tmp_path, monkeypatch):
         {
             "p1": (("month", "lat", "lon"), np.full((12, 8, 8), 0.5, "f4")),
             "t2": (("month", "lat", "lon"), np.full((12, 8, 8), 5.0, "f4")),
+            "clim_mean": (
+                ("month", "lat", "lon"),
+                np.full((12, 8, 8), 3.0, "f4"),
+            ),
         },
         coords={
             "month": np.arange(1, 13),
