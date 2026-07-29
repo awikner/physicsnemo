@@ -30,7 +30,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from losses import denormalize_precip
+from losses import denormalize_precip, normalize_precip
 from mowe_precip import mix
 from seeps import (
     P1_MAX,
@@ -188,7 +188,9 @@ class MixtureValidator:
     extrapolation. Emitted keys per source: ``rmse_lead{tau}``,
     ``bias_lead{tau}``, ``seeps_lead{tau}`` + ``{rmse,bias,seeps}_mean``
     over leads, and ``imd_{rmse,bias,acc,seeps}_{MM}`` per calendar month
-    (pooled over all validation years) + ``imd_{...}_mean``.
+    (pooled over all validation years) + ``imd_{...}_mean``. With
+    ``loss_fn`` set, also ``{source}/loss`` and a bare ``loss`` (the gate's),
+    the training criterion evaluated on the val split.
     """
 
     def __init__(
@@ -204,6 +206,7 @@ class MixtureValidator:
         device: torch.device,
         n_weight_map_samples: int = 2,
         monthly: bool | None = None,
+        loss_fn=None,
     ) -> None:
         self.expert_names = list(expert_names)
         self.lead_lo, self.lead_hi = int(lead_days[0]), int(lead_days[1])
@@ -215,6 +218,10 @@ class MixtureValidator:
         self.precip_transform = precip_transform
         self.device = device
         self.n_weight_map_samples = int(n_weight_map_samples)
+        # The training criterion, evaluated on the val split: emitted as
+        # `loss` (the gate's, directly comparable to the logged train loss)
+        # and `{source}/loss` for every baseline.
+        self.loss_fn = loss_fn
         # Monthly scores: one bin per calendar month of the valid day,
         # pooled over all validation years.
         # monthly=None: enable when the climatology carries clim_mean.
@@ -265,6 +272,16 @@ class MixtureValidator:
                 for s in self._sources()
             }
         weight_maps: dict = {}
+        loss_sums = (
+            {s: torch.zeros((), device=self.device) for s in self._sources()}
+            if self.loss_fn is not None
+            else None
+        )
+        loss_counts = (
+            {s: torch.zeros((), device=self.device) for s in self._sources()}
+            if self.loss_fn is not None
+            else None
+        )
 
         was_training = model.training
         model.eval()
@@ -273,14 +290,17 @@ class MixtureValidator:
             mask = batch["expert_mask"].to(self.device, non_blocking=True)
             target_mm = batch["target_mm"].to(self.device, non_blocking=True)
             target_mm = target_mm.squeeze(1)
+            target_norm = batch["target"].to(self.device, non_blocking=True)
+            target_norm = target_norm.squeeze(1)
             taus = batch["lead_days"].to(self.device)
             months = months_from_hours_since_1900(batch["valid_time"]).to(
                 self.device
             )
 
             weights, biases = model(x, mask, taus)
+            pred_norm = mix(weights, biases, x[:, :, 0])
             pred_mm = denormalize_precip(
-                mix(weights, biases, x[:, :, 0]),
+                pred_norm,
                 mean=self.precip_mean,
                 std=self.precip_std,
                 transform=self.precip_transform,
@@ -294,6 +314,34 @@ class MixtureValidator:
             live = mask > 0
             eq_mm = (expert_mm * live.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
             eq_mm = eq_mm / live.sum(dim=1).clamp(min=1).unsqueeze(-1).unsqueeze(-1)
+
+            if loss_sums is not None:
+                # Gate: the mixture in normalized space -- byte-for-byte the
+                # quantity the training loss sees. Experts: their own
+                # normalized channel. Equal-weight is defined in mm/day, so
+                # re-normalize it to score the same field its RMSE uses.
+                preds_norm = {
+                    "gate": pred_norm,
+                    "equal_weight": normalize_precip(
+                        eq_mm,
+                        mean=self.precip_mean,
+                        std=self.precip_std,
+                        transform=self.precip_transform,
+                    ),
+                }
+                for ei, name in enumerate(self.expert_names):
+                    preds_norm[name] = x[:, ei, 0]
+                for name, pn in preds_norm.items():
+                    if name in self.expert_names:
+                        sel = live[:, self.expert_names.index(name)]
+                        if not sel.any():
+                            continue
+                        pn, tn, tm = pn[sel], target_norm[sel], target_mm[sel]
+                    else:
+                        tn, tm = target_norm, target_mm
+                    n = float(pn.shape[0])
+                    loss_sums[name] += self.loss_fn(pn.float(), tn, tm) * n
+                    loss_counts[name] += n
 
             # Bucket the batch by lead day (leads are mixed within a batch).
             for tau in taus.unique().tolist():
@@ -366,6 +414,17 @@ class MixtureValidator:
                 for name, vals in pooled.items():
                     if vals:
                         metrics[f"{s}/imd_{name}_mean"] = sum(vals) / len(vals)
+        if loss_sums is not None:
+            for s in self._sources():
+                _all_reduce_sum(loss_sums[s])
+                _all_reduce_sum(loss_counts[s])
+                if float(loss_counts[s]) > 0:
+                    v = float(loss_sums[s] / loss_counts[s])
+                    metrics[f"{s}/loss"] = v
+                    if s == "gate":
+                        # Bare key pairs with the training loss in wandb.
+                        metrics["loss"] = v
+
         if was_training:
             model.train()
         return metrics, {"weight_maps": weight_maps}

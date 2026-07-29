@@ -174,6 +174,23 @@ def denormalize_precip(
     return transform.inverse(x)
 
 
+def normalize_precip(
+    x_mm: torch.Tensor,
+    *,
+    mean: float,
+    std: float,
+    transform=None,
+) -> torch.Tensor:
+    """Physical mm/day -> normalized precip (inverse of :func:`denormalize_precip`).
+
+    Used to score a baseline that is *defined* in physical space (e.g. the
+    equal-weight arithmetic mean) with a loss that operates in normalized
+    space, so its loss and its RMSE describe the same forecast.
+    """
+    x = x_mm if transform is None else transform.forward(x_mm)
+    return (x - mean) / std
+
+
 def _weighted_regional_mean(
     err: torch.Tensor, weights: torch.Tensor, finite: torch.Tensor
 ) -> torch.Tensor:

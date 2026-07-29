@@ -280,6 +280,7 @@ def run(cfg: DictConfig) -> None:
             precip_transform=val_ds.precip_transform,
             device=dist.device,
             monthly=True,
+            loss_fn=loss_fn,
         )
 
     # ---------------- resume ----------------
