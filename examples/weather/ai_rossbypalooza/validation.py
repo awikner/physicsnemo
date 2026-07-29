@@ -27,6 +27,8 @@ intersected with IMD gauge coverage) — the gate is only supervised there.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.distributed as dist
 
@@ -37,9 +39,13 @@ from seeps import (
     P1_MIN,
     SeepsClimatology,
     StreamingRegionalSEEPS,
+    doy_from_hours_since_1900,
     months_from_hours_since_1900,
     seeps_penalty,
 )
+
+
+logger = logging.getLogger("mowe_validation")
 
 
 def _all_reduce_sum(t: torch.Tensor) -> None:
@@ -81,8 +87,11 @@ class StreamingMonthlyScores:
     """Per-calendar-month lat-weighted RMSE, bias, anomaly correlation (ACC)
     and SEEPS over the scoring region, streaming + DDP-safe.
 
-    Anomalies are relative to the monthly climatological mean
-    (``clim_mean (12, H, W)`` from the climatology store). Bins are the
+    ACC anomalies are relative to the DAY-OF-YEAR climatological mean
+    (``clim_mean_daily (366, H, W)``, a +/-7-day smoothed reference). A
+    monthly 12-step reference would leave the monsoon onset/withdrawal signal
+    in both the forecast and observed anomalies, inflating their correlation;
+    it is used only as a fallback for older climatology stores. Bins are the
     calendar month of each sample's VALID day, pooled over all validation
     years (one score per month, from every sample of that month).
 
@@ -104,7 +113,15 @@ class StreamingMonthlyScores:
         n = len(self.bins)
         self.weights = region_weights.to(device=device, dtype=torch.float32)
         self.clim = climatology.to(device)
+        daily = getattr(self.clim, "clim_mean_daily", None)
+        self.clim_daily = None if daily is None else daily.to(dtype=torch.float32)
         self.clim_mean = self.clim.clim_mean.to(dtype=torch.float32)
+        if self.clim_daily is None:
+            logger.warning(
+                "climatology store has no clim_mean_daily; ACC falls back to "
+                "the monthly reference, which inflates it -- regenerate with "
+                "tools/compute_seeps_climatology.py"
+            )
         self.sq_sum = torch.zeros(n, device=device)
         self.err_sum = torch.zeros(n, device=device)
         self.s_pt = torch.zeros(n, device=device)
@@ -122,12 +139,16 @@ class StreamingMonthlyScores:
         pred_mm: torch.Tensor,
         target_mm: torch.Tensor,
         months: torch.Tensor,
+        doys: torch.Tensor | None = None,
     ) -> None:
         finite = torch.isfinite(target_mm)
         w = self.weights.unsqueeze(0) * finite.float()
         t = torch.nan_to_num(target_mm)
         m = months.long() - 1
-        clim = self.clim_mean[m]  # (B, H, W)
+        if self.clim_daily is not None and doys is not None:
+            clim = self.clim_daily[doys.long() - 1]  # (B, H, W)
+        else:
+            clim = self.clim_mean[m]
         err = pred_mm - t
         p_anom = pred_mm - clim
         t_anom = t - clim
@@ -300,6 +321,7 @@ class MixtureValidator:
             months = months_from_hours_since_1900(batch["valid_time"]).to(
                 self.device
             )
+            doys = doy_from_hours_since_1900(batch["valid_time"]).to(self.device)
 
             weights, biases = model(x, mask, taus)
             expert_mm = denormalize_precip(
@@ -388,14 +410,19 @@ class MixtureValidator:
                     sel = months == code
                     t_mm = target_mm[sel]
                     m_sel = months[sel]
-                    monthly["gate"].update(bi, pred_mm[sel], t_mm, m_sel)
-                    monthly["equal_weight"].update(bi, eq_mm[sel], t_mm, m_sel)
+                    d_sel = doys[sel]
+                    monthly["gate"].update(bi, pred_mm[sel], t_mm, m_sel, d_sel)
+                    monthly["equal_weight"].update(bi, eq_mm[sel], t_mm, m_sel, d_sel)
                     for ei, name in enumerate(self.expert_names):
                         esel = sel & live[:, ei]
                         if not esel.any():
                             continue
                         monthly[name].update(
-                            bi, expert_mm[esel, ei], target_mm[esel], months[esel]
+                            bi,
+                            expert_mm[esel, ei],
+                            target_mm[esel],
+                            months[esel],
+                            doys[esel],
                         )
 
         metrics: dict[str, float] = {}

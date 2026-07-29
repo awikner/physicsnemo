@@ -26,7 +26,9 @@ Per calendar month and gridpoint:
   amounts (light is climatologically twice as likely as heavy). NaN where
   a gridpoint has no wet days (those cells fail the p1 validity window
   anyway);
-* ``clim_mean`` — the mean precip (mm/day), used as the anomaly reference
+* ``clim_mean`` — monthly mean precip (mm/day), retained for reference
+* ``clim_mean_daily`` — smoothed day-of-year mean precip (mm/day), the ACC
+  anomaly reference
   for the monthly lat-weighted ACC validation metric.
 
 Output: small zarr ``(month, lat, lon)`` with vars ``p1`` / ``t2``,
@@ -115,6 +117,61 @@ def month_fields(
     )
 
 
+def daily_clim(
+    imerg_root: Path,
+    years: list[int],
+    *,
+    var: str,
+    shape: tuple[int, int],
+    half_window: int = 7,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Smoothed day-of-year mean precip, ``(366, lat, lon)`` mm/day.
+
+    A monthly climatology is a 12-step function, so monsoon onset and
+    withdrawal survive inside each month and contaminate the anomalies used
+    for ACC (the same residual seasonal cycle appears in forecast and
+    observation, inflating their correlation). This instead bins by
+    day-of-year and smooths with a centred +/-``half_window``-day circular
+    window, so each day pools ~(2*hw+1)*n_years samples.
+
+    Accumulates streaming (one year open at a time) rather than loading the
+    whole record. Returns (clim, n_samples_per_doy).
+    """
+    n_doy = 366
+    total = np.zeros((n_doy, *shape), dtype="float64")
+    count = np.zeros((n_doy, *shape), dtype="float64")
+    for year in years:
+        store = imerg_root / f"{year}.zarr"
+        if not store.exists():
+            continue
+        with xr.open_zarr(store, consolidated=True) as ds:
+            data = ds[var].values.astype("float64")
+            doy = ds["time.dayofyear"].values.astype(int)
+        finite = np.isfinite(data)
+        for i, d in enumerate(doy):
+            total[d - 1] += np.where(finite[i], data[i], 0.0)
+            count[d - 1] += finite[i]
+        logger.info("daily clim: %d absorbed %d days", year, len(doy))
+
+    # Circular centred smoothing over day-of-year.
+    win = 2 * int(half_window) + 1
+    # Accumulate shift by shift: fancy-indexing all offsets at once would
+    # materialise a (366, win, lat, lon) float64 temporary (~2.8 GB at 1 deg).
+    sm_total = np.zeros_like(total)
+    sm_count = np.zeros_like(count)
+    for k in range(-int(half_window), int(half_window) + 1):
+        sm_total += np.roll(total, -k, axis=0)
+        sm_count += np.roll(count, -k, axis=0)
+    clim = np.where(sm_count > 0, sm_total / np.maximum(sm_count, 1.0), np.nan)
+    logger.info(
+        "daily clim: %d-day window, min/median samples per doy-gridpoint %d/%d",
+        win,
+        int(sm_count.min()),
+        int(np.median(sm_count)),
+    )
+    return clim.astype("float32"), sm_count.astype("float32")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--imerg-root", type=Path, required=True)
@@ -124,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="dry-day threshold in mm/day (WB2 convention)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--commit", default="unknown")
+    p.add_argument("--daily-half-window", type=int, default=7,
+                   help="half-width in days of the day-of-year smoothing window")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -153,14 +212,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         logger.info("month %02d: %d days", month, n)
 
+    clim_daily, n_daily = daily_clim(
+        args.imerg_root,
+        years,
+        var=args.var,
+        shape=(lat.size, lon.size),
+        half_window=args.daily_half_window,
+    )
+
     ds = xr.Dataset(
         {
             "p1": (("month", "lat", "lon"), p1),
             "t2": (("month", "lat", "lon"), t2),
             "clim_mean": (("month", "lat", "lon"), clim_mean),
+            # ACC reference: day-of-year, not month (see daily_clim).
+            "clim_mean_daily": (("dayofyear", "lat", "lon"), clim_daily),
+            "n_daily": (("dayofyear", "lat", "lon"), n_daily),
         },
         coords={
             "month": ("month", np.arange(1, 13, dtype="int32")),
+            "dayofyear": ("dayofyear", np.arange(1, 367, dtype="int32")),
             "lat": ("lat", lat),
             "lon": ("lon", lon),
         },
@@ -170,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             "source_years": f"{years[0]}-{years[-1]}",
             "dry_threshold_mm": float(args.dry_threshold),
             "t2_definition": "2/3 quantile of wet-day amounts (light:heavy = 2:1)",
+            "clim_mean_daily_window_days": int(2 * args.daily_half_window + 1),
             "generator": f"{SCRIPT_REL_PATH}@{args.commit}",
         },
     )

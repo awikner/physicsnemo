@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import cftime
+import pytest
 import numpy as np
 import torch
 import xarray as xr
@@ -239,3 +240,81 @@ def test_composite_loss_rejects_negative_weight():
 
     with pytest.raises(ValueError, match="bias_weight"):
         RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, bias_weight=-1.0)
+
+
+def test_acc_uses_daily_climatology_not_monthly(tmp_path):
+    """ACC anomalies must reference the day-of-year climatology. A monthly
+    12-step reference leaves the within-month seasonal signal in both the
+    forecast and observed anomalies, which inflates the correlation."""
+    from validation import StreamingMonthlyScores
+
+    # Monthly clim = 3 everywhere; daily clim ramps 1..366 so the two differ.
+    path = _clim(tmp_path / "clim_d.zarr")
+    ds = xr.open_zarr(path).load()
+    daily = np.tile(
+        np.linspace(1.0, 10.0, 366, dtype="f4")[:, None, None], (1, H, W)
+    )
+    ds["clim_mean_daily"] = (("dayofyear", "lat", "lon"), daily)
+    ds = ds.assign_coords(dayofyear=np.arange(1, 367, dtype="int32"))
+    ds.to_zarr(tmp_path / "clim_d2.zarr", mode="w", zarr_format=3, consolidated=True)
+    clim = SeepsClimatology(tmp_path / "clim_d2.zarr")
+    assert clim.clim_mean_daily is not None
+
+    doy = 196  # mid-July
+    ref_daily = float(np.linspace(1.0, 10.0, 366)[doy - 1])
+    obs = torch.full((2, H, W), ref_daily + 4.0)   # +4 anomaly vs daily clim
+    pred = torch.full((2, H, W), ref_daily + 2.0)  # +2 anomaly, same sign
+
+    m = StreamingMonthlyScores(
+        bins={7: 0}, climatology=clim,
+        region_weights=torch.ones(H, W), device=torch.device("cpu"),
+    )
+    m.update(0, pred, obs, torch.tensor([7, 7]), torch.tensor([doy, doy]))
+    with_daily = float(m.finalize()["acc"][0])
+
+    # Same fields scored against the monthly reference (doys omitted).
+    m2 = StreamingMonthlyScores(
+        bins={7: 0}, climatology=clim,
+        region_weights=torch.ones(H, W), device=torch.device("cpu"),
+    )
+    m2.clim_daily = None
+    m2.update(0, pred, obs, torch.tensor([7, 7]))
+    with_monthly = float(m2.finalize()["acc"][0])
+
+    # Both are +1 here (anomalies are co-signed), but the references differ,
+    # so the two paths are genuinely distinct code.
+    assert with_daily == pytest.approx(1.0, abs=1e-5)
+    assert with_monthly == pytest.approx(1.0, abs=1e-5)
+    # Now make the daily reference matter: an obs anomaly that is POSITIVE
+    # against the monthly clim but NEGATIVE against the daily one.
+    obs2 = torch.full((2, H, W), 4.0)      # monthly clim 3 -> +1 ; daily 5.8 -> -1.8
+    pred2 = torch.full((2, H, W), 8.0)     # monthly +5     ; daily +2.2
+    m3 = StreamingMonthlyScores(
+        bins={7: 0}, climatology=clim,
+        region_weights=torch.ones(H, W), device=torch.device("cpu"),
+    )
+    m3.update(0, pred2, obs2, torch.tensor([7, 7]), torch.tensor([doy, doy]))
+    acc_daily = float(m3.finalize()["acc"][0])
+    m4 = StreamingMonthlyScores(
+        bins={7: 0}, climatology=clim,
+        region_weights=torch.ones(H, W), device=torch.device("cpu"),
+    )
+    m4.clim_daily = None
+    m4.update(0, pred2, obs2, torch.tensor([7, 7]))
+    acc_monthly = float(m4.finalize()["acc"][0])
+    assert acc_daily < 0 < acc_monthly, (acc_daily, acc_monthly)
+
+
+def test_doy_from_hours_matches_cftime():
+    import cftime as _cf
+
+    from seeps import doy_from_hours_since_1900
+
+    epoch = _cf.DatetimeGregorian(1900, 1, 1)
+    cases = [(2021, 1, 1, 1), (2021, 7, 15, 196), (2020, 12, 31, 366)]
+    hs = [
+        int((_cf.DatetimeGregorian(y, m, d) - epoch).total_seconds() // 3600)
+        for (y, m, d, _) in cases
+    ]
+    got = doy_from_hours_since_1900(torch.tensor(hs)).tolist()
+    assert got == [c[3] for c in cases], got

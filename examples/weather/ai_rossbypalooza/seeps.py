@@ -140,6 +140,11 @@ class SeepsClimatology:
             # Monthly mean precip (mm/day): anomaly reference for ACC.
             # Absent in stores written before 2026-07-28; monthly ACC then
             # raises with a pointer to the regeneration tool.
+            self.clim_mean_daily = (
+                torch.from_numpy(ds["clim_mean_daily"].values.astype(np.float32))
+                if "clim_mean_daily" in ds
+                else None
+            )
             self.clim_mean = (
                 torch.from_numpy(ds["clim_mean"].values.astype(np.float32))
                 if "clim_mean" in ds
@@ -156,6 +161,8 @@ class SeepsClimatology:
         self.t2 = self.t2.to(device)
         if self.clim_mean is not None:
             self.clim_mean = self.clim_mean.to(device)
+        if getattr(self, "clim_mean_daily", None) is not None:
+            self.clim_mean_daily = self.clim_mean_daily.to(device)
         return self
 
 
@@ -228,6 +235,21 @@ def months_from_hours_since_1900(hours: torch.Tensor) -> torch.Tensor:
     epoch = cftime.DatetimeGregorian(1900, 1, 1, 0)
     out = [
         (epoch + datetime.timedelta(hours=int(h))).month for h in hours.tolist()
+    ]
+    return torch.tensor(out, dtype=torch.int64, device=hours.device)
+
+
+def doy_from_hours_since_1900(hours: torch.Tensor) -> torch.Tensor:
+    """Day-of-year (1..366) for int hours since 1900-01-01 00Z.
+
+    The ACC anomaly reference is a day-of-year climatology, not a monthly
+    one: a 12-step reference leaves the monsoon onset/withdrawal signal in
+    the anomalies of BOTH forecast and observation, which inflates their
+    correlation.
+    """
+    epoch = cftime.DatetimeGregorian(1900, 1, 1, 0)
+    out = [
+        (epoch + datetime.timedelta(hours=int(h))).dayofyr for h in hours.tolist()
     ]
     return torch.tensor(out, dtype=torch.int64, device=hours.device)
 
