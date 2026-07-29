@@ -300,8 +300,9 @@ def run(cfg: DictConfig) -> None:
     for epoch in range(start_epoch, max_epochs):
         train_sampler.set_epoch(epoch)
         model.train()
+        # LaunchLogger epochs are 1-indexed (iter starts at (epoch-1)*num_mini_batch).
         with LaunchLogger(
-            "train", epoch=epoch, num_mini_batch=steps_per_epoch, epoch_alert_freq=1
+            "train", epoch=epoch + 1, num_mini_batch=steps_per_epoch, epoch_alert_freq=1
         ) as log:
             for batch in train_loader:
                 x = batch["expert_inputs"].to(dist.device, non_blocking=True)
@@ -341,7 +342,7 @@ def run(cfg: DictConfig) -> None:
             validator is not None
             and (epoch + 1) % int(cfg.validation.get("every_n_epochs", 1)) == 0
         ):
-            with LaunchLogger("valid", epoch=epoch) as vlog:
+            with LaunchLogger("valid", epoch=epoch + 1) as vlog:
                 metrics, extras = validator.run(model, val_loader)
                 vlog.log_epoch(metrics)
                 if dist.rank == 0 and extras.get("weight_maps"):
