@@ -318,3 +318,46 @@ def test_doy_from_hours_matches_cftime():
     ]
     got = doy_from_hours_since_1900(torch.tensor(hs)).tolist()
     assert got == [c[3] for c in cases], got
+
+
+def test_physical_space_mse_is_unbiased_and_scaled():
+    """space=physical takes the error in mm/day (so squared error elicits the
+    arithmetic mean, no geometric shortfall) and scale_mm only rescales."""
+    from datapipes.precip import LogPrecipTransform
+
+    tr = LogPrecipTransform(epsilon=1e-3, units="m")
+    mu, sd = -6.379, 0.858
+    kw = dict(
+        space="physical", pred_space="physical",
+        precip_mean=mu, precip_std=sd, precip_transform=tr,
+    )
+    unscaled = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, **kw)
+    scaled = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, scale_mm=9.3, **kw)
+
+    t_mm = torch.rand(2, H, W) * 20.0
+    t_norm = normalize_precip(t_mm, mean=mu, std=sd, transform=tr)
+    pred = t_mm + 3.0                      # uniformly 3 mm/day too wet
+
+    # Error is in mm/day, not log space: MSE is exactly 9.
+    np.testing.assert_allclose(float(unscaled(pred, t_norm, t_mm)), 9.0, rtol=1e-5)
+    np.testing.assert_allclose(
+        float(scaled(pred, t_norm, t_mm)), 9.0 / 9.3**2, rtol=1e-5
+    )
+    # A perfect forecast scores zero either way.
+    assert float(scaled(t_mm, t_norm, t_mm)) < 1e-12
+    # Unlike the log-space loss, the minimiser is the arithmetic mean: for a
+    # two-outcome target the optimal constant prediction is their mean.
+    obs = torch.cat([torch.full((1, H, W), 2.0), torch.full((1, H, W), 50.0)])
+    tn = normalize_precip(obs, mean=mu, std=sd, transform=tr)
+    losses = {
+        c: float(unscaled(torch.full_like(obs, c), tn, obs))
+        for c in (11.4, 26.0, 40.0)     # geometric mean, arithmetic mean, high
+    }
+    assert min(losses, key=losses.get) == 26.0, losses
+
+
+def test_scale_mm_rejects_non_positive():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="scale_mm"):
+        RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, space="physical", scale_mm=0.0)

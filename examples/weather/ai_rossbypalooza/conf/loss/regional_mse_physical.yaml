@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MSE in physical mm/day -- NO log transform in the error.
+#
+# Squared error elicits the conditional MEAN of whatever space it is applied
+# in, so this is unbiased in mm/day by construction: no geometric-mean
+# shortfall and no bias penalty needed. The trade-off is the reason the log
+# transform existed -- heavy-rain gridpoints dominate the gradient and light
+# rain gets little signal, which is what this run tests.
+#
+# The precip channel reaching the gate is still log-standardized; only the
+# error space changes. scale_mm divides the MSE by 9.3^2 (the observed RMSE
+# scale) so the loss lands near 1.0 like the log-space losses and the tuned
+# lr / grad_clip_norm carry over -- pure rescaling, the optimum is unchanged.
+name: regional_mse
+space: physical
+lat_weighted: true
+scale_mm: 9.3

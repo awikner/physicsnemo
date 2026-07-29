@@ -212,6 +212,7 @@ class RegionalPrecipMSE(nn.Module):
         space: str = "normalized",
         pred_space: str = "normalized",
         bias_weight: float = 0.0,
+        scale_mm: float | None = None,
         precip_mean: float = 0.0,
         precip_std: float = 1.0,
         precip_transform=None,
@@ -245,6 +246,14 @@ class RegionalPrecipMSE(nn.Module):
         if bias_weight < 0:
             raise ValueError(f"bias_weight must be >= 0, got {bias_weight}")
         self.bias_weight = float(bias_weight)
+        # Reference RMSE (mm/day) used to divide a physical-space MSE, e.g.
+        # 9.3 puts it near 1.0 like the log-space loss so the tuned lr and
+        # grad_clip_norm transfer. Pure loss rescaling: it cannot move the
+        # optimum, and AdamW is largely scale-invariant anyway -- this mainly
+        # keeps gradient clipping from binding differently.
+        if scale_mm is not None and scale_mm <= 0:
+            raise ValueError(f"scale_mm must be positive, got {scale_mm}")
+        self.scale_mm = None if scale_mm is None else float(scale_mm)
         # Diagnostics from the last forward (detached, for logging).
         self.last_mse: float = float("nan")
         self.last_bias_mm: float = float("nan")
@@ -295,6 +304,8 @@ class RegionalPrecipMSE(nn.Module):
         finite = torch.isfinite(target)
         err = (pred - torch.nan_to_num(target)) ** 2
         mse = _weighted_regional_mean(err, self.weights, finite)
+        if self.space == "physical" and self.scale_mm is not None:
+            mse = mse / self.scale_mm**2
         if self.bias_weight <= 0:
             self.last_mse = float(mse.detach())
             self.last_bias_mm = float("nan")
@@ -408,6 +419,11 @@ def build_loss(
             space=str(cfg_loss.get("space", "normalized")),
             pred_space=pred_space,
             bias_weight=float(cfg_loss.get("bias_weight", 0.0)),
+            scale_mm=(
+                float(cfg_loss["scale_mm"])
+                if cfg_loss.get("scale_mm") is not None
+                else None
+            ),
             precip_mean=precip_mean,
             precip_std=precip_std,
             precip_transform=precip_transform,
