@@ -197,3 +197,45 @@ def test_loss_pred_space_physical_transforms_before_mse():
     np.testing.assert_allclose(got, expect, rtol=1e-4)
     # Negative rain is clipped rather than producing NaN.
     assert torch.isfinite(loss(-1.0 * t_mm, t_norm, t_mm))
+
+
+def test_composite_loss_adds_physical_bias_penalty():
+    """bias_weight adds lambda * (regional mean error in mm/day)^2 on top of
+    the log-space MSE, and is inert at bias_weight=0."""
+    from datapipes.precip import LogPrecipTransform
+
+    tr = LogPrecipTransform(epsilon=1e-3, units="m")
+    mu, sd, lam = -6.379, 0.858, 0.02
+    kw = dict(
+        space="normalized", pred_space="physical",
+        precip_mean=mu, precip_std=sd, precip_transform=tr,
+    )
+    plain = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, bias_weight=0.0, **kw)
+    comp = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, bias_weight=lam, **kw)
+
+    t_mm = torch.rand(3, H, W) * 15.0 + 6.0   # stays >4 so the >=0 clamp is inert
+    t_norm = normalize_precip(t_mm, mean=mu, std=sd, transform=tr)
+    pred_mm = t_mm - 4.0                      # uniformly 4 mm/day too dry
+
+    base = float(plain(pred_mm, t_norm, t_mm))
+    total = float(comp(pred_mm, t_norm, t_mm))
+    np.testing.assert_allclose(total, base + lam * 16.0, rtol=1e-4)
+    np.testing.assert_allclose(comp.last_bias_mm, -4.0, rtol=1e-4)
+    np.testing.assert_allclose(comp.last_mse, base, rtol=1e-6)
+
+    # A perfect forecast incurs no penalty; the penalty is bias, not spread.
+    assert float(comp(t_mm, t_norm, t_mm)) < 1e-9
+    # Equal-and-opposite errors cancel in the bias term but not in the MSE.
+    offset = torch.zeros_like(t_mm)
+    offset[:, : H // 2] = 3.0
+    offset[:, H // 2 :] = -3.0
+    unbiased = comp(t_mm + offset, t_norm, t_mm)
+    assert abs(comp.last_bias_mm) < 0.5           # cos-lat weights, not exact 0
+    assert float(unbiased) > 1e-3                  # MSE still sees the error
+
+
+def test_composite_loss_rejects_negative_weight():
+    import pytest
+
+    with pytest.raises(ValueError, match="bias_weight"):
+        RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, bias_weight=-1.0)

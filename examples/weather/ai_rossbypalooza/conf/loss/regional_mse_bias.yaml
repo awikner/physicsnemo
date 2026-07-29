@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Composite loss: log-space MSE + a physical-space bias penalty.
+#
+# Squared error in the standardized log(eps + P) space elicits the conditional
+# GEOMETRIC mean of rainfall. Measured on IMERG July over the IMD region
+# (2000-2019, 234k samples) that sits at 4.06 mm/day against an arithmetic mean
+# of 9.32 -- a -56% dry bias the log term alone has no reason to correct, and
+# the observed gate bias (-3.5 mm/day) matches the implied smearing factor to
+# within a percentage point. Note MAE would NOT help: it elicits the median,
+# which is lower still (3.65 mm/day, -61%).
+#
+# This adds bias_weight * (cos-lat-weighted regional mean error in mm/day)^2,
+# which penalises systematic drift while keeping the log term's balance across
+# rain intensities. bias_weight has units (mm/day)^-2.
+name: regional_mse
+space: normalized
+lat_weighted: true
+bias_weight: 0.02

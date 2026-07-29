@@ -354,12 +354,13 @@ def run(cfg: DictConfig) -> None:
                     )
                 optimizer.step()
                 scheduler.step()
-                log.log_minibatch(
-                    _ddp_mean_scalars(
-                        {"loss": loss, "lr": optimizer.param_groups[0]["lr"]},
-                        dist=dist,
-                    )
-                )
+                scalars = {"loss": loss, "lr": optimizer.param_groups[0]["lr"]}
+                # Composite loss: log the two terms so bias_weight is tunable
+                # from the curves rather than by guesswork.
+                if getattr(loss_fn, "bias_weight", 0.0) > 0:
+                    scalars["mse_term"] = loss_fn.last_mse
+                    scalars["bias_mm"] = loss_fn.last_bias_mm
+                log.log_minibatch(_ddp_mean_scalars(scalars, dist=dist))
 
         # ---------------- validation ----------------
         if (

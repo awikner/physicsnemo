@@ -211,6 +211,7 @@ class RegionalPrecipMSE(nn.Module):
         *,
         space: str = "normalized",
         pred_space: str = "normalized",
+        bias_weight: float = 0.0,
         precip_mean: float = 0.0,
         precip_std: float = 1.0,
         precip_transform=None,
@@ -230,6 +231,23 @@ class RegionalPrecipMSE(nn.Module):
         # mixture is an arithmetic mean in mm/day and this loss transforms it
         # into log space before taking the squared error.
         self.pred_space = pred_space
+        # Composite loss: add ``bias_weight * (regional mean error in mm/day)^2``
+        # to penalise systematic wet/dry drift directly. A log-space MSE alone
+        # elicits the conditional GEOMETRIC mean, which for monsoon rainfall
+        # sits ~56% below the arithmetic mean (measured on IMERG July over the
+        # IMD region), so the log term has no incentive to be unbiased in
+        # mm/day. Units of bias_weight are (mm/day)^-2: at 0.02 a -3.6 mm/day
+        # bias costs ~0.26, roughly a quarter of a typical log-MSE value,
+        # while a -0.5 mm/day bias costs a negligible 0.005.
+        # Note the penalty uses the per-batch regional mean error, so it also
+        # lightly penalises error variance (E[m^2] = bias^2 + var/n); with a
+        # few thousand weighted gridpoints per batch that term is small.
+        if bias_weight < 0:
+            raise ValueError(f"bias_weight must be >= 0, got {bias_weight}")
+        self.bias_weight = float(bias_weight)
+        # Diagnostics from the last forward (detached, for logging).
+        self.last_mse: float = float("nan")
+        self.last_bias_mm: float = float("nan")
         self.precip_mean = float(precip_mean)
         self.precip_std = float(precip_std)
         self.precip_transform = precip_transform
@@ -276,7 +294,30 @@ class RegionalPrecipMSE(nn.Module):
             target = t_norm
         finite = torch.isfinite(target)
         err = (pred - torch.nan_to_num(target)) ** 2
-        return _weighted_regional_mean(err, self.weights, finite)
+        mse = _weighted_regional_mean(err, self.weights, finite)
+        if self.bias_weight <= 0:
+            self.last_mse = float(mse.detach())
+            self.last_bias_mm = float("nan")
+            return mse
+
+        # Bias term in physical mm/day, whatever space the MSE used.
+        if self.pred_space == "physical":
+            p_mm = pred_mm
+        else:
+            p_mm = denormalize_precip(
+                _squeeze_channel(pred) if self.space != "physical" else pred,
+                mean=self.precip_mean,
+                std=self.precip_std,
+                transform=self.precip_transform,
+            )
+        finite_mm = torch.isfinite(t_mm)
+        signed = p_mm - torch.nan_to_num(t_mm)
+        w = self.weights.unsqueeze(0) * finite_mm.to(signed.dtype)
+        bias_mm = (signed * w).sum() / w.sum().clamp(min=1e-12)
+        total = mse + self.bias_weight * bias_mm**2
+        self.last_mse = float(mse.detach())
+        self.last_bias_mm = float(bias_mm.detach())
+        return total
 
 
 class RegionalPrecipLogMSE(nn.Module):
@@ -366,6 +407,7 @@ def build_loss(
             box,
             space=str(cfg_loss.get("space", "normalized")),
             pred_space=pred_space,
+            bias_weight=float(cfg_loss.get("bias_weight", 0.0)),
             precip_mean=precip_mean,
             precip_std=precip_std,
             precip_transform=precip_transform,
