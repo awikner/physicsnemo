@@ -4,8 +4,9 @@
 #
 # Midway3 FULL MoWE Method-0 training on the gpu partition (A100 node via
 # -C a100; for the V100/RTX6000 nodes drop the constraint and add
-# EXTRA="training.amp=none"). Model v1: log-precip space, IMD-masked loss,
-# 2000-2019 / 2020+ Mar-Sep split.
+# EXTRA="training.amp=none"). Data is read from midway2 scratch, which is
+# mounted on midway3 compute nodes (dataset=hindcast_midway2).
+# Model v1: log-precip space, IMD-masked loss, 2000-2019 / 2020+ Mar-Sep split.
 # One-time setup: bash setup_midway3.sh (creates the venv on scratch).
 #   sbatch train_mowe_midway3.sbatch
 # Variants: sbatch --export=ALL,EXTRA="loss=regional_log_mse run_name=..." ...
@@ -34,7 +35,7 @@ echo "[$(date)] training on $NGPU GPU(s): $(nvidia-smi -L | head -1)"
 
 torchrun --standalone --nproc-per-node="$NGPU" \
     "$REPO/examples/weather/ai_rossbypalooza/train.py" \
-    dataset=hindcast_midway3 \
+    dataset=hindcast_midway2 \
     run_name="${RUN_NAME:-mowe_v1_prod}" \
     dataset.loader.num_workers=6 \
     wandb.enabled="${WANDB:-false}" \
