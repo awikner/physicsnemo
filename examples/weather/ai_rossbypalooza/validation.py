@@ -207,6 +207,7 @@ class MixtureValidator:
         n_weight_map_samples: int = 2,
         monthly: bool | None = None,
         loss_fn=None,
+        mix_space: str = "physical",
     ) -> None:
         self.expert_names = list(expert_names)
         self.lead_lo, self.lead_hi = int(lead_days[0]), int(lead_days[1])
@@ -222,6 +223,9 @@ class MixtureValidator:
         # `loss` (the gate's, directly comparable to the logged train loss)
         # and `{source}/loss` for every baseline.
         self.loss_fn = loss_fn
+        # Must match training: "physical" mixes experts' mm/day (arithmetic
+        # mean), "log" mixes the standardized log channels (geometric mean).
+        self.mix_space = str(mix_space)
         # Monthly scores: one bin per calendar month of the valid day,
         # pooled over all validation years.
         # monthly=None: enable when the climatology carries clim_mean.
@@ -298,40 +302,49 @@ class MixtureValidator:
             )
 
             weights, biases = model(x, mask, taus)
-            pred_norm = mix(weights, biases, x[:, :, 0])
-            pred_mm = denormalize_precip(
-                pred_norm,
-                mean=self.precip_mean,
-                std=self.precip_std,
-                transform=self.precip_transform,
-            )
             expert_mm = denormalize_precip(
                 x[:, :, 0],
                 mean=self.precip_mean,
                 std=self.precip_std,
                 transform=self.precip_transform,
             )
+            if self.mix_space == "physical":
+                pred_norm = None
+                pred_mm = mix(weights, biases, expert_mm).clamp(min=0.0)
+            else:
+                pred_norm = mix(weights, biases, x[:, :, 0])
+                pred_mm = denormalize_precip(
+                    pred_norm,
+                    mean=self.precip_mean,
+                    std=self.precip_std,
+                    transform=self.precip_transform,
+                )
             live = mask > 0
             eq_mm = (expert_mm * live.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
             eq_mm = eq_mm / live.sum(dim=1).clamp(min=1).unsqueeze(-1).unsqueeze(-1)
 
             if loss_sums is not None:
-                # Gate: the mixture in normalized space -- byte-for-byte the
-                # quantity the training loss sees. Experts: their own
-                # normalized channel. Equal-weight is defined in mm/day, so
-                # re-normalize it to score the same field its RMSE uses.
-                preds_norm = {
-                    "gate": pred_norm,
-                    "equal_weight": normalize_precip(
-                        eq_mm,
-                        mean=self.precip_mean,
-                        std=self.precip_std,
-                        transform=self.precip_transform,
-                    ),
-                }
-                for ei, name in enumerate(self.expert_names):
-                    preds_norm[name] = x[:, ei, 0]
-                for name, pn in preds_norm.items():
+                # Feed every source in the mixture's space, which is the
+                # space the loss expects (its pred_space) -- so each source's
+                # loss and its RMSE describe the same forecast. The gate's
+                # value is byte-for-byte what the training loss sees.
+                if self.mix_space == "physical":
+                    preds_for_loss = {"gate": pred_mm, "equal_weight": eq_mm}
+                    for ei, name in enumerate(self.expert_names):
+                        preds_for_loss[name] = expert_mm[:, ei]
+                else:
+                    preds_for_loss = {
+                        "gate": pred_norm,
+                        "equal_weight": normalize_precip(
+                            eq_mm,
+                            mean=self.precip_mean,
+                            std=self.precip_std,
+                            transform=self.precip_transform,
+                        ),
+                    }
+                    for ei, name in enumerate(self.expert_names):
+                        preds_for_loss[name] = x[:, ei, 0]
+                for name, pn in preds_for_loss.items():
                     if name in self.expert_names:
                         sel = live[:, self.expert_names.index(name)]
                         if not sel.any():

@@ -210,6 +210,7 @@ class RegionalPrecipMSE(nn.Module):
         box: Sequence[float],
         *,
         space: str = "normalized",
+        pred_space: str = "normalized",
         precip_mean: float = 0.0,
         precip_std: float = 1.0,
         precip_transform=None,
@@ -219,7 +220,16 @@ class RegionalPrecipMSE(nn.Module):
         super().__init__()
         if space not in ("normalized", "physical"):
             raise ValueError(f"space must be normalized|physical, got {space!r}")
+        if pred_space not in ("normalized", "physical"):
+            raise ValueError(
+                f"pred_space must be normalized|physical, got {pred_space!r}"
+            )
         self.space = space
+        # Space the incoming prediction lives in = the space the mixture was
+        # formed in (cfg.model.mix_space). With mix_space=physical the
+        # mixture is an arithmetic mean in mm/day and this loss transforms it
+        # into log space before taking the squared error.
+        self.pred_space = pred_space
         self.precip_mean = float(precip_mean)
         self.precip_std = float(precip_std)
         self.precip_transform = precip_transform
@@ -232,14 +242,27 @@ class RegionalPrecipMSE(nn.Module):
 
     def forward(
         self,
-        pred_norm: torch.Tensor,
+        pred: torch.Tensor,
         target_norm: torch.Tensor,
         target_mm: torch.Tensor,
     ) -> torch.Tensor:
-        pred = _squeeze_channel(pred_norm)
+        pred = _squeeze_channel(pred)
         t_norm = _squeeze_channel(target_norm)
         t_mm = _squeeze_channel(target_mm)
-        if self.space == "physical":
+        if self.pred_space == "physical":
+            # Unphysical negative rain is clipped before the log transform.
+            pred_mm = pred.clamp(min=0.0)
+            if self.space == "physical":
+                pred, target = pred_mm, t_mm
+            else:
+                pred = normalize_precip(
+                    pred_mm,
+                    mean=self.precip_mean,
+                    std=self.precip_std,
+                    transform=self.precip_transform,
+                )
+                target = t_norm
+        elif self.space == "physical":
             pred = denormalize_precip(
                 pred,
                 mean=self.precip_mean,
@@ -269,12 +292,18 @@ class RegionalPrecipLogMSE(nn.Module):
         precip_std: float,
         precip_transform=None,
         epsilon_mm: float = 0.1,
+        pred_space: str = "normalized",
         lat_weighted: bool = True,
         extra_mask=None,
     ) -> None:
         super().__init__()
         if epsilon_mm <= 0:
             raise ValueError(f"epsilon_mm must be positive, got {epsilon_mm}")
+        if pred_space not in ("normalized", "physical"):
+            raise ValueError(
+                f"pred_space must be normalized|physical, got {pred_space!r}"
+            )
+        self.pred_space = pred_space
         self.precip_mean = float(precip_mean)
         self.precip_std = float(precip_std)
         self.precip_transform = precip_transform
@@ -292,11 +321,16 @@ class RegionalPrecipLogMSE(nn.Module):
         target_norm: torch.Tensor,
         target_mm: torch.Tensor,
     ) -> torch.Tensor:
-        pred_mm = denormalize_precip(
-            _squeeze_channel(pred_norm),
-            mean=self.precip_mean,
-            std=self.precip_std,
-            transform=self.precip_transform,
+        pred = _squeeze_channel(pred_norm)
+        pred_mm = (
+            pred
+            if self.pred_space == "physical"
+            else denormalize_precip(
+                pred,
+                mean=self.precip_mean,
+                std=self.precip_std,
+                transform=self.precip_transform,
+            )
         ).clamp(min=0.0)
         t_mm = _squeeze_channel(target_mm)
         finite = torch.isfinite(t_mm)
@@ -316,8 +350,13 @@ def build_loss(
     precip_std,
     precip_transform=None,
     extra_mask=None,
+    pred_space: str = "normalized",
 ) -> nn.Module:
-    """Dispatcher on ``cfg.loss.name`` (ai_rossby ``build_loss`` convention)."""
+    """Dispatcher on ``cfg.loss.name`` (ai_rossby ``build_loss`` convention).
+
+    ``pred_space`` is the space the mixture is formed in
+    (``cfg.model.mix_space``), i.e. the space predictions arrive in.
+    """
     name = str(cfg_loss.get("name", "regional_mse"))
     lat_weighted = bool(cfg_loss.get("lat_weighted", True))
     if name == "regional_mse":
@@ -326,6 +365,7 @@ def build_loss(
             lon,
             box,
             space=str(cfg_loss.get("space", "normalized")),
+            pred_space=pred_space,
             precip_mean=precip_mean,
             precip_std=precip_std,
             precip_transform=precip_transform,
@@ -341,6 +381,7 @@ def build_loss(
             precip_std=precip_std,
             precip_transform=precip_transform,
             epsilon_mm=float(cfg_loss.get("epsilon_mm", 0.1)),
+            pred_space=pred_space,
             lat_weighted=lat_weighted,
             extra_mask=extra_mask,
         )

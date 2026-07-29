@@ -140,3 +140,60 @@ def test_normalize_precip_round_trips():
     norm = normalize_precip(mm, mean=-6.379, std=0.858, transform=tr)
     back = denormalize_precip(norm, mean=-6.379, std=0.858, transform=tr)
     torch.testing.assert_close(back, mm, rtol=1e-4, atol=1e-4)
+
+
+def test_physical_mixing_is_arithmetic_log_mixing_is_geometric():
+    """The point of model.mix_space: combining in mm/day gives the arithmetic
+    expert mean, combining the log channels gives the (drier) geometric one."""
+    from datapipes.precip import LogPrecipTransform
+    from mowe_precip import mix
+
+    tr = LogPrecipTransform(epsilon=1e-3, units="m")
+    mu, sd = -6.379, 0.858
+    # Two experts that disagree strongly, as they do for heavy monsoon rain.
+    p_mm = torch.tensor([[[[2.0]], [[50.0]]]]).squeeze(-1)  # (1, 2, 1)
+    z = normalize_precip(p_mm, mean=mu, std=sd, transform=tr)
+    w = torch.full_like(p_mm, 0.5)
+    b = torch.zeros_like(p_mm)
+
+    phys = mix(w, b, p_mm)
+    logmix = denormalize_precip(mix(w, b, z), mean=mu, std=sd, transform=tr)
+
+    arithmetic = 26.0
+    geometric = ((2.0 + 1.0) * (50.0 + 1.0)) ** 0.5 - 1.0  # eps = 1e-3 m = 1 mm
+    torch.testing.assert_close(phys.squeeze(), torch.tensor(arithmetic))
+    torch.testing.assert_close(
+        logmix.squeeze(), torch.tensor(geometric), rtol=1e-3, atol=1e-2
+    )
+    assert float(logmix) < float(phys)          # the structural dry bias
+    assert float(phys) / float(logmix) > 2.0    # and it is large
+
+
+def test_loss_pred_space_physical_transforms_before_mse():
+    """With pred_space=physical the loss log-transforms the mm/day mixture,
+    so a perfect physical forecast scores 0 and the error is log-space."""
+    from datapipes.precip import LogPrecipTransform
+
+    tr = LogPrecipTransform(epsilon=1e-3, units="m")
+    mu, sd = -6.379, 0.858
+    loss = RegionalPrecipMSE(
+        GRID_LAT, GRID_LON, BOX, space="normalized", pred_space="physical",
+        precip_mean=mu, precip_std=sd, precip_transform=tr,
+    )
+    t_mm = torch.rand(2, H, W) * 20.0
+    t_norm = normalize_precip(t_mm, mean=mu, std=sd, transform=tr)
+    assert float(loss(t_mm, t_norm, t_mm)) < 1e-10
+    # A 2x-too-wet forecast: error is the log ratio, not the mm/day gap.
+    got = float(loss(2.0 * t_mm, t_norm, t_mm))
+    expect = float(
+        (
+            (
+                normalize_precip(2.0 * t_mm, mean=mu, std=sd, transform=tr)
+                - t_norm
+            )
+            ** 2
+        ).mean()
+    )
+    np.testing.assert_allclose(got, expect, rtol=1e-4)
+    # Negative rain is clipped rather than producing NaN.
+    assert torch.isfinite(loss(-1.0 * t_mm, t_norm, t_mm))

@@ -51,7 +51,12 @@ from physicsnemo.utils.logging import LaunchLogger, PythonLogger
 
 from datapipes.factory import build_dataset
 from datapipes.sampler import MixturePairSampler
-from losses import build_loss, imd_valid_mask, region_weights
+from losses import (
+    build_loss,
+    denormalize_precip,
+    imd_valid_mask,
+    region_weights,
+)
 from mowe_precip import MoWEPrecipGate, expert_dropout, mix
 from seeps import SeepsClimatology
 from validation import MixtureValidator
@@ -222,6 +227,15 @@ def run(cfg: DictConfig) -> None:
             min_finite_frac=float(imd_cfg.get("min_finite_frac", 0.99)),
         )
         plog.info(f"IMD-coverage mask: {int(imd_mask.sum())} gridpoints")
+    # Space the mixture is formed in. "physical": experts' precip is
+    # inverted to mm/day first, so P_hat = sum_i w_i (P_i + b_i) is an
+    # ARITHMETIC mean in mm/day and the loss log-transforms it. "log": mix
+    # the standardized log channels directly (a weighted GEOMETRIC mean in
+    # mm/day, which is structurally dry) -- kept for ablation.
+    mix_space = str(cfg.model.get("mix_space", "physical"))
+    if mix_space not in ("physical", "log"):
+        raise ValueError(f"model.mix_space must be physical|log, got {mix_space!r}")
+    plog.info(f"mixture space: {mix_space}")
     loss_fn = build_loss(
         cfg.loss,
         lat=train_ds.lat,
@@ -231,6 +245,7 @@ def run(cfg: DictConfig) -> None:
         precip_std=train_ds.precip_std,
         precip_transform=train_ds.precip_transform,
         extra_mask=imd_mask,
+        pred_space="physical" if mix_space == "physical" else "normalized",
     ).to(dist.device)
 
     cfg_train = cfg.training
@@ -281,6 +296,7 @@ def run(cfg: DictConfig) -> None:
             device=dist.device,
             monthly=True,
             loss_fn=loss_fn,
+            mix_space=mix_space,
         )
 
     # ---------------- resume ----------------
@@ -321,7 +337,15 @@ def run(cfg: DictConfig) -> None:
                     enabled=amp_enabled,
                 ):
                     weights, biases = model(x, mask, taus)
-                    pred = mix(weights, biases, x[:, :, 0])
+                    expert_precip = x[:, :, 0]
+                    if mix_space == "physical":
+                        expert_precip = denormalize_precip(
+                            expert_precip,
+                            mean=train_ds.precip_mean,
+                            std=train_ds.precip_std,
+                            transform=train_ds.precip_transform,
+                        )
+                    pred = mix(weights, biases, expert_precip)
                     loss = loss_fn(pred.float(), target, target_mm)
                 loss.backward()
                 if grad_clip > 0:

@@ -15,3 +15,12 @@ params:
   attention_backend: timm   # transformer_engine on H100/A100 if available
   layernorm_backend: torch
   noise_dim: null           # deterministic gate (Method 0 baseline)
+
+# Space the expert precip fields are combined in:
+#   physical - invert the log transform first, so P_hat = sum_i w_i (P_i + b_i)
+#              is an ARITHMETIC mean in mm/day and the loss log-transforms it
+#              (per-expert biases are mm/day offsets). This is the intended
+#              formulation.
+#   log      - combine the standardized log channels directly, i.e. a weighted
+#              GEOMETRIC mean in mm/day (structurally dry). Ablation only.
+mix_space: physical
