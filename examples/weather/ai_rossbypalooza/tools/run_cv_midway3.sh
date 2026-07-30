@@ -19,16 +19,21 @@
 # Each fold is a CPU stats job, then a GPU training job depending on it. Folds
 # chain one after another so a single node runs them serially.
 #
-#   bash run_cv_midway3.sh [LOSS_CONFIG] [AFTER_JOBID]
+#   bash run_cv_midway3.sh [LOSS_CONFIG] [AFTER_JOBID] [MODE]
 #
-# LOSS_CONFIG defaults to regional_mse_physical (the best aggregate arm:
-# RMSE 8.96 / bias -0.18 / ACC 0.337 / SEEPS 0.853, beating equal-weight on all
-# four and AIFS on ACC). AFTER_JOBID optionally delays fold 1 until an existing
-# job finishes, so an in-flight sweep is not disturbed.
+# MODE is all (default), stats, or train. The per-fold stats are
+# loss-INDEPENDENT, so `stats` can run on CPU while a GPU sweep is still
+# deciding which loss to cross-validate; `train` then submits only the GPU
+# folds, chained serially, assuming the stats stores already exist.
+#
+# AFTER_JOBID optionally delays the first submitted job until an existing job
+# finishes, so an in-flight sweep is not disturbed.
 set -uo pipefail
 
 LOSS="${1:-regional_mse_physical}"
 AFTER="${2:-}"
+MODE="${3:-all}"
+case "$MODE" in all|stats|train) ;; *) echo "bad MODE '$MODE'"; exit 2;; esac
 REPO=/scratch/midway3/awikner/physicsnemo
 RECIPE="$REPO/examples/weather/ai_rossbypalooza"
 NORM=/scratch/midway2/awikner/physicsnemo-zarr/normalization
@@ -54,6 +59,8 @@ for k in 0 1 2 3 4; do
         tspec="2000-$((vlo - 1)),$((vhi + 1))-2024"
     fi
 
+    stats_id=""
+    if [ "$MODE" != "train" ]; then
     dep_stats=""
     [ -n "$prev" ] && dep_stats="--dependency=afterany:$prev"
     stats_id=$(sbatch $dep_stats -A ai4s-hackathon -p caslake -N 1 -c 4 --mem=32G \
@@ -67,8 +74,20 @@ python $RECIPE/tools/compute_seeps_climatology.py --imerg-root $IMERG \
   --years $tspec --out $NORM/imerg_seeps_climatology_cv${f}.zarr --commit cv${f}" \
         2>&1 | grep -oP 'Submitted batch job \K\d+')
     echo "fold $f: stats job $stats_id (train years $tspec)"
+    prev="$stats_id"
+    fi
 
-    train_id=$(sbatch --dependency=afterok:"$stats_id" \
+    if [ "$MODE" = "stats" ]; then
+        continue
+    fi
+
+    dep_train=""
+    if [ -n "$stats_id" ]; then
+        dep_train="--dependency=afterok:$stats_id"
+    elif [ -n "$prev" ]; then
+        dep_train="--dependency=afterany:$prev"
+    fi
+    train_id=$(sbatch $dep_train \
         --export=ALL,RUN_NAME="mowe_cv${f}",WANDB=true,EXTRA="loss=$LOSS \
 dataset.train.years=[2000,2024] dataset.train.exclude_years=[$excl] \
 dataset.val.years=[$vlo,$vhi] \
@@ -81,5 +100,5 @@ dataset.normalization.seeps_climatology=$NORM/imerg_seeps_climatology_cv${f}.zar
 done
 
 echo
-echo "Submitted 5 folds serially. Collect with:"
+echo "Submitted mode=$MODE for 5 folds. Collect with:"
 echo "  grep -H 'training complete' $RUNDIR/train_h100_*.log"
