@@ -253,6 +253,11 @@ def main(cfg: DictConfig) -> None:
     num = defaultdict(lambda: defaultdict(float))
     den_p = defaultdict(lambda: defaultdict(float))
     den_t = defaultdict(lambda: defaultdict(float))
+    # Per-WEEK ACC, so the bars can carry a spread across forecasts. The pooled
+    # value (ratio of summed cross-products) weights weeks by anomaly
+    # magnitude; the per-week mean does not, so the two differ slightly and
+    # both are logged.
+    per_week = defaultdict(lambda: defaultdict(list))
     n_init = defaultdict(int)
     dropped = defaultdict(int)
     matched = bool(cfg.get("matched", False))
@@ -284,34 +289,57 @@ def main(cfg: DictConfig) -> None:
                 dropped[s] += 1
                 continue
             a_p = per_src[s] - climsum[i]
-            num[s][m] += float((wts * a_p * a_t).sum())
-            den_p[s][m] += float((wts * a_p * a_p).sum())
-            den_t[s][m] += float((wts * a_t * a_t).sum())
+            n_i = float((wts * a_p * a_t).sum())
+            dp_i = float((wts * a_p * a_p).sum())
+            dt_i = float((wts * a_t * a_t).sum())
+            num[s][m] += n_i
+            den_p[s][m] += dp_i
+            den_t[s][m] += dt_i
+            # A week with a near-zero anomaly in either field has an unstable
+            # single-week ACC; exclude it from the spread rather than let it
+            # dominate the standard deviation.
+            if dp_i > 1e-9 and dt_i > 1e-9:
+                per_week[s][m].append(n_i / np.sqrt(dp_i * dt_i))
+            else:
+                dropped[f"{s}_degenerate_week"] += 1
 
     months = sorted(n_init)
-    acc = {s: [num[s][m] / np.sqrt(max(den_p[s][m] * den_t[s][m], 1e-12))
+    pooled = {s: [num[s][m] / np.sqrt(max(den_p[s][m] * den_t[s][m], 1e-12))
+                  for m in months] for s in sources}
+    # Bars show the mean of the per-week ACCs so the error bars (their standard
+    # deviation) describe the same distribution.
+    acc = {s: [float(np.mean(per_week[s][m])) if per_week[s][m] else np.nan
                for m in months] for s in sources}
+    sd = {s: [float(np.std(per_week[s][m], ddof=1))
+              if len(per_week[s][m]) > 1 else 0.0
+              for m in months] for s in sources}
     logger.info("weeks per month: %s", {MONTHS[m - 1]: n_init[m] for m in months})
     logger.info("weeks dropped for an incomplete 7-lead week: %s", dict(dropped))
     for s in sources:
-        logger.info("  %-16s %s", LABELS[s],
-                    " ".join(f"{MONTHS[m-1]}={a:.3f}" for m, a in zip(months, acc[s])))
+        logger.info("  %-16s %s", LABELS[s], " ".join(
+            f"{MONTHS[m-1]}={a:.3f}+-{d:.3f}"
+            for m, a, d in zip(months, acc[s], sd[s])))
+    for s in sources:
+        logger.info("  %-16s pooled %s", LABELS[s], " ".join(
+            f"{MONTHS[m-1]}={a:.3f}" for m, a in zip(months, pooled[s])))
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(11, 5.2))
+    fig, ax = plt.subplots(figsize=(11, 6.4))
     xpos = np.arange(len(months))
     width = 0.8 / len(sources)
     for k, s in enumerate(sources):
         lbl = LABELS[s] + (" (debiased)" if debias and s in experts else "")
         ax.bar(xpos + (k - (len(sources) - 1) / 2) * width, acc[s], width,
+               yerr=sd[s], error_kw=dict(ecolor="#333333", elinewidth=0.9,
+                                         capsize=2, capthick=0.9),
                label=lbl, color=COLOURS.get(s, "#999999"),
                edgecolor="black", linewidth=0.5,
                hatch="//" if s == "gate" else None, zorder=3)
     ax.set_xticks(xpos, [MONTHS[m - 1] for m in months])
-    ax.set_ylabel("Anomaly correlation (ACC)")
+    ax.set_ylabel("Anomaly correlation (ACC)\nmean of per-week ACC, error bars 1 s.d.")
     ax.set_xlabel("Month (of the week-2 midpoint)")
     ax.set_title(
         "Week-2 accumulated precipitation ACC, IMD region\n"
@@ -323,11 +351,16 @@ def main(cfg: DictConfig) -> None:
     )
     ax.axhline(0.0, color="black", linewidth=0.8)
     # Headroom so the legend never sits on top of a bar.
-    ax.set_ylim(0.0, max(max(v) for v in acc.values()) * 1.22)
+    top = max(a + d for s in sources for a, d in zip(acc[s], sd[s]))
+    bot = min(0.0, min(a - d for s in sources for a, d in zip(acc[s], sd[s])))
+    ax.set_ylim(bot * 1.08, top * 1.05)
     ax.grid(axis="y", alpha=0.3, zorder=0)
-    ax.legend(ncol=6, frameon=False, loc="upper center", fontsize=9)
+    # Below the axes: the debiased labels are long enough to overflow a
+    # single in-plot row.
+    ax.legend(ncol=3, frameon=False, fontsize=9,
+              loc="upper center", bbox_to_anchor=(0.5, -0.13))
     ax.set_axisbelow(True)
-    fig.tight_layout(rect=(0, 0.045, 1, 1))
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     # Below the axes, not over the bars.
     fig.text(0.5, 0.012, "weeks per month: " + "  ".join(
         f"{MONTHS[m-1]} {n_init[m]}" for m in months),
@@ -342,6 +375,9 @@ def main(cfg: DictConfig) -> None:
         for s in sources:
             nm = LABELS[s] + (" (debiased)" if debias and s in experts else "")
             fh.write(nm + "," + ",".join(f"{a:.4f}" for a in acc[s]) + "\n")
+            fh.write(nm + " sd," + ",".join(f"{d:.4f}" for d in sd[s]) + "\n")
+            fh.write(nm + " pooled," + ",".join(
+                f"{a:.4f}" for a in pooled[s]) + "\n")
         fh.write("n_weeks," + ",".join(str(n_init[m]) for m in months) + "\n")
     logger.info("wrote %s", csv)
 
