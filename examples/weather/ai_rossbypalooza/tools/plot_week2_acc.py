@@ -94,11 +94,13 @@ COLOURS = {
     "aifs_single_v2": "#009E73",  # bluish green
     "equal_weight": "#999999",    # grey
     "gate": "#0072B2",            # blue
+    "debiased_mean": "#999999",   # grey
 }
 LABELS = {
     "pangu_s2s": "Pangu-S2S", "sfno_era5": "SFNO-S2S",
     "graphcast": "GraphCast", "aifs_single_v2": "AIFS",
     "equal_weight": "Equal weight", "gate": "MoWE gate",
+    "debiased_mean": "Mean of debiased",
 }
 
 
@@ -116,7 +118,17 @@ def main(cfg: DictConfig) -> None:
     lo, hi = (int(v) for v in cfg.dataset.val.lead_days)
     n_lead = hi - lo + 1
     experts = list(ds.expert_names)
-    sources = [*experts, "equal_weight", "gate"]
+    # debias_experts: feed the model ONE expert at a time. The masked softmax
+    # then puts weight 1.0 on it, so the output is exactly P_i + b_i -- the
+    # DEBIASED expert. Comparing those against their own mean and the full gate
+    # separates the two mechanisms the gate bundles: the learned per-expert bias
+    # correction, and the state-dependent weighting on top of it.
+    # Note b_i is not the same as in the full-ensemble pass: the mask planes are
+    # part of the input, so the model sees a genuine single-expert request (which
+    # it is trained for, via expert_dropout).
+    debias = bool(cfg.get("debias_experts", False))
+    sources = ([*experts, "debiased_mean", "gate"] if debias
+               else [*experts, "equal_weight", "gate"])
     mix_space = str(cfg.model.get("mix_space", "physical"))
 
     box = list(cfg.region.lat) + list(cfg.region.lon)
@@ -176,12 +188,41 @@ def main(cfg: DictConfig) -> None:
                     mix(weights, biases, x[:, :, 0], mask=mask),
                     mean=ds.precip_mean, std=ds.precip_std,
                     transform=ds.precip_transform)
-            live = (mask > 0).cpu().numpy()
-            eq = (e_mm * (mask > 0).float()[..., None, None]).sum(1) / (
-                mask > 0).sum(1).clamp(min=1)[:, None, None]
-            e_np = e_mm.cpu().numpy()[..., sel]
+            live_t = mask > 0
+            live = live_t.cpu().numpy()
+            if debias:
+                # One pass per expert, on just the samples where it is live.
+                per = torch.zeros_like(e_mm)          # (B, E, H, W) debiased
+                for ei in range(len(experts)):
+                    sub = live_t[:, ei]
+                    if not sub.any():
+                        continue
+                    xi = torch.zeros_like(x[sub])
+                    xi[:, ei] = x[sub][:, ei]
+                    mi = torch.zeros_like(mask[sub])
+                    mi[:, ei] = 1.0
+                    wi, bi = model(xi, mi, taus[sub])
+                    ei_mm = denormalize_precip(
+                        xi[:, :, 0], mean=ds.precip_mean, std=ds.precip_std,
+                        transform=ds.precip_transform)
+                    if mix_space == "physical":
+                        out = mix(wi, bi, ei_mm, mask=mi).clamp(min=0.0)
+                    else:
+                        out = denormalize_precip(
+                            mix(wi, bi, xi[:, :, 0], mask=mi),
+                            mean=ds.precip_mean, std=ds.precip_std,
+                            transform=ds.precip_transform)
+                    per[sub, ei] = out
+                src_fields = per
+                agg = (per * live_t.float()[..., None, None]).sum(1) / (
+                    live_t.sum(1).clamp(min=1)[:, None, None])
+            else:
+                src_fields = e_mm
+                agg = (e_mm * live_t.float()[..., None, None]).sum(1) / (
+                    live_t.sum(1).clamp(min=1)[:, None, None])
+            e_np = src_fields.cpu().numpy()[..., sel]
             g_np = g_mm.cpu().numpy()[..., sel]
-            eq_np = eq.cpu().numpy()[..., sel]
+            eq_np = agg.cpu().numpy()[..., sel]
             t_np = batch["target_mm"].squeeze(1).numpy()[..., sel]
             doys = doy_from_hours_since_1900(batch["valid_time"]).numpy()
 
@@ -193,8 +234,9 @@ def main(cfg: DictConfig) -> None:
                     if live[b, ei]:
                         sums[i][name] += e_np[b, ei]
                         counts[i][name] += 1
-                sums[i]["equal_weight"] += eq_np[b]
-                counts[i]["equal_weight"] += 1
+                agg_key = "debiased_mean" if debias else "equal_weight"
+                sums[i][agg_key] += eq_np[b]
+                counts[i][agg_key] += 1
                 sums[i]["gate"] += g_np[b]
                 counts[i]["gate"] += 1
                 good = np.isfinite(t_np[b])
@@ -263,8 +305,9 @@ def main(cfg: DictConfig) -> None:
     xpos = np.arange(len(months))
     width = 0.8 / len(sources)
     for k, s in enumerate(sources):
+        lbl = LABELS[s] + (" (debiased)" if debias and s in experts else "")
         ax.bar(xpos + (k - (len(sources) - 1) / 2) * width, acc[s], width,
-               label=LABELS[s], color=COLOURS[s],
+               label=lbl, color=COLOURS.get(s, "#999999"),
                edgecolor="black", linewidth=0.5,
                hatch="//" if s == "gate" else None, zorder=3)
     ax.set_xticks(xpos, [MONTHS[m - 1] for m in months])
@@ -276,6 +319,7 @@ def main(cfg: DictConfig) -> None:
         f"{cfg.dataset.val.years[0]}-{cfg.dataset.val.years[1]} pooled per month"
         + ("; weeks where every source is available"
            if matched else "; each source on the weeks it covers")
+        + ("\nexperts DEBIASED by the gate (single-expert input)" if debias else "")
     )
     ax.axhline(0.0, color="black", linewidth=0.8)
     # Headroom so the legend never sits on top of a bar.
@@ -296,7 +340,8 @@ def main(cfg: DictConfig) -> None:
     with open(csv, "w") as fh:
         fh.write("source," + ",".join(MONTHS[m - 1] for m in months) + "\n")
         for s in sources:
-            fh.write(LABELS[s] + "," + ",".join(f"{a:.4f}" for a in acc[s]) + "\n")
+            nm = LABELS[s] + (" (debiased)" if debias and s in experts else "")
+            fh.write(nm + "," + ",".join(f"{a:.4f}" for a in acc[s]) + "\n")
         fh.write("n_weeks," + ",".join(str(n_init[m]) for m in months) + "\n")
     logger.info("wrote %s", csv)
 

@@ -139,3 +139,33 @@ def test_shrunk_gate_matches_the_configured_capacity():
     n_small = sum(p.numel() for p in small.parameters())
     assert 3.5e6 < n_small < 4.2e6, n_small
     assert n_big / n_small > 5.5
+
+
+def test_single_expert_mask_yields_the_debiased_expert():
+    """Masking to one expert must give it weight exactly 1.0, so the mixture
+    reduces to P_i + b_i -- the premise of the debiased-expert experiment
+    (tools/plot_week2_acc.py +debias_experts=true)."""
+    g = _gate().eval()
+    b, e, c, h, w = 2, 3, 3, 8, 16
+    x = torch.randn(b, e, c, h, w)
+    t = torch.full((b,), 10.0)
+
+    for keep in range(e):
+        xi = torch.zeros_like(x)
+        xi[:, keep] = x[:, keep]
+        mi = torch.zeros(b, e)
+        mi[:, keep] = 1.0
+        with torch.no_grad():
+            weights, biases = g(xi, mi, t)
+        # Exactly one live expert -> softmax over a single unmasked logit = 1.
+        torch.testing.assert_close(
+            weights[:, keep], torch.ones(b, h, w), rtol=0, atol=1e-6
+        )
+        others = [i for i in range(e) if i != keep]
+        torch.testing.assert_close(
+            weights[:, others], torch.zeros(b, len(others), h, w), rtol=0, atol=0
+        )
+        # Therefore mix() == P_keep + b_keep, exactly.
+        precip = torch.rand(b, e, h, w) * 20.0
+        got = mix(weights, biases, precip, mask=mi)
+        torch.testing.assert_close(got, precip[:, keep] + biases[:, keep])
