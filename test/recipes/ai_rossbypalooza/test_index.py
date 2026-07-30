@@ -187,3 +187,29 @@ def test_bad_args_raise():
         build_sample_index(
             [e], truth, years=(2001, 2001), init_months=(6,), lead_days=(0, 8),
         )
+
+
+def test_exclude_years_drops_a_cv_fold():
+    """exclude_years removes whole init years from inside the range, which is
+    what k-fold CV needs: three of five folds have a gap in the middle that a
+    plain (lo, hi) range cannot express."""
+    e = FakeExpert(
+        "a",
+        [(2001, 6, 1, 0), (2002, 6, 1, 0), (2003, 6, 1, 0)],
+    )
+    truth = FakeTruth(
+        _daily_days(2001, (6,)) + _daily_days(2002, (6,)) + _daily_days(2003, (6,))
+    )
+    common = dict(init_months=(6,), lead_days=(8, 9))
+    full = build_sample_index([e], truth, years=(2001, 2003), **common)
+    held = build_sample_index(
+        [e], truth, years=(2001, 2003), exclude_years=(2002,), **common
+    )
+    assert {k[0] for k in full.init_keys} == {2001, 2002, 2003}
+    assert {k[0] for k in held.init_keys} == {2001, 2003}
+    assert len(held.pairs) < len(full.pairs)
+    # Excluding a year outside the range changes nothing.
+    same = build_sample_index(
+        [e], truth, years=(2001, 2003), exclude_years=(1999,), **common
+    )
+    assert len(same.pairs) == len(full.pairs)

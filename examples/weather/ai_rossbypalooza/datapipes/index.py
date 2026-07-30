@@ -82,11 +82,17 @@ def build_sample_index(
     init_months: Sequence[int],
     lead_days: tuple[int, int],
     min_experts: int | str = 1,
+    exclude_years: Sequence[int] = (),
 ) -> SampleIndex:
     """Enumerate all valid (init, tau) pairs. See the module docstring.
 
     ``min_experts`` is an int, or the literal ``"all"`` to require every
     configured expert (the intersection / all-experts training mode).
+
+    ``exclude_years`` drops whole init years from inside ``years``, which is
+    what k-fold cross-validation needs: a fold holding out 2010-2014 trains on
+    2000-2024 minus those five, and a plain (lo, hi) range cannot express the
+    gap.
     """
     if len(experts) > 32:
         raise ValueError("expert_bits is uint32; at most 32 experts supported")
@@ -107,8 +113,13 @@ def build_sample_index(
 
     lut = {e.name: e.init_lookup() for e in experts}
     all_keys = sorted({k for table in lut.values() for k in table})
+    dropped_years = {int(y) for y in exclude_years}
     init_keys = [
-        k for k in all_keys if years[0] <= k[0] <= years[1] and k[1] in months
+        k
+        for k in all_keys
+        if years[0] <= k[0] <= years[1]
+        and k[0] not in dropped_years
+        and k[1] in months
     ]
     imerg = truth.day_lookup()
 
@@ -162,7 +173,8 @@ def build_sample_index(
     if len(pairs) == 0:
         raise ValueError(
             f"empty sample index: {len(all_keys)} inits across experts, "
-            f"{len(init_keys)} after years={years} months={sorted(months)}, "
+            f"{len(init_keys)} after years={years} "
+            f"exclude={sorted(dropped_years)} months={sorted(months)}, "
             f"{n_no_imerg} pairs dropped for missing IMERG days, "
             f"{n_few_experts} for < {min_live} live experts"
         )

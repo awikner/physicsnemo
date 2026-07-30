@@ -82,6 +82,7 @@ class HindcastMixtureDataset(Dataset):
     truth : the IMERG archive; its grid defines the common ``(H, W)`` grid
         every expert store must match.
     layout / stats : master channel layout and its normalization stats.
+    exclude_years : whole init years to drop from inside ``years`` (k-fold CV).
     years, init_months, lead_days : init-time filter (inclusive year range,
         set of months) and the inclusive tau range in whole days.
     min_experts : int or ``"all"`` — minimum live experts per pair.
@@ -102,6 +103,7 @@ class HindcastMixtureDataset(Dataset):
         init_months: Sequence[int],
         lead_days: tuple[int, int],
         min_experts: int | str = 1,
+        exclude_years: Sequence[int] = (),
         zarr_concurrency: int = 6,
         nan_expert_threshold: float = 0.5,
     ) -> None:
@@ -143,6 +145,7 @@ class HindcastMixtureDataset(Dataset):
             self.experts,
             truth,
             years=years,
+            exclude_years=exclude_years,
             init_months=init_months,
             lead_days=lead_days,
             min_experts=min_experts,

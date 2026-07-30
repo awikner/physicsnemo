@@ -102,6 +102,7 @@ def build_dataset(cfg_dataset: Any, split: str) -> HindcastMixtureDataset:
         layout,
         stats,
         years=tuple(int(y) for y in block["years"]),
+        exclude_years=tuple(int(y) for y in (block.get("exclude_years") or ())),
         init_months=[int(m) for m in block["init_months"]],
         lead_days=tuple(int(d) for d in block["lead_days"]),
         min_experts=min_experts,
