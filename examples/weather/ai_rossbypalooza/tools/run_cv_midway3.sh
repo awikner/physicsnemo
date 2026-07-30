@@ -63,9 +63,18 @@ for k in 0 1 2 3 4; do
     if [ "$MODE" != "train" ]; then
     dep_stats=""
     [ -n "$prev" ] && dep_stats="--dependency=afterany:$prev"
-    stats_id=$(sbatch $dep_stats -A ai4s-hackathon -p caslake -N 1 -c 4 --mem=32G \
+    # pedramh-gpu (no GPU requested), NOT caslake: /scratch/midway2 is not
+    # mounted on every caslake node -- midway3-0025 silently has no mount and
+    # the tools then report "no finite data" rather than a missing filesystem.
+    # Our dedicated node is verified to mount it. The precheck makes any future
+    # recurrence obvious instead of looking like a data problem.
+    stats_id=$(sbatch $dep_stats -A pi-pedramh -p pedramh-gpu -N 1 -c 4 --mem=32G \
         -t 01:00:00 -J "cv${f}_stats" -o "$RUNDIR/cv${f}_stats.log" --wrap="\
 set -e
+if [ ! -d $IMERG/2015.zarr ]; then
+  echo \"FATAL: /scratch/midway2 not mounted on \$(hostname) -- resubmit elsewhere\"
+  exit 75
+fi
 source $REPO/.venv-mowe/bin/activate
 python $RECIPE/tools/compute_precip_norm.py --imerg-root $IMERG \
   --years $tspec --log-epsilon 1e-3 --log-units m \

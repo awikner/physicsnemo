@@ -23,6 +23,11 @@
 
 set -uo pipefail
 REPO=/scratch/midway3/awikner/physicsnemo
+# /scratch/midway2 (where the data lives) is not mounted on every Midway3
+# node -- fail fast rather than reporting it as missing data downstream.
+if [ ! -d /scratch/midway2/awikner/hindcasts_mowe/pangu_s2s ]; then
+    echo "FATAL: /scratch/midway2 not mounted on $(hostname)"; exit 75
+fi
 source "$REPO/.venv-mowe/bin/activate"
 
 RUNDIR=/scratch/midway3/awikner/mowe_runs
