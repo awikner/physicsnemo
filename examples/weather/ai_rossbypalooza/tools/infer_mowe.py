@@ -155,7 +155,7 @@ def main(cfg: DictConfig) -> None:
     # take the ENV path. This is inference: there is nothing to distribute.
     for k, v in (
         ("RANK", "0"), ("WORLD_SIZE", "1"), ("LOCAL_RANK", "0"),
-        ("MASTER_ADDR", "localhost"), ("MASTER_PORT", "29517"),
+        ("MASTER_ADDR", "localhost"), ("MASTER_PORT", str(29500 + os.getpid() % 1000)),
     ):
         os.environ.setdefault(k, v)
     if not DistributedManager.is_initialized():

@@ -326,7 +326,52 @@ extra_mask=imd_valid_mask(...))` so the region matches training exactly.
 
 ---
 
-## 7. Tests
+## 7. Week-2 accumulated precip (the primary target)
+
+`tools/plot_week2_acc.py` scores the project's *primary* predictand rather than
+the daily one the training metrics use: leads 8-14 are summed per init into a
+week-2 total (mm/week) and compared against the same-week IMERG total, with
+anomalies referenced to a **weekly** climatology built by summing the day-of-year
+daily climatology over the same seven valid days. Each week is attributed to the
+month of its midpoint (tau=11).
+
+```bash
+sbatch --export=ALL,CKPT=<checkpoints_best>,OUT=week2_acc.png \
+       tools/plot_week2_acc_midway3.sbatch     # add +matched=true for a fair panel
+```
+
+**Use `+matched=true`.** The index takes the UNION of initializations, so without
+it each source is scored on the weeks it happens to cover -- pangu/sfno reach
+~280 of 465 weeks and aifs ~265, while the gate and equal-weight are defined for
+all of them. That penalises the gate for covering the sparse weeks where only the
+weak experts exist.
+
+Matched sample (175 weeks with every source present, 2020-2024, gate =
+`mowe_v6_var1`, trained 2000-2019 so the period is genuinely held out):
+
+| ACC | Mar | Apr | May | Jun | Jul | Aug | Sep | Oct | mean |
+|---|---|---|---|---|---|---|---|---|---|
+| **MoWE gate** | **0.478** | **0.579** | **0.472** | **0.457** | **0.582** | **0.598** | **0.563** | **0.512** | **0.530** |
+| AIFS | 0.437 | 0.515 | 0.386 | 0.417 | 0.572 | 0.521 | 0.495 | 0.494 | 0.480 |
+| Equal weight | 0.349 | 0.471 | 0.412 | 0.396 | 0.505 | 0.514 | 0.468 | 0.510 | 0.478 |
+| GraphCast | 0.323 | 0.366 | 0.345 | 0.337 | 0.462 | 0.499 | 0.412 | 0.483 | 0.403 |
+| SFNO-S2S | 0.099 | 0.159 | 0.149 | 0.223 | 0.335 | 0.375 | 0.268 | 0.308 | 0.239 |
+| Pangu-S2S | 0.262 | 0.447 | 0.216 | 0.122 | 0.120 | 0.221 | 0.126 | −0.033 | 0.185 |
+
+**The gate wins every month**, beating the best single expert by +0.050 ACC
+(+10%) and equal-weight by +0.052 on the mean. Note weekly accumulation is
+substantially more predictable than daily precip (ACC ~0.53 vs ~0.32), since
+summing seven days averages out day-to-day timing error.
+
+On the unmatched sample the gate averages 0.461 against AIFS's 0.485 — the
+sample mismatch alone flips the headline, which is why the matched panel is the
+one to quote. October rests on only 5 weeks and is noisy.
+
+Figures use the Okabe-Ito palette (deuteranopia/protanopia safe, no
+vermillion/green pairing) with the gate additionally hatched so it survives
+greyscale printing.
+
+## 8. Tests
 
 ```bash
 pytest test/recipes/ai_rossbypalooza/ -m ""     # 166 tests; -m "" includes slow
@@ -339,7 +384,7 @@ variance term is built to cause, EMA round-trips, early stopping, the day-of-yea
 ACC reference (a case where ACC flips sign against a monthly reference), the
 intensity thresholds, and an end-to-end train→infer round trip.
 
-## 8. Not yet built
+## 9. Not yet built
 
 * The plan's **primary** target is week-2 *accumulated* precip as tercile and
   exceedance probabilities; this trains and scores *daily* precip (the secondary
