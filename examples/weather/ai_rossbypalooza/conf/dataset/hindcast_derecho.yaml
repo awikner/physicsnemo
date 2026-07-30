@@ -79,12 +79,18 @@ train:
   # needs lead 16, and the harmonised stores stop at 15.
   lead_days: [7, 14]
   min_experts: 1
+  # Whole init years to drop from inside `years` -- k-fold CV holds out a
+  # middle block, which an inclusive [lo, hi] range cannot express. Declared
+  # here (not just appended on the CLI) so Hydra struct mode allows the
+  # override and the knob is discoverable.
+  exclude_years: []
 
 val:
   years: [2020, 2024]
   init_months: [3, 4, 5, 6, 7, 8, 9]
   lead_days: [8, 14]
   min_experts: 1
+  exclude_years: []
 
 loader:
   batch_size: 4            # per GPU
