@@ -1,0 +1,51 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Derecho develop-queue job: expand every landed Format-2 store
+# (hindcasts_dsi/zarr/<model>/<year>.zarr with a .ready marker) into the ragged
+# per-sample h5 series under hindcasts_dsi/h5/<model>/, in parallel across
+# stores. Local Lustre only (no DSI/monsoon/Globus). Resumable via .expanded
+# markers; re-qsub to pick up newly-arrived stores.
+#   qsub derecho_expand_h5.pbs
+#PBS -N dsi_expand_h5
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=64:mem=200GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/hindcasts_dsi/expand.log
+
+set -uo pipefail
+module load conda
+conda activate hindcast_conv
+PYBIN=$(which python)
+CONV="$HOME/hindcast_tools/dsi_hindcast_to_formats.py"
+OUT=/glade/derecho/scratch/awikner/hindcasts_dsi
+READY="$OUT/zarr/.ready"
+EDONE="$OUT/h5/.expanded"
+mkdir -p "$EDONE" "$OUT/h5"
+NP="${NP:-16}"
+echo "[$(date)] expand start host=$(hostname) NP=$NP"
+
+expand_one() {
+  local ready="$1"
+  local base; base=$(basename "$ready" .ready)      # <model>_<year>
+  local model="${base%_*}" year="${base##*_}"
+  local store="$OUT/zarr/$model/$year.zarr"
+  local marker="$EDONE/${base}.done"
+  [ -f "$marker" ] && return 0
+  [ -d "$store" ] || { echo "[warn] no store for $base"; return 0; }
+  if "$PYBIN" "$CONV" --expand-zarr "$store" --model "$model" --out-root "$OUT" >/dev/null 2>&1; then
+    touch "$marker"; echo "[$(date)] expanded $model $year"
+  else
+    echo "[ERR] expand $model $year"
+  fi
+}
+export -f expand_one; export OUT EDONE CONV PYBIN
+
+shopt -s nullglob
+ready=("$READY"/*.ready)
+if [ ${#ready[@]} -eq 0 ]; then echo "[$(date)] nothing ready to expand"; exit 0; fi
+printf '%s\n' "${ready[@]}" | xargs -P "$NP" -I{} bash -c 'expand_one "$@"' _ {}
+echo "[$(date)] expand pass complete ($(ls "$EDONE"/*.done 2>/dev/null | wc -l) stores expanded total)"

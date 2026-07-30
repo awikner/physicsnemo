@@ -1,0 +1,52 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Convert transferred DSI hindcast source -> per-sample .h5 + per-year zarr,
+# on Derecho's develop queue.  Reads the local (already-transferred) source under
+# hindcasts_dsi_src and writes both formats under hindcasts_dsi.
+#
+# Submit all models:   qsub convert_dsi_derecho.pbs
+# Submit a subset:     qsub -v MODELS="graphcast_wb2 aurora_e2s" convert_dsi_derecho.pbs
+#PBS -N dsi_hindcast_conv
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=128:mem=235GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/hindcasts_dsi/logs/conv.log
+
+set -euo pipefail
+module load conda
+conda activate hindcast_conv
+
+CONV="$HOME/hindcast_tools/dsi_hindcast_to_formats.py"
+OUT=/glade/derecho/scratch/awikner/hindcasts_dsi
+SRC=/glade/derecho/scratch/awikner/hindcasts_dsi_src
+W="${W:-40}"
+mkdir -p "$OUT/logs"
+
+MODELS="${MODELS:-graphcast_e2s aurora_e2s aifs_single_v2 aifs_single_v1 aifs_single_v1p1 graphcast_wb2}"
+
+run() {
+  local MODEL="$1" KIND="$2" DS="$3"; shift 3
+  local SRCARGS=(); local d
+  for d in "$@"; do SRCARGS+=(--source-dir "$d"); done
+  echo "[$(date)] ===== $MODEL (workers=$W) ====="
+  python "$CONV" --model "$MODEL" --source-kind "$KIND" "${SRCARGS[@]}" \
+    --out-root "$OUT" --years 2000-2024 --n-workers "$W" \
+    --source-dataset "$DS" --overwrite
+}
+
+for m in $MODELS; do
+  case "$m" in
+    graphcast_e2s)    run graphcast_e2s    zarr reforecast    "$SRC/graphcast_e2s";;
+    aurora_e2s)       run aurora_e2s       zarr reforecast    "$SRC/aurora_e2s";;
+    aifs_single_v2)   run aifs_single_v2   zarr reforecast    "$SRC/aifs_single_v2";;
+    aifs_single_v1)   run aifs_single_v1   zarr monsoon_paper "$SRC/aifs_single_v1/twice_weekly" "$SRC/aifs_single_v1/daily";;
+    aifs_single_v1p1) run aifs_single_v1p1 zarr monsoon_paper "$SRC/aifs_single_v1p1";;
+    graphcast_wb2)    run graphcast_wb2    nc   monsoon_paper "$SRC/graphcast_wb2";;
+    *) echo "unknown model: $m" >&2; exit 1;;
+  esac
+done
+echo "[$(date)] ALL DONE"
