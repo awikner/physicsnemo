@@ -21,6 +21,7 @@ IMERG, a tiny gate, a few epochs through train.run(), checkpoint resume."""
 from __future__ import annotations
 
 import numpy as np
+import xarray as xr
 import pytest
 import torch
 
@@ -324,3 +325,54 @@ def test_ema_disabled_path_still_trains(smoke_cfg):
     )
     train_mod.run(cfg)
     assert list(Path("checkpoints").glob("*")), "no checkpoint written"
+
+
+@pytest.mark.slow
+def test_inference_writes_gate_forecasts(smoke_cfg, monkeypatch):
+    """infer_mowe replays a split and writes a dense (init, lead, lat, lon)
+    zarr of the mixture in mm/day, leaving pairs absent from the index NaN."""
+    from pathlib import Path
+
+    import train as train_mod
+
+    torch.manual_seed(0)
+    # every_n_epochs must be 1: the best checkpoint is only written when a
+    # validation pass runs, so the default (3) with max_epochs=1 writes none.
+    cfg = OmegaConf.merge(
+        smoke_cfg,
+        {"training": {"max_epochs": 2}, "validation": {"every_n_epochs": 1}},
+    )
+    train_mod.run(cfg)
+    best = Path("checkpoints_best")
+    assert list(best.glob("*")), "training produced no best checkpoint"
+
+    out = Path("forecasts.zarr")
+    import tools.infer_mowe as infer
+
+    icfg = OmegaConf.merge(
+        smoke_cfg,
+        {"checkpoint": str(best.resolve()), "out": str(out.resolve()),
+         "split": "val", "save_gate": True},
+    )
+    infer.main.__wrapped__(icfg)          # bypass the hydra decorator
+
+    ds = xr.open_zarr(out)
+    for v in ("total_precipitation_24hr", "gate_weights", "gate_biases"):
+        assert v in ds, v
+    p = ds["total_precipitation_24hr"]
+    assert p.dims == ("init_time", "lead_time", "lat", "lon")
+    assert p.sizes["lat"] == 8 and p.sizes["lon"] == 8
+    assert p.attrs["units"] == "mm/day"
+    finite = np.isfinite(p.values)
+    assert finite.any(), "no forecasts written"
+    assert (p.values[finite] >= 0).all(), "negative rainfall written"
+    # Weights over live experts sum to 1 wherever a forecast exists.
+    w = ds["gate_weights"].values
+    idx = np.isfinite(w).all(axis=2)
+    np.testing.assert_allclose(np.nansum(w, axis=2)[idx], 1.0, rtol=1e-4)
+    # Biases share the grid and are written for exactly the same pairs.
+    b = ds["gate_biases"].values
+    assert b.shape == w.shape
+    np.testing.assert_array_equal(np.isfinite(w), np.isfinite(b))
+    assert ds["gate_biases"].attrs["units"] == "mm/day"   # physical mixing
+    assert np.abs(b[np.isfinite(b)]).max() < 1e4          # finite, sane scale

@@ -1,0 +1,216 @@
+#!/usr/bin/env python
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Run a trained MoWE gate and save its forecasts (and optionally its weights).
+
+Loads a checkpoint, replays a split deterministically, and writes a dense
+``(init_time, lead_time, lat, lon)`` zarr of the mixture's daily precip in
+mm/day -- the artefact downstream analysis needs, which the training-time
+validation does not produce (it only reduces to scalar metrics).
+
+Single process on purpose: this is I/O bound and inference is cheap, so there is
+no DDP to keep in lockstep and no risk of ranks disagreeing about the output
+region.
+
+Usage (dataset/region/split all come from the training config, so the forecasts
+are guaranteed to line up with the metrics)::
+
+    python tools/infer_mowe.py \\
+        dataset=hindcast_derecho \\
+        +checkpoint=/glade/derecho/scratch/awikner/mowe_runs/outputs/mowe_cv5_physvar/checkpoints_best \\
+        +out=/glade/derecho/scratch/awikner/mowe_forecasts/cv5_physvar.zarr \\
+        +split=val +save_weights=true
+
+``+split`` is ``val`` (default) or ``train``. ``+save_gate=true`` additionally
+writes the gate's own fields, each ``(init_time, lead_time, expert, lat, lon)``
+and so E times the size of the forecast -- hence off by default:
+
+* ``gate_weights`` -- masked-softmax weight per expert, summing to 1 over the
+  live experts (exactly 0 for a masked one). These are what to inspect for the
+  monsoon-structure question: which expert the gate trusts where and when.
+* ``gate_biases`` -- the learned per-expert additive correction, in the MIXING
+  space. With ``model.mix_space=physical`` (the default) that is mm/day, so the
+  values are directly interpretable; with ``log`` they are offsets in
+  standardized log space and are NOT mm/day.
+
+The mixture is ``sum_i weights_i * (expert_precip_i + biases_i)``, so the two
+arrays plus the harmonised expert stores reproduce the forecast exactly.
+
+Missing (init, lead) pairs stay NaN, which is how a pair absent from the index
+(an IMERG gap, or too few live experts) is represented; do not confuse that with
+a zero forecast.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import cftime
+import hydra
+import numpy as np
+import torch
+import xarray as xr
+from omegaconf import DictConfig, OmegaConf
+
+from datapipes.factory import build_dataset
+from datapipes.sampler import MixturePairSampler
+from losses import denormalize_precip
+from mowe_precip import MoWEPrecipGate, mix
+from physicsnemo.utils import load_checkpoint
+from torch.utils.data import DataLoader
+
+logger = logging.getLogger("mowe_infer")
+EPOCH = cftime.DatetimeGregorian(1900, 1, 1)
+
+
+def _skeleton(ds, leads: np.ndarray, *, save_gate: bool, mix_space: str) -> xr.Dataset:
+    """All-NaN store laid out on the split's own (init, lead) axes."""
+    inits = [cftime.DatetimeGregorian(*k) for k in ds.index.init_keys]
+    shape = (len(inits), leads.size, ds.lat.size, ds.lon.size)
+    data = {
+        "total_precipitation_24hr": (
+            ("init_time", "lead_time", "lat", "lon"),
+            np.full(shape, np.nan, "float32"),
+            {"units": "mm/day", "description": "MoWE gate mixture"},
+        )
+    }
+    if save_gate:
+        gshape = (shape[0], shape[1], len(ds.experts), *shape[2:])
+        data["gate_weights"] = (
+            ("init_time", "lead_time", "expert", "lat", "lon"),
+            np.full(gshape, np.nan, "float32"),
+            {"description": "masked-softmax weight per expert; sums to 1 over "
+                            "live experts, exactly 0 for a masked one"},
+        )
+        data["gate_biases"] = (
+            ("init_time", "lead_time", "expert", "lat", "lon"),
+            np.full(gshape, np.nan, "float32"),
+            {"units": "mm/day" if mix_space == "physical" else "standardized log",
+             "description": "learned per-expert additive correction, in the "
+                            "mixing space (model.mix_space=" + mix_space + "); "
+                            "forecast = sum_i w_i * (P_i + b_i)"},
+        )
+    return xr.Dataset(
+        {k: (d, v, a) for k, (d, v, a) in data.items()},
+        coords={
+            "init_time": ("init_time", inits),
+            "lead_time": ("lead_time", leads.astype("int32")),
+            "lat": ("lat", ds.lat),
+            "lon": ("lon", ds.lon),
+            "expert": ("expert", list(ds.expert_names)),
+        },
+    )
+
+
+@hydra.main(version_base="1.3", config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    ckpt = str(cfg.checkpoint)
+    out = str(cfg.out)
+    split = str(cfg.get("split", "val"))
+    save_gate = bool(cfg.get("save_gate", cfg.get("save_weights", False)))
+
+    ds = build_dataset(cfg.dataset, split)
+    lo, hi = (int(v) for v in cfg.dataset[split].lead_days)
+    leads = np.arange(lo, hi + 1)
+    mix_space = str(cfg.model.get("mix_space", "physical"))
+    logger.info(
+        "split=%s pairs=%d inits=%d leads=%d-%d experts=%s mix_space=%s",
+        split, len(ds), len(ds.index.init_keys), lo, hi, ds.expert_names, mix_space,
+    )
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MoWEPrecipGate(
+        input_size=(ds.lat.size, ds.lon.size),
+        in_channels=ds.layout.num_channels,
+        n_experts=len(ds.experts),
+        **OmegaConf.to_container(cfg.model.params, resolve=True),
+    ).to(dev)
+    epoch = load_checkpoint(ckpt, models=model, device=dev)
+    logger.info("loaded %s (epoch %s)", ckpt, epoch)
+    model.eval()
+
+    skel = _skeleton(ds, leads, save_gate=save_gate, mix_space=mix_space)
+    # Written eagerly rather than with compute=False, which needs dask; the
+    # all-NaN chunks compress to almost nothing so the skeleton is cheap.
+    skel.to_zarr(out, mode="w", zarr_format=3, consolidated=True)
+    lead_row = {int(t): i for i, t in enumerate(leads)}
+
+    loader = DataLoader(
+        ds,
+        batch_size=int(cfg.dataset.loader.get("batch_size", 4)),
+        sampler=MixturePairSampler(len(ds), shuffle=False),
+        num_workers=int(cfg.dataset.loader.get("num_workers", 4)),
+        pin_memory=False,
+    )
+    written = 0
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["expert_inputs"].to(dev)
+            mask = batch["expert_mask"].to(dev)
+            taus = batch["lead_days"].to(dev)
+            weights, biases = model(x, mask, taus)
+            expert_precip = x[:, :, 0]
+            if mix_space == "physical":
+                expert_precip = denormalize_precip(
+                    expert_precip,
+                    mean=ds.precip_mean,
+                    std=ds.precip_std,
+                    transform=ds.precip_transform,
+                )
+                pred_mm = mix(weights, biases, expert_precip, mask=mask).clamp(min=0.0)
+            else:
+                pred_mm = denormalize_precip(
+                    mix(weights, biases, expert_precip, mask=mask),
+                    mean=ds.precip_mean,
+                    std=ds.precip_std,
+                    transform=ds.precip_transform,
+                )
+            pred_mm = pred_mm.float().cpu().numpy()
+            w_np = weights.float().cpu().numpy() if save_gate else None
+            b_np = biases.float().cpu().numpy() if save_gate else None
+
+            # One region write per sample: the pairs are scattered across the
+            # (init, lead) grid, so contiguous slabs are not available.
+            for b in range(pred_mm.shape[0]):
+                row = ds.index.pairs[int(batch["pair_idx"][b])]
+                i = int(row["init_row"])
+                j = lead_row.get(int(batch["lead_days"][b]))
+                if j is None:
+                    continue
+                sl = {"init_time": slice(i, i + 1), "lead_time": slice(j, j + 1)}
+                piece = {
+                    "total_precipitation_24hr": (
+                        ("init_time", "lead_time", "lat", "lon"),
+                        pred_mm[b][None, None],
+                    )
+                }
+                if save_gate:
+                    dims = ("init_time", "lead_time", "expert", "lat", "lon")
+                    piece["gate_weights"] = (dims, w_np[b][None, None])
+                    piece["gate_biases"] = (dims, b_np[b][None, None])
+                xr.Dataset(piece).to_zarr(out, region=sl)
+                written += 1
+            if written and written % 500 < pred_mm.shape[0]:
+                logger.info("wrote %d/%d pairs", written, len(ds))
+
+    logger.info("wrote %d pairs to %s", written, out)
+
+
+if __name__ == "__main__":
+    main()
