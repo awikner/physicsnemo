@@ -28,6 +28,8 @@ intersected with IMD gauge coverage) — the gate is only supervised there.
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Sequence
 
 import torch
 import torch.distributed as dist
@@ -217,6 +219,71 @@ class StreamingMonthlyScores:
         }
 
 
+class StreamingThresholdScores:
+    """Intensity-resolved scores at fixed daily-rain thresholds, DDP-safe.
+
+    The project's success criterion is stated at moderate-to-heavy rain
+    intensities specifically, which aggregate RMSE/ACC cannot show. Per
+    threshold T (mm/day) this accumulates region-weighted contingency counts
+    and reports
+
+    * ``exc_bias_T`` -- frequency bias, P(pred > T) / P(obs > T). This is the
+      direct read on intensity compression: < 1 means the forecast produces
+      too few events at that intensity, and it should fall further as T rises
+      if the field is over-smoothed.
+    * ``csi_T`` -- critical success index hits / (hits + misses + false
+      alarms), the usual skill measure at a threshold.
+    """
+
+    def __init__(
+        self,
+        *,
+        thresholds: Sequence[float],
+        region_weights: torch.Tensor,
+        device: torch.device,
+    ) -> None:
+        self.thresholds = [float(t) for t in thresholds]
+        n = len(self.thresholds)
+        self.weights = region_weights.to(device=device, dtype=torch.float32)
+        self.hits = torch.zeros(n, device=device)
+        self.misses = torch.zeros(n, device=device)
+        self.false_alarms = torch.zeros(n, device=device)
+        self.pred_yes = torch.zeros(n, device=device)
+        self.obs_yes = torch.zeros(n, device=device)
+
+    @torch.no_grad()
+    def update(self, pred_mm: torch.Tensor, target_mm: torch.Tensor) -> None:
+        finite = torch.isfinite(target_mm)
+        w = self.weights.unsqueeze(0) * finite.float()
+        t = torch.nan_to_num(target_mm)
+        for i, thr in enumerate(self.thresholds):
+            p_yes = (pred_mm > thr).float()
+            o_yes = (t > thr).float()
+            self.hits[i] += (w * p_yes * o_yes).sum()
+            self.misses[i] += (w * (1 - p_yes) * o_yes).sum()
+            self.false_alarms[i] += (w * p_yes * (1 - o_yes)).sum()
+            self.pred_yes[i] += (w * p_yes).sum()
+            self.obs_yes[i] += (w * o_yes).sum()
+
+    def finalize(self) -> dict[str, torch.Tensor]:
+        for t in (
+            self.hits,
+            self.misses,
+            self.false_alarms,
+            self.pred_yes,
+            self.obs_yes,
+        ):
+            _all_reduce_sum(t)
+        exc_bias = self.pred_yes / self.obs_yes.clamp(min=1e-12)
+        denom = self.hits + self.misses + self.false_alarms
+        csi = self.hits / denom.clamp(min=1e-12)
+        # A threshold no observation ever reaches carries no information.
+        empty = self.obs_yes <= 0
+        exc_bias[empty] = float("nan")
+        csi[denom <= 0] = float("nan")
+        return {"exc_bias": exc_bias, "csi": csi}
+
+
 class MixtureValidator:
     """Scores the gate + baselines over a validation loader.
 
@@ -249,6 +316,7 @@ class MixtureValidator:
         monthly: bool | None = None,
         loss_fn=None,
         mix_space: str = "physical",
+        thresholds: Sequence[float] = (1.0, 5.0, 10.0, 20.0, 50.0),
     ) -> None:
         self.expert_names = list(expert_names)
         self.lead_lo, self.lead_hi = int(lead_days[0]), int(lead_days[1])
@@ -267,6 +335,8 @@ class MixtureValidator:
         # Must match training: "physical" mixes experts' mm/day (arithmetic
         # mean), "log" mixes the standardized log channels (geometric mean).
         self.mix_space = str(mix_space)
+        # Daily-rain thresholds (mm/day) for the intensity-resolved scores.
+        self.thresholds = [float(t) for t in thresholds]
         # Monthly scores: one bin per calendar month of the valid day,
         # pooled over all validation years.
         # monthly=None: enable when the climatology carries clim_mean.
@@ -316,6 +386,18 @@ class MixtureValidator:
                 )
                 for s in self._sources()
             }
+        thresh = (
+            {
+                s: StreamingThresholdScores(
+                    thresholds=self.thresholds,
+                    region_weights=self.region_weights,
+                    device=self.device,
+                )
+                for s in self._sources()
+            }
+            if self.thresholds
+            else None
+        )
         weight_maps: dict = {}
         loss_sums = (
             {s: torch.zeros((), device=self.device) for s in self._sources()}
@@ -422,6 +504,14 @@ class MixtureValidator:
                 if len(weight_maps) < self.n_weight_map_samples and key not in weight_maps:
                     weight_maps[key] = weights[sel][0].float().cpu().numpy()
 
+            if thresh is not None:
+                thresh["gate"].update(pred_mm, target_mm)
+                thresh["equal_weight"].update(eq_mm, target_mm)
+                for ei, name in enumerate(self.expert_names):
+                    esel = live[:, ei]
+                    if esel.any():
+                        thresh[name].update(expert_mm[esel, ei], target_mm[esel])
+
             if monthly is not None:
                 for code in months.unique().tolist():
                     bi = self.month_bins.get(int(code))
@@ -458,8 +548,6 @@ class MixtureValidator:
             metrics[f"{s}/bias_mean"] = float(bias.mean())
             metrics[f"{s}/seeps_mean"] = float(sp.mean())
         if monthly is not None:
-            import math
-
             for s in self._sources():
                 mvals = monthly[s].finalize()
                 pooled: dict[str, list[float]] = {k: [] for k in mvals}
@@ -474,6 +562,16 @@ class MixtureValidator:
                 for name, vals in pooled.items():
                     if vals:
                         metrics[f"{s}/imd_{name}_mean"] = sum(vals) / len(vals)
+        if thresh is not None:
+            for s in self._sources():
+                tv = thresh[s].finalize()
+                for i, t in enumerate(self.thresholds):
+                    tag = f"{t:g}".replace(".", "p")
+                    for name, arr in tv.items():
+                        val = float(arr[i])
+                        if not math.isnan(val):
+                            metrics[f"{s}/{name}_{tag}mm"] = val
+
         if loss_sums is not None:
             for s in self._sources():
                 _all_reduce_sum(loss_sums[s])

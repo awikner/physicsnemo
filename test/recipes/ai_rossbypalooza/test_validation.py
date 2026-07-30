@@ -451,3 +451,52 @@ def test_var_weight_rejects_negative():
 
     with _pytest.raises(ValueError, match="var_weight"):
         RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, var_weight=-0.5)
+
+
+def test_threshold_scores_detect_intensity_compression():
+    """exc_bias at a threshold is P(pred>T)/P(obs>T): the direct read on
+    whether the forecast produces enough heavy rain."""
+    from validation import StreamingThresholdScores
+
+    thr = [1.0, 10.0, 20.0]
+    acc = StreamingThresholdScores(
+        thresholds=thr, region_weights=torch.ones(H, W),
+        device=torch.device("cpu"),
+    )
+    # Observed: half the domain at 30 mm/day, half at 0.
+    obs = torch.zeros(1, H, W)
+    obs[0, : H // 2] = 30.0
+    # Forecast: same footprint but smoothed to 15 mm/day -- clears 10, not 20.
+    pred = torch.zeros(1, H, W)
+    pred[0, : H // 2] = 15.0
+    acc.update(pred, obs)
+    out = acc.finalize()
+
+    # At 1 and 10 mm/day the footprint is right, so bias is 1 and CSI is 1.
+    np.testing.assert_allclose(float(out["exc_bias"][0]), 1.0, rtol=1e-5)
+    np.testing.assert_allclose(float(out["csi"][0]), 1.0, rtol=1e-5)
+    np.testing.assert_allclose(float(out["exc_bias"][1]), 1.0, rtol=1e-5)
+    # At 20 mm/day the smoothing has removed the events entirely.
+    np.testing.assert_allclose(float(out["exc_bias"][2]), 0.0, atol=1e-9)
+    np.testing.assert_allclose(float(out["csi"][2]), 0.0, atol=1e-9)
+
+
+def test_threshold_scores_nan_when_threshold_unreached():
+    from validation import StreamingThresholdScores
+
+    acc = StreamingThresholdScores(
+        thresholds=[5.0, 500.0], region_weights=torch.ones(H, W),
+        device=torch.device("cpu"),
+    )
+    acc.update(torch.full((1, H, W), 8.0), torch.full((1, H, W), 9.0))
+    out = acc.finalize()
+    assert not torch.isnan(out["exc_bias"][0])
+    assert torch.isnan(out["exc_bias"][1])      # nothing ever reaches 500
+
+
+def test_validator_emits_threshold_keys(tmp_path):
+    v = _validator(tmp_path)
+    target = torch.rand(2, H, W) * 30.0
+    metrics, _ = v.run(_PickExpertZero(), [_batch(target, [0.0, 2.0], month=7)])
+    for key in ("gate/exc_bias_1mm", "gate/csi_10mm", "equal_weight/exc_bias_20mm"):
+        assert key in metrics, key
