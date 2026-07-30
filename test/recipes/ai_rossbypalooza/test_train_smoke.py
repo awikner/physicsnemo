@@ -359,6 +359,12 @@ def test_inference_writes_gate_forecasts(smoke_cfg, monkeypatch):
     ds = xr.open_zarr(out)
     for v in ("total_precipitation_24hr", "gate_weights", "gate_biases"):
         assert v in ds, v
+    # The store must say where the gate was actually supervised: outside that
+    # region the weights and biases are untrained extrapolation.
+    assert "supervised_region_box" in ds.attrs
+    assert "untrained extrapolation" in ds.attrs["supervised_region_note"]
+    assert ds.attrs["mix_space"] == "physical"
+    assert ds.attrs["split"] == "val"
     p = ds["total_precipitation_24hr"]
     assert p.dims == ("init_time", "lead_time", "lat", "lon")
     assert p.sizes["lat"] == 8 and p.sizes["lon"] == 8

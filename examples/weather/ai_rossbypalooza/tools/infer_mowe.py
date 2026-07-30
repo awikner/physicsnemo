@@ -59,6 +59,9 @@ a zero forecast.
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 import cftime
 import hydra
@@ -67,18 +70,29 @@ import torch
 import xarray as xr
 from omegaconf import DictConfig, OmegaConf
 
-from datapipes.factory import build_dataset
-from datapipes.sampler import MixturePairSampler
-from losses import denormalize_precip
-from mowe_precip import MoWEPrecipGate, mix
-from physicsnemo.utils import load_checkpoint
-from torch.utils.data import DataLoader
+# Recipe modules are imported by bare name, which only works when the recipe
+# root is on sys.path -- true for train.py at the root, not for a tool in
+# tools/. Same shim as verify_precip_alignment.py.
+_RECIPE_DIR = Path(__file__).resolve().parents[1]
+if str(_RECIPE_DIR) not in sys.path:
+    sys.path.insert(0, str(_RECIPE_DIR))
+
+from physicsnemo.distributed import DistributedManager  # noqa: E402
+
+from datapipes.factory import build_dataset  # noqa: E402
+from datapipes.sampler import MixturePairSampler  # noqa: E402
+from losses import denormalize_precip  # noqa: E402
+from mowe_precip import MoWEPrecipGate, mix  # noqa: E402
+from physicsnemo.utils import load_checkpoint  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
 
 logger = logging.getLogger("mowe_infer")
 EPOCH = cftime.DatetimeGregorian(1900, 1, 1)
 
 
-def _skeleton(ds, leads: np.ndarray, *, save_gate: bool, mix_space: str) -> xr.Dataset:
+def _skeleton(
+    ds, leads: np.ndarray, *, save_gate: bool, mix_space: str, attrs: dict
+) -> xr.Dataset:
     """All-NaN store laid out on the split's own (init, lead) axes."""
     inits = [cftime.DatetimeGregorian(*k) for k in ds.index.init_keys]
     shape = (len(inits), leads.size, ds.lat.size, ds.lon.size)
@@ -107,6 +121,7 @@ def _skeleton(ds, leads: np.ndarray, *, save_gate: bool, mix_space: str) -> xr.D
         )
     return xr.Dataset(
         {k: (d, v, a) for k, (d, v, a) in data.items()},
+        attrs=attrs,
         coords={
             "init_time": ("init_time", inits),
             "lead_time": ("lead_time", leads.astype("int32")),
@@ -134,7 +149,18 @@ def main(cfg: DictConfig) -> None:
         split, len(ds), len(ds.index.init_keys), lo, hi, ds.expert_names, mix_space,
     )
 
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # load_checkpoint reaches into DistributedManager. Inside an sbatch job it
+    # picks the SLURM path and raises (RANK unset, SLURM vars incomplete for a
+    # non-srun launch), so declare a single-process world explicitly and let it
+    # take the ENV path. This is inference: there is nothing to distribute.
+    for k, v in (
+        ("RANK", "0"), ("WORLD_SIZE", "1"), ("LOCAL_RANK", "0"),
+        ("MASTER_ADDR", "localhost"), ("MASTER_PORT", "29517"),
+    ):
+        os.environ.setdefault(k, v)
+    if not DistributedManager.is_initialized():
+        DistributedManager.initialize()
+    dev = DistributedManager().device
     model = MoWEPrecipGate(
         input_size=(ds.lat.size, ds.lon.size),
         in_channels=ds.layout.num_channels,
@@ -145,7 +171,26 @@ def main(cfg: DictConfig) -> None:
     logger.info("loaded %s (epoch %s)", ckpt, epoch)
     model.eval()
 
-    skel = _skeleton(ds, leads, save_gate=save_gate, mix_space=mix_space)
+    # The gate emits fields at all 64,800 gridpoints but is supervised only
+    # inside the training region, so record that in the store: outside it the
+    # weights and especially the BIASES are unconstrained extrapolation
+    # (measured mean -15 mm/day, 1st pct -82, versus -0.5 inside).
+    box = list(cfg.region.lat) + list(cfg.region.lon)
+    attrs = {
+        "checkpoint": ckpt,
+        "split": split,
+        "mix_space": mix_space,
+        "supervised_region_box": f"lat {box[0]}..{box[1]}, lon {box[2]}..{box[3]}",
+        "supervised_region_note": (
+            "intersected with the IMD gauge mask (dataset.imd.store). The gate "
+            "is trained ONLY there; weights and biases elsewhere are untrained "
+            "extrapolation and must not be interpreted."
+        ),
+        "generator": "examples/weather/ai_rossbypalooza/tools/infer_mowe.py",
+    }
+    skel = _skeleton(
+        ds, leads, save_gate=save_gate, mix_space=mix_space, attrs=attrs
+    )
     # Written eagerly rather than with compute=False, which needs dask; the
     # all-NaN chunks compress to almost nothing so the skeleton is cheap.
     skel.to_zarr(out, mode="w", zarr_format=3, consolidated=True)

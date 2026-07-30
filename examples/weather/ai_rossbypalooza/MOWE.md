@@ -217,7 +217,7 @@ Single-split runs (train 2000–2019, validate 2020–2024 Mar–Sep), on Midway
 | Loss | Path (`/scratch/midway3/awikner/mowe_runs/outputs/…`) | Best epoch |
 |---|---|---|
 | `regional_mse_physical_var` (recommended) | `mowe_v6_var1/checkpoints_best/` | 29 |
-| `regional_mse_physical` | `mowe_v5_physmse_ref/checkpoints_best/` | 12 |
+| `regional_mse_physical` | `mowe_v6_physmse_ref/checkpoints_best/` | 12 |
 
 5-fold cross-validation (20 train / 5 held-out years per fold, per-fold refitted
 normalisation and climatology) on Derecho:
@@ -231,8 +231,9 @@ Fold *k* holds out: 1 → 2000-04, 2 → 2005-09, 3 → 2010-14, 4 → 2015-19,
 5 → 2020-24. Each contains `MoWEPrecipGate.0.<epoch>.mdlus` and
 `checkpoint.0.<epoch>.pt`; `load_checkpoint` picks the latest automatically.
 
-> The Midway paths were recorded from the run configuration while its SSH
-> session was down, so confirm they exist before relying on them.
+Both verified to exist (2026-07-30). `checkpoints_best/` keeps every
+best-so-far checkpoint rather than only the final one, so the highest epoch
+number is the best; `load_checkpoint` selects it automatically.
 
 ---
 
@@ -266,6 +267,29 @@ Output `(init_time, lead_time, lat, lon)`:
 reproduce the forecast exactly. Pairs absent from the index (IMERG gaps, too few
 live experts) stay **NaN** — that is not a zero forecast. The gate arrays are E×
 the forecast's size, hence off by default.
+
+> **Only the supervised region is meaningful.** The gate emits fields at all
+> 64,800 gridpoints but is trained on 378, and outside them the output is
+> unconstrained extrapolation — measured on a real run, the biases average
+> **−15.3 mm/day (1st percentile −82)** outside versus **−0.52 mm/day** inside.
+> Plotting the global bias field would be badly misleading. The store records the
+> region in its `supervised_region_box` / `supervised_region_note` attributes;
+> mask with `region_mask(lat, lon, box) & imd_valid_mask(...)` before analysis.
+
+Measured on the recommended checkpoint over the 2020–2024 Mar–Sep split
+(3,255 pairs, 465 inits, ~45 min on one H100 — each pair is a separate zarr
+region write, so buffer in memory if that becomes a bottleneck):
+
+| | forecast precip | gate bias |
+|---|---|---|
+| inside the region | mean 5.56, median 2.45, p99 32.2 mm/day | mean −0.52, p99 +8.4 mm/day |
+| outside (untrained) | mean 1.05, median 0.00 | mean −15.27, p1 −82.5 |
+
+**Learned weights inside the region** (a first look at the monsoon-structure
+question): graphcast **0.475**, aifs_single_v2 0.215, sfno_era5 0.184,
+pangu_s2s 0.126. The gate concentrates on graphcast and downweights pangu, which
+is also the weakest expert by ACC (0.104) — so it is discriminating on skill
+rather than averaging blindly.
 
 To score saved forecasts against IMERG, reuse the streaming accumulators in
 `validation.py` (`StreamingRegionalScore`, `StreamingMonthlyScores`,
