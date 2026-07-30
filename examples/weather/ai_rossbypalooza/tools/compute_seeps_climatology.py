@@ -72,6 +72,21 @@ def parse_years(spec: str) -> list[int]:
     return sorted(set(out))
 
 
+def compact_years(years: list[int]) -> str:
+    """"2000-2004,2010-2024" for a possibly non-contiguous year list.
+
+    A plain first-to-last span would report a k-fold training set that holds
+    out a middle block as the full range, i.e. provenance metadata claiming
+    the held-out years were included.
+    """
+    runs: list[tuple[int, int]] = []
+    for y in sorted(set(years)):
+        if runs and y == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], y)
+        else:
+            runs.append((y, y))
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
 def month_fields(
     imerg_root: Path,
     years: list[int],
@@ -238,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         attrs={
             "schema_version": "1.0",
             "source": str(args.imerg_root),
-            "source_years": f"{years[0]}-{years[-1]}",
+            "source_years": compact_years(years),
             "dry_threshold_mm": float(args.dry_threshold),
             "t2_definition": "2/3 quantile of wet-day amounts (light:heavy = 2:1)",
             "clim_mean_daily_window_days": int(2 * args.daily_half_window + 1),

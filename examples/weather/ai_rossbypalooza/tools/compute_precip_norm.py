@@ -64,6 +64,21 @@ def parse_years(spec: str) -> list[int]:
     return sorted(set(out))
 
 
+def compact_years(years: list[int]) -> str:
+    """"2000-2004,2010-2024" for a possibly non-contiguous year list.
+
+    A plain first-to-last span would report a k-fold training set that holds
+    out a middle block as the full range, i.e. provenance metadata claiming
+    the held-out years were included.
+    """
+    runs: list[tuple[int, int]] = []
+    for y in sorted(set(years)):
+        if runs and y == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], y)
+        else:
+            runs.append((y, y))
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
 def compute_stats(
     imerg_root: Path,
     years: list[int],
@@ -152,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     attrs = {
         "schema_version": "1.0",
         "source": str(args.imerg_root),
-        "source_years": f"{years[0]}-{years[-1]}",
+        "source_years": compact_years(years),
         "source_months": str(months) if months else "all",
         "n_samples": count,
         "units": units,
