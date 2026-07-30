@@ -212,6 +212,7 @@ class RegionalPrecipMSE(nn.Module):
         space: str = "normalized",
         pred_space: str = "normalized",
         bias_weight: float = 0.0,
+        var_weight: float = 0.0,
         scale_mm: float | None = None,
         precip_mean: float = 0.0,
         precip_std: float = 1.0,
@@ -246,6 +247,19 @@ class RegionalPrecipMSE(nn.Module):
         if bias_weight < 0:
             raise ValueError(f"bias_weight must be >= 0, got {bias_weight}")
         self.bias_weight = float(bias_weight)
+        # Amplitude matching: add var_weight * (sigma_pred/sigma_obs - 1)^2,
+        # where sigma is the region-weighted SPATIAL standard deviation in
+        # mm/day of each sample. MSE decomposes as
+        # bias^2 + (sp - st)^2 + 2*sp*st*(1 - r), so shrinking the forecast
+        # toward its own mean removes the decorrelation term: the MSE-optimal
+        # amplitude is sp = r * st, and the measured physical-MSE run duly
+        # converged to amp 0.39 against ACC 0.34. Nothing else in the
+        # objective forbids that hedging, which IS the intensity blurring this
+        # project targets, so it needs its own term.
+        if var_weight < 0:
+            raise ValueError(f"var_weight must be >= 0, got {var_weight}")
+        self.var_weight = float(var_weight)
+        self.last_amp: float = float("nan")
         # Reference RMSE (mm/day) used to divide a physical-space MSE, e.g.
         # 9.3 puts it near 1.0 like the log-space loss so the tuned lr and
         # grad_clip_norm transfer. Pure loss rescaling: it cannot move the
@@ -306,12 +320,13 @@ class RegionalPrecipMSE(nn.Module):
         mse = _weighted_regional_mean(err, self.weights, finite)
         if self.space == "physical" and self.scale_mm is not None:
             mse = mse / self.scale_mm**2
-        if self.bias_weight <= 0:
-            self.last_mse = float(mse.detach())
+        self.last_mse = float(mse.detach())
+        if self.bias_weight <= 0 and self.var_weight <= 0:
             self.last_bias_mm = float("nan")
+            self.last_amp = float("nan")
             return mse
 
-        # Bias term in physical mm/day, whatever space the MSE used.
+        # Extra terms live in physical mm/day, whatever space the MSE used.
         if self.pred_space == "physical":
             p_mm = pred_mm
         else:
@@ -322,12 +337,32 @@ class RegionalPrecipMSE(nn.Module):
                 transform=self.precip_transform,
             )
         finite_mm = torch.isfinite(t_mm)
-        signed = p_mm - torch.nan_to_num(t_mm)
-        w = self.weights.unsqueeze(0) * finite_mm.to(signed.dtype)
-        bias_mm = (signed * w).sum() / w.sum().clamp(min=1e-12)
-        total = mse + self.bias_weight * bias_mm**2
-        self.last_mse = float(mse.detach())
-        self.last_bias_mm = float(bias_mm.detach())
+        t_filled = torch.nan_to_num(t_mm)
+        w = self.weights.unsqueeze(0) * finite_mm.to(p_mm.dtype)
+        total = mse
+
+        if self.bias_weight > 0:
+            bias_mm = ((p_mm - t_filled) * w).sum() / w.sum().clamp(min=1e-12)
+            total = total + self.bias_weight * bias_mm**2
+            self.last_bias_mm = float(bias_mm.detach())
+        else:
+            self.last_bias_mm = float("nan")
+
+        if self.var_weight > 0:
+            wsum = w.sum(dim=(-2, -1)).clamp(min=1e-12)
+
+            def _std(field):
+                mu = (field * w).sum(dim=(-2, -1)) / wsum
+                var = (
+                    w * (field - mu[:, None, None]) ** 2
+                ).sum(dim=(-2, -1)) / wsum
+                return torch.sqrt(var.clamp(min=1e-12))
+
+            ratio = _std(p_mm) / _std(t_filled).clamp(min=1e-6)
+            total = total + self.var_weight * ((ratio - 1.0) ** 2).mean()
+            self.last_amp = float(ratio.mean().detach())
+        else:
+            self.last_amp = float("nan")
         return total
 
 
@@ -419,6 +454,7 @@ def build_loss(
             space=str(cfg_loss.get("space", "normalized")),
             pred_space=pred_space,
             bias_weight=float(cfg_loss.get("bias_weight", 0.0)),
+            var_weight=float(cfg_loss.get("var_weight", 0.0)),
             scale_mm=(
                 float(cfg_loss["scale_mm"])
                 if cfg_loss.get("scale_mm") is not None

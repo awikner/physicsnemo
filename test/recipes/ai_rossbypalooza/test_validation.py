@@ -392,3 +392,62 @@ def test_amplitude_ratio_diagnostic(tmp_path):
     metrics, _ = v.run(_PickExpertZero(), [_batch(target, [0.0, 1.0], month=7)])
     assert "gate/imd_amp_07" in metrics and "gate/imd_amp_mean" in metrics
     assert "equal_weight/imd_amp_mean" in metrics
+
+
+def test_variance_matching_term_penalises_shrinkage():
+    """var_weight adds (sigma_pred/sigma_obs - 1)^2 on spatial std, so an
+    over-smoothed forecast is penalised even when its MSE is lower."""
+    from datapipes.precip import LogPrecipTransform
+
+    tr = LogPrecipTransform(epsilon=1e-3, units="m")
+    mu, sd = -6.379, 0.858
+    kw = dict(
+        space="physical", pred_space="physical", scale_mm=9.3,
+        precip_mean=mu, precip_std=sd, precip_transform=tr,
+    )
+    plain = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, **kw)
+    matched = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, var_weight=1.0, **kw)
+
+    torch.manual_seed(0)
+    obs = (torch.rand(3, H, W) * 30.0).clamp(min=0.0)
+    t_norm = normalize_precip(obs, mean=mu, std=sd, transform=tr)
+    mean_obs = obs.mean(dim=(-2, -1), keepdim=True)
+
+    # Correct amplitude costs nothing extra; shrunk amplitude does.
+    exact = matched(obs, t_norm, obs)
+    np.testing.assert_allclose(float(matched.last_amp), 1.0, rtol=1e-3)
+    assert float(exact) < 1e-6
+
+    shrunk = mean_obs + 0.3 * (obs - mean_obs)      # 30% of observed contrast
+    np.testing.assert_allclose(
+        float(matched(shrunk, t_norm, obs)) - float(plain(shrunk, t_norm, obs)),
+        (0.3 - 1.0) ** 2,
+        rtol=1e-3,
+    )
+    np.testing.assert_allclose(float(matched.last_amp), 0.3, rtol=1e-3)
+
+    # The decisive case. Build a rival with FULL amplitude but correlation
+    # r = 0.6: pred = mean + 0.6*a + 0.8*n with std(n) = std(a), so
+    # std(pred - mean) = std(a) exactly and corr(pred - mean, a) = 0.6.
+    # Plain MSE prefers the shrunk forecast (hedging wins whenever r < 0.5 in
+    # the decomposition, and 2*var*(1-r) here exceeds (1-c)^2*var); adding the
+    # amplitude term flips the ranking, which is the whole point.
+    a = obs - mean_obs
+    n = torch.randn_like(a)
+    n = n * (a.std() / n.std())
+    full_amp = mean_obs + 0.6 * a + 0.8 * n
+
+    assert float(plain(shrunk, t_norm, obs)) < float(plain(full_amp, t_norm, obs))
+    assert float(matched(shrunk, t_norm, obs)) > float(matched(full_amp, t_norm, obs))
+    # And the rival is near-full-amplitude, so it pays little penalty. (Not
+    # exactly 1.0: the noise is scaled by unweighted std while the loss uses
+    # cos-lat weights, and cov(a, n) is only approximately zero at this size.)
+    matched(full_amp, t_norm, obs)
+    assert 0.85 < float(matched.last_amp) < 1.10, float(matched.last_amp)
+
+
+def test_var_weight_rejects_negative():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="var_weight"):
+        RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX, var_weight=-0.5)

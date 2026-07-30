@@ -388,6 +388,9 @@ def run(cfg: DictConfig) -> None:
                 if getattr(loss_fn, "bias_weight", 0.0) > 0:
                     scalars["mse_term"] = loss_fn.last_mse
                     scalars["bias_mm"] = loss_fn.last_bias_mm
+                if getattr(loss_fn, "var_weight", 0.0) > 0:
+                    scalars["mse_term"] = loss_fn.last_mse
+                    scalars["amp_spatial"] = loss_fn.last_amp
                 log.log_minibatch(_ddp_mean_scalars(scalars, dist=dist))
 
         # ---------------- validation ----------------
