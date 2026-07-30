@@ -469,15 +469,23 @@ Path: `/scratch/09979/awikner/physicsnemo-zarr/hindcasts/{model}/{YYYY}.zarr`, m
       in the h100 queue → cancelled, validated on Derecho instead.) Init loss large
       (untrained, no delta-scaler) — expected. 4-GPU DDP not separately smoked
       (single-GPU stack validated; DDP is the same code under torch<2.11).
-- [~] C3 300k-step training — **VENUE CHANGED (2026-07-22, user): Midway3
-      `pedramh-gpu` (4×H100, infinite walltime, account pi-pedramh).** See §8 for the
-      Midway3 setup. (Stampede3 H100 job 3335041 was the initial submission; cancelled
-      in favour of Midway3 — Stampede3 h100 was heavily oversubscribed and pi-pedramh's
-      pedramh-gpu node has infinite walltime so no 48h chunking/resubmit is needed.)
-      delta-std stats job ready (run `tools/data/era5/compute_delta24_std.py` +
-      set loss.delta_scaler_path to enable delta-normalization; loss works without it).
-- [ ] C4 ArchesWeather hindcasts on Stampede3 (post-training; era5_all/ dir ready;
-      inference.py handles prev/calendar rollout at step_size=4).
+- [x] C3 300k-step training — **DONE, in two venue-changed stages (both
+      user-directed):** (1) base 137-epoch run on Midway3 `pedramh-gpu`
+      (job 52606773, COMPLETED 2026-07-25, val 0.02213@ep130) per the
+      2026-07-22 venue change (§8); (2) **VENUE CHANGED AGAIN (2026-07-27,
+      user): diagnostic-head warm-start fine-tune on Stampede3 h100**
+      (job 3349335 — "train SFNO on Midway and Arches on Stampede") after the
+      Pangu-parity config fix (varying boundary = TISR only) + the precip/OLR
+      diagnostic-head extension (commit 677224c9). Warm-started from the
+      Midway3 epoch-130 checkpoint (1 fresh param = diag head); stopped at
+      ep31 on val plateau (best saved ep10, val 0.5592). §8's Midway3 setup
+      applied to stage (1); SFNO v4's parity retrain then used that node.
+- [x] C4 ArchesWeather hindcasts — DONE 2026-07-28/29 on **Derecho** (gen job
+      6925498 + 2017 segfault regen), consolidated to
+      `hindcasts/archesweather_era5/` (25 yrs, incl. 2 diagnostic vars),
+      tar-replicated to Stampede3, finiteness-VERIFY_OK 25/25. 24h eval
+      (channel-equal, 2019-20): **0.0446 — best model in suite** (Pangu 0.0494,
+      SFNO v4 0.0769); Pangu retains precip (0.277 vs Arches 1.21).
 - [~] D: consolidator + test DONE (commit aafcf6a4); registry/verification/docs/
       cleanup/final report pending campaign completion.
 
