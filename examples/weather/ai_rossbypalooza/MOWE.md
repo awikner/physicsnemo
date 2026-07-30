@@ -141,6 +141,34 @@ ACC — so 1.0 is bracketed as the sweet spot.
 | equal_weight (bar) | 9.43 | −0.02 | 0.272 | 0.537 | 0.871 | 0.588 | 0.173 |
 | aifs_single_v2 (bar) | 9.91 | 0.41 | 0.310 | 0.755 | 0.836 | 0.859 | 0.211 |
 
+### Cross-validated (5 folds, 20 train / 5 held-out years each)
+
+Means over folds validating 2000-04, 2005-09, 2010-14, 2015-19 and 2020-24, each
+with its normalisation and climatology refitted on that fold's training years:
+
+| CV mean | RMSE | bias | ACC | amp | SEEPS | exc_bias 20mm |
+|---|---|---|---|---|---|---|
+| `regional_mse_physical` | **8.556** | −0.03 | **0.350** | 0.402 | 0.827 | 0.431 |
+| `regional_mse_physical_var` | 8.752 | +0.01 | 0.317 | 0.486 | **0.799** | **0.646** |
+| equal_weight (bar) | 8.963 | +0.04 | 0.292 | 0.539 | 0.833 | 0.598 |
+| aifs_single_v2 (bar) | 9.596 | +0.45 | 0.296 | 0.761 | 0.789 | 0.864 |
+
+Both gate variants beat **both** bars on RMSE and on ACC in **all five folds**,
+so the single-split advantage is not a favourable window. Per-fold RMSE spans
+8.27–8.96 for physical MSE; fold 5 (2020-24) is the hardest period for every
+source, which means the original single split was the pessimistic choice.
+
+The trade-off is unchanged out of sample and is the reason both losses are kept:
+physical MSE takes RMSE and ACC, but its heavy-rain frequency (0.431) is far
+*below* equal-weight's 0.598, whereas the variance-matched version exceeds it at
+0.646 — 5/5 folds each way — and posts the better SEEPS (0.799 vs 0.827, beating
+equal-weight in 5/5 folds and approaching AIFS's 0.789). Bias is small for both
+across every fold, so the dry-bias problem is resolved.
+
+**Pick `regional_mse_physical_var` for the project's stated criterion** (skill at
+moderate-to-heavy intensities); pick `regional_mse_physical` only if aggregate
+RMSE/ACC is the target.
+
 Also available: `regional_mse` (log space, `space: normalized`),
 `regional_mse_bias` (log space + `bias_weight`), `regional_log_mse`. Both
 log-space arms were clearly worse (RMSE 9.37–9.44, ACC ≈0.29). **MAE would not

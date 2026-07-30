@@ -48,6 +48,30 @@ aifs 0.755, sfno 0.748, graphcast 0.685, pangu 0.571 — and equal-weight lands 
 averaging imperfectly-correlated fields. **The blending destroys intensity that
 the experts had.**
 
+## Cross-validated result (5 folds, Derecho, 20 train / 5 held-out years)
+
+Means over folds validating 2000-04 / 2005-09 / 2010-14 / 2015-19 / 2020-24,
+each with normalisation and climatology refitted on its own training years:
+
+| CV mean | RMSE | bias | ACC | amp | SEEPS | exc_bias 20mm |
+|---|---|---|---|---|---|---|
+| physical MSE | **8.556** | −0.03 | **0.350** | 0.402 | 0.827 | 0.431 |
+| physical MSE + var 1.0 | 8.752 | +0.01 | 0.317 | 0.486 | **0.799** | **0.646** |
+| equal_weight | 8.963 | +0.04 | 0.292 | 0.539 | 0.833 | 0.598 |
+| aifs_single_v2 | 9.596 | +0.45 | 0.296 | 0.761 | 0.789 | 0.864 |
+
+Both gate variants beat both bars on RMSE and ACC in **5/5 folds**, so the
+single-split advantage was not a favourable window. Fold 5 (2020-24) is the
+hardest period for every source, i.e. the original single split was the
+pessimistic choice. The intensity trade-off survives out of sample exactly as
+measured on the single split: physical MSE's heavy-rain frequency (0.431) sits
+*below* equal-weight's 0.598 while the variance-matched version exceeds it
+(0.646), 5/5 folds each way, and takes the better SEEPS (0.799 vs 0.827).
+Bias is small for both in every fold.
+
+**Recommendation: `regional_mse_physical_var`** for a criterion stated at
+moderate-to-heavy intensities.
+
 ## Log space vs physical space
 
 Mixing must happen in **mm/day**. Mixing standardized log channels makes the
