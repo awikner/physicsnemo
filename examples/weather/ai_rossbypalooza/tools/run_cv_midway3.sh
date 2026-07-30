@@ -96,12 +96,14 @@ python $RECIPE/tools/compute_seeps_climatology.py --imerg-root $IMERG \
     elif [ -n "$prev" ]; then
         dep_train="--dependency=afterany:$prev"
     fi
+    # The overrides contain commas, which Slurm's --export list would treat as
+    # separators and truncate, so hand them over in a file instead.
+    ov="$RUNDIR/cv${f}_overrides.txt"
+    cat > "$ov" <<EOV
+loss=$LOSS dataset.train.years=[2000,2024] dataset.train.exclude_years=[$excl] dataset.val.years=[$vlo,$vhi] dataset.normalization.precip_stats=$NORM/imerg_precip_stats_log_cv${f}.zarr dataset.normalization.seeps_climatology=$NORM/imerg_seeps_climatology_cv${f}.zarr
+EOV
     train_id=$(sbatch $dep_train \
-        --export=ALL,RUN_NAME="mowe_cv${f}",WANDB=true,EXTRA="loss=$LOSS \
-dataset.train.years=[2000,2024] dataset.train.exclude_years=[$excl] \
-dataset.val.years=[$vlo,$vhi] \
-dataset.normalization.precip_stats=$NORM/imerg_precip_stats_log_cv${f}.zarr \
-dataset.normalization.seeps_climatology=$NORM/imerg_seeps_climatology_cv${f}.zarr" \
+        --export=ALL,RUN_NAME="mowe_cv${f}",WANDB=true,EXTRA_FILE="$ov" \
         "$RECIPE/tools/train_mowe_midway3_h100.sbatch" \
         2>&1 | grep -oP 'Submitted batch job \K\d+')
     echo "fold $f: train job $train_id (val $vlo-$vhi, loss $LOSS)"

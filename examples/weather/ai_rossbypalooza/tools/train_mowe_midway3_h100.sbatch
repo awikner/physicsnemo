@@ -10,6 +10,10 @@
 # One-time setup: bash setup_midway3.sh (creates the venv on scratch).
 #   sbatch train_mowe_midway3_h100.sbatch
 # Variants: sbatch --export=ALL,EXTRA="loss=regional_log_mse",RUN_NAME=... ...
+# NOTE: Slurm's --export list is COMMA-separated, so an EXTRA containing a
+# comma (e.g. dataset.train.years=[2000,2024]) is silently truncated and Hydra
+# then rejects "...years=[2000". For overrides with commas, write them to a
+# file and pass EXTRA_FILE=<path> instead (a path has no commas).
 # Resume: re-sbatch with the same RUN_NAME (picks up the latest checkpoint).
 #SBATCH -J mowe_train_h100
 #SBATCH -A pi-pedramh
@@ -32,6 +36,15 @@ source "$REPO/.venv-mowe/bin/activate"
 
 RUNDIR=/scratch/midway3/awikner/mowe_runs
 mkdir -p "$RUNDIR"
+
+# Overrides containing commas must arrive via a file, not --export (see above).
+if [ -n "${EXTRA_FILE:-}" ]; then
+    if [ ! -f "$EXTRA_FILE" ]; then
+        echo "FATAL: EXTRA_FILE=$EXTRA_FILE does not exist"; exit 2
+    fi
+    EXTRA="$(cat "$EXTRA_FILE")"
+    echo "overrides from $EXTRA_FILE: $EXTRA"
+fi
 cd "$RUNDIR"
 
 NGPU=$(nvidia-smi -L | wc -l)
