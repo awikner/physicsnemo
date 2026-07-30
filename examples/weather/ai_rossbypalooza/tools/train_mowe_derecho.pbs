@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Derecho FULL MoWE Method-0 training: 4x A100 (one node), model v1
-# (log-precip space, train 2000-2019 all months, val 2020+ JJAS).
+# Derecho MoWE Method-0 training: 4x A100 (one node).
 #   mkdir -p /glade/derecho/scratch/awikner/mowe_runs   # PBS -o needs the dir
 #   qsub train_mowe_derecho.pbs
 # Variants:
-#   qsub -v EXTRA="loss=regional_log_mse run_name=mowe_v1_logmse" ...
-#   qsub -v EXTRA="training=all_experts run_name=mowe_v1_allexp" ...
+#   qsub -v EXTRA="loss=regional_log_mse",RUN_NAME=mowe_logmse ...
+#
+# NOTE: PBS's -v list is COMMA-separated, exactly like Slurm's --export, so an
+# EXTRA containing a comma (e.g. dataset.train.years=[2000,2024]) is truncated
+# and Hydra then fails with "no viable alternative at input". For those, write
+# the overrides to a file and pass EXTRA_FILE=<path> (a path has no commas).
 # Resume: re-qsub with the same run_name — checkpoints live in
 # $RUNDIR/outputs/<run_name>/checkpoints and are picked up automatically.
 #PBS -A UCHI0018
@@ -18,6 +21,7 @@
 #PBS -N mowe_train_v1
 #PBS -j oe
 #PBS -o /glade/derecho/scratch/awikner/mowe_runs/train_v1.log
+# Override the log per job with: qsub -o <path> ...
 
 set -uo pipefail
 module load ncarenv cuda python 2>/dev/null || module load cuda
@@ -28,8 +32,20 @@ RUNDIR=/glade/derecho/scratch/awikner/mowe_runs
 mkdir -p "$RUNDIR"
 cd "$RUNDIR"
 
+# Overrides with commas arrive via a file, not -v (see the note above).
+if [ -n "${EXTRA_FILE:-}" ]; then
+    if [ ! -f "$EXTRA_FILE" ]; then
+        echo "FATAL: EXTRA_FILE=$EXTRA_FILE does not exist"; exit 2
+    fi
+    EXTRA="$(cat "$EXTRA_FILE")"
+    echo "overrides from $EXTRA_FILE: $EXTRA"
+fi
+
+echo "[$(date)] $(nvidia-smi -L | wc -l) GPU(s): $(nvidia-smi -L | head -1)"
+
 torchrun --standalone --nproc-per-node=4 \
     /glade/work/awikner/physicsnemo/examples/weather/ai_rossbypalooza/train.py \
+    dataset=hindcast_derecho \
     run_name="${RUN_NAME:-mowe_v1}" \
     dataset.loader.num_workers=8 \
     wandb.enabled="${WANDB:-false}" \
