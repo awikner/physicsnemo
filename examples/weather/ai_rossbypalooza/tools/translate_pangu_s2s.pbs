@@ -1,0 +1,25 @@
+#!/bin/bash
+#PBS -N pangu_s2s_translate
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=8:mem=60gb
+#PBS -l walltime=00:40:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/pangu_translate.log
+set -uo pipefail
+cd /glade/work/awikner/physicsnemo
+module load ncarenv cuda python 2>/dev/null || module load cuda 2>/dev/null || true
+source .venv/bin/activate
+export HDF5_USE_FILE_LOCKING=FALSE
+SRC=/glade/work/awikner/PanguWeather/v2.0/results/S2S/2000/training_checkpoints/best_ckpt.tar
+CFG=examples/weather/ai_rossby/conf/model/pangu_plasim_s2s.yaml
+OUT=/glade/derecho/scratch/awikner/pangu_s2s_best/pangu_plasim_s2s.mdlus
+mkdir -p "$(dirname "$OUT")"
+echo "=== translate start $(date) host=$(hostname) python=$(which python) ==="
+python tools/checkpoint_translation/pangu_plasim.py \
+  --source "$SRC" \
+  --model-config "$CFG" \
+  --output "$OUT" --verbose
+rc=$?
+echo "=== translator rc=$rc $(date) ==="
+ls -la "$OUT" 2>/dev/null && echo "OUTPUT_OK" || echo "OUTPUT_MISSING"

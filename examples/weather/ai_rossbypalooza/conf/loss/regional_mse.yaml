@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Regional MSE over the monsoon box (cfg.region), in normalized space.
+name: regional_mse
+space: normalized      # or "physical" (mm/day; identical up to std^2)
+lat_weighted: true

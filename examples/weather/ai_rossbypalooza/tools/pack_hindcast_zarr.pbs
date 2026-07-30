@@ -1,0 +1,20 @@
+#!/bin/bash
+#PBS -N pack_hindcast_zarr
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=128
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/hindcasts_dsi/pack.log
+set -uo pipefail
+export ZARR_ROOT=/glade/derecho/scratch/awikner/hindcasts_dsi/zarr
+export TAR_STAGE=/glade/derecho/scratch/awikner/hindcasts_dsi/zarr-tars
+export NP=64
+echo "START $(date)"
+for m in aifs_single_v1 aifs_single_v1p1 aifs_single_v2 aurora_e2s graphcast_e2s graphcast_wb2; do
+  echo "=== pack $m ==="
+  bash /glade/work/awikner/physicsnemo/hpc/scripts/replicate_tar.sh pack "$m" || echo "PACK FAILED: $m"
+done
+echo "ALL_PACK_DONE $(date)"
+du -sh "$TAR_STAGE" 2>/dev/null
+ls "$TAR_STAGE"/*/*.tar 2>/dev/null | wc -l | xargs echo "total tars:"

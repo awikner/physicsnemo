@@ -1,0 +1,77 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Derecho develop-queue job: harmonize ONE (model, year-range) slice into the
+# unified MoWE schema under hindcasts_mowe/ (tools/harmonize_hindcasts.py).
+# Parametrized so several slices run as parallel queue jobs — submit the full
+# set with tools/submit_harmonize.sh (or by hand):
+#   qsub -N mowe_h_gc1 -v TASK=graphcast,YEARS=2000-2012 harmonize_derecho.pbs
+# TASK in {graphcast, aifs_single_v2, pangu_s2s, sfno_era5}.
+# Resumable via .harmonize_done sentinels; each job self-resubmits while its
+# own slice has unfinished stores (up to MAX_RESUBMITS).
+#PBS -N mowe_harmonize
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=64:mem=235GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+
+set -uo pipefail
+module load conda
+conda activate hindcast_conv
+
+TOOLS="$HOME/mowe_tools/tools"
+DSI=/glade/derecho/scratch/awikner/hindcasts_dsi/zarr
+CONS=/glade/derecho/scratch/awikner/physicsnemo-zarr/hindcasts
+OUT=/glade/derecho/scratch/awikner/hindcasts_mowe
+REF=/glade/derecho/scratch/awikner/physicsnemo-zarr/imerg/2001.zarr
+TASK="${TASK:?set TASK=graphcast|aifs_single_v2|pangu_s2s|sfno_era5}"
+YEARS="${YEARS:-2000-2024}"
+NP="${NP:-12}"
+DEPTH="${DEPTH:-0}"
+MAX_RESUBMITS="${MAX_RESUBMITS:-6}"
+export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4
+
+mkdir -p "$OUT"
+echo "[$(date)] harmonize start task=$TASK years=$YEARS NP=$NP depth=$DEPTH host=$(hostname)"
+
+SRC2=""
+# Every task is filtered to the user's master variable list — models keep
+# only the intersection of their variables with mowe_subset_variables.txt.
+case "$TASK" in
+  graphcast)
+    ARGS=(--source dsi --model graphcast
+          --src-root "$DSI/graphcast_e2s" --src-root "$DSI/graphcast_wb2"
+          --src-label e2s --src-label wb2)
+    SRC1="$DSI/graphcast_e2s"; SRC2="$DSI/graphcast_wb2" ;;
+  aifs_single_v2)
+    ARGS=(--source dsi --model aifs_single_v2 --src-root "$DSI/aifs_single_v2")
+    SRC1="$DSI/aifs_single_v2" ;;
+  pangu_s2s|sfno_era5)
+    ARGS=(--source consolidated --model "$TASK" --src-root "$CONS/$TASK")
+    SRC1="$CONS/$TASK" ;;
+  *) echo "unknown TASK=$TASK"; exit 2 ;;
+esac
+ARGS+=(--variables-file "$TOOLS/mowe_subset_variables.txt")
+
+python "$TOOLS/harmonize_hindcasts.py" "${ARGS[@]}" \
+    --years "$YEARS" --out-root "$OUT" --ref-store "$REF" \
+    --n-workers "$NP" --commit "${COMMIT:-unknown}"
+rc=$?
+
+Y0="${YEARS%-*}"; Y1="${YEARS#*-}"
+remaining=0
+for y in $(seq "$Y0" "$Y1"); do
+    if [ -d "$SRC1/$y.zarr" ] || { [ -n "$SRC2" ] && [ -d "$SRC2/$y.zarr" ]; }; then
+        [ -f "$OUT/.harmonize_done/${TASK}_${y}.done" ] || remaining=$((remaining + 1))
+    fi
+done
+echo "[$(date)] task=$TASK years=$YEARS pass complete rc=$rc remaining=$remaining"
+
+if [ "$remaining" -gt 0 ] && [ "$DEPTH" -lt "$MAX_RESUBMITS" ]; then
+    echo "[$(date)] resubmitting $TASK $YEARS (depth $((DEPTH + 1)))"
+    qsub -N "mowe_h_${TASK:0:8}" \
+        -v "TASK=$TASK,YEARS=$YEARS,NP=$NP,DEPTH=$((DEPTH + 1)),MAX_RESUBMITS=$MAX_RESUBMITS,COMMIT=${COMMIT:-unknown}" \
+        "$TOOLS/harmonize_derecho.pbs"
+fi

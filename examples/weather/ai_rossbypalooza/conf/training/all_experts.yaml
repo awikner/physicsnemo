@@ -1,0 +1,26 @@
+# @package _global_
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# All-experts training: every expert is present in every training sample —
+# the sample index is reduced to the intersection of init times where all
+# configured experts are live, and expert dropout is off (the mask machinery
+# stays in place but is inert; all mask bits are 1).
+training:
+  max_epochs: 60
+  warmup_epochs: 2
+  min_lr_ratio: 0.02
+  amp: bf16
+  grad_clip_norm: 1.0
+  expert_dropout: 0.0
+  optimizer:
+    lr: 3.0e-4
+    betas: [0.9, 0.999]
+    weight_decay: 0.05
+dataset:
+  train:
+    min_experts: all
+  val:
+    min_experts: all

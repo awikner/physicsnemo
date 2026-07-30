@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Validation: regional RMSE / bias / SEEPS per lead day for the gate vs
+# per-expert and equal-weight baselines.
+enabled: true
+every_n_epochs: 1
+# Written by tools/compute_seeps_climatology.py (IMERG train years).
+# Cluster-specific path comes from the dataset config's normalization block.
+seeps_climatology: ${dataset.normalization.seeps_climatology}

@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -N pangu_s2s_validate
+#PBS -A UCHI0014
+#PBS -q develop
+#PBS -l select=1:ncpus=8:mem=60gb
+#PBS -l walltime=00:40:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/awikner/pangu_validate.log
+set -uo pipefail
+cd /glade/work/awikner/physicsnemo/tools/checkpoint_translation
+module load ncarenv cuda python 2>/dev/null || true
+source /glade/work/awikner/physicsnemo/.venv/bin/activate
+export HDF5_USE_FILE_LOCKING=FALSE
+export VALIDATE_S2S_CKPT=/glade/work/awikner/PanguWeather/v2.0/results/S2S/2000/training_checkpoints/best_ckpt.tar
+echo "=== validate start $(date) host=$(hostname) ==="
+python _validate_translations.py
+echo "=== validate rc=$? $(date) ==="

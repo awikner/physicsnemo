@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hindcast mixture dataset — Derecho paths (Derecho copies ONLY; nothing
+# reads from the DSI cluster). All experts read the unified harmonized
+# stores under hindcasts_mowe/ produced by tools/harmonize_hindcasts.py
+# (canonical flat names, lead_time in whole days, tp = trailing-24h
+# accumulation in m — ERA5 units), so the precip axis/kind/units below are
+# known by construction. `day_offset` (which IMERG day a given lead pairs
+# with) is still empirically pinned by tools/verify_precip_alignment.py.
+
+# Gate predictor channels — drawn from the user's master variable list
+# (every harmonized store is filtered to that list; see
+# tools/mowe_subset_variables.txt).
+master_channels:
+  - geopotential/500
+  - geopotential/850
+  - specific_humidity/850
+  - u_component_of_wind/850
+  - v_component_of_wind/850
+  - u_component_of_wind/250
+  - mean_sea_level_pressure
+  - surface_pressure
+
+# IMD gauge coverage: the training loss and the monthly validation
+# RMSE/ACC only see gridpoints where the IMD analysis is non-NaN.
+imd:
+  store: /glade/derecho/scratch/awikner/physicsnemo-zarr/imd/2015.zarr
+  min_finite_frac: 0.99
+
+truth:
+  root: /glade/derecho/scratch/awikner/physicsnemo-zarr/imerg
+  var: total_precipitation_24hr
+
+normalization:
+  dynamical_mean: /glade/derecho/scratch/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_mean.zarr
+  dynamical_std: /glade/derecho/scratch/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_std.zarr
+  # Model v1: precip is log-transformed as log(1e-3 + P[m/24h]) and ALL
+  # precip normalization lives in that space — this store (written by
+  # tools/compute_precip_norm.py --log-epsilon 1e-3 --log-units m over the
+  # training years) carries the transform metadata the datapipe applies.
+  precip_stats: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_precip_stats_log.zarr
+  seeps_climatology: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_seeps_climatology.zarr
+
+experts:
+  - name: pangu_s2s
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/pangu_s2s
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+  - name: sfno_era5
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/sfno_era5
+    # day_offset 1: sfno's precip head is forward-looking (verified
+    # empirically 2026-07-28 post lat-fix: corr 0.52 vs 0.43 at tau=2).
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 1}
+  - name: graphcast
+    schema: harmonized
+    # Day 7 is unusable: the wb2-sourced inits have no complete 24h precip
+    # window at 168h, so lead 7 is NaN for them, and on a wb2-only init that
+    # would leave the sample with zero live experts.
+    min_lead_day: 8
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/graphcast
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+  - name: aifs_single_v2
+    schema: harmonized
+    root: /glade/derecho/scratch/awikner/hindcasts_mowe/aifs_single_v2
+    precip: {var: total_precipitation_24hr, axis: daily, kind: accum, units: m, day_offset: 0}
+
+# Model v1 split: train on ALL available inits 2000-2019 (year-round);
+# validate 2020 onward, JJAS inits only (monsoon-season metrics).
+train:
+  years: [2000, 2019]
+  init_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  # 7-14, not 8-14: day 7 exists for all four experts (graphcast's wb2-sourced
+  # inits are NaN there and get auto-masked, ~25% of its inits). Day 15 is NOT
+  # usable -- sfno's precip head is forward-looking (day_offset 1) so tau=15
+  # needs lead 16, and the harmonised stores stop at 15.
+  lead_days: [7, 14]
+  min_experts: 1
+  # Whole init years to drop from inside `years` -- k-fold CV holds out a
+  # middle block, which an inclusive [lo, hi] range cannot express. Declared
+  # here (not just appended on the CLI) so Hydra struct mode allows the
+  # override and the knob is discoverable.
+  exclude_years: []
+
+val:
+  years: [2020, 2024]
+  init_months: [3, 4, 5, 6, 7, 8, 9]
+  lead_days: [8, 14]
+  min_experts: 1
+  exclude_years: []
+
+loader:
+  batch_size: 4            # per GPU
+  num_workers: 8
+  prefetch_factor: 2
+  persistent_workers: true
+  pin_memory: true
+  shuffle: true
+  num_samples_per_epoch: null   # null -> one pass over all pairs
+  zarr_concurrency: 6
+  nan_expert_threshold: 0.5

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Physical-space MSE + amplitude matching. Built on regional_mse_physical
+# because that was the strongest arm measured: RMSE 8.96 / bias -0.18 /
+# ACC 0.337 / SEEPS 0.853, beating equal-weight on all four and AIFS on ACC.
+#
+# Its one weakness is intensity: amp (sigma_pred/sigma_obs) came out at 0.392
+# against an ACC of 0.337, i.e. essentially the MSE-optimal shrinkage
+# sp = r * st. That hedging is the intensity blurring the project targets, and
+# no other term in the objective forbids it -- hence var_weight.
+#
+# var_weight multiplies (sigma_pred/sigma_obs - 1)^2 on the region-weighted
+# SPATIAL standard deviation per sample: it forces realistic wet/dry contrast,
+# which is the mechanism of blurring. Related to but not identical with the
+# logged imd_amp diagnostic (anomalies vs the daily climatology), so watch
+# both. Expect RMSE to give some ground back -- that is the double penalty,
+# and the point is whether SEEPS and July ACC improve in exchange.
+name: regional_mse
+space: physical
+lat_weighted: true
+scale_mm: 9.3
+var_weight: 1.0
