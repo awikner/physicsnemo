@@ -104,6 +104,86 @@ LABELS = {
 }
 
 
+def _plot(months, acc, sd, sources, n_init, *, out, show_sd, debias,
+          matched, lo, hi, years):
+    """Render the grouped bar chart. Pure presentation: takes plain numbers so
+    it can be driven from a computed pass or replayed from a saved CSV."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(11, 6.4), constrained_layout=True)
+    xpos = np.arange(len(months))
+    width = 0.8 / len(sources)
+    for k, src in enumerate(sources):
+        ax.bar(xpos + (k - (len(sources) - 1) / 2) * width, acc[src], width,
+               yerr=sd[src] if show_sd else None,
+               error_kw=dict(ecolor="#333333", elinewidth=0.9,
+                             capsize=2, capthick=0.9),
+               label=LABELS.get(src, src), color=COLOURS.get(src, "#999999"),
+               edgecolor="black", linewidth=0.5,
+               hatch="//" if src == "gate" else None, zorder=3)
+    ax.set_xticks(xpos, [MONTHS[m - 1] for m in months])
+    ax.set_ylabel("Anomaly correlation (ACC)"
+                  + ("\nmean of per-week ACC, error bars 1 s.d."
+                     if show_sd else "\nmean of per-week ACC"))
+    ax.set_xlabel("Month (of the week-2 midpoint)")
+    ax.set_title(
+        "Week-2 accumulated precipitation ACC, IMD region\n"
+        f"leads {lo}-{hi} summed to weekly totals; "
+        f"{years[0]}-{years[1]} pooled per month"
+        + ("; weeks where every source is available"
+           if matched else "; each source on the weeks it covers")
+        + ("\nexperts DEBIASED by the gate (single-expert input)" if debias else "")
+    )
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    if show_sd:
+        top = max(a + d for src in sources for a, d in zip(acc[src], sd[src]))
+        bot = min(0.0, min(a - d for src in sources
+                           for a, d in zip(acc[src], sd[src])))
+        ax.set_ylim(bot * 1.08, top * 1.05)
+    else:
+        ax.set_ylim(0.0, max(max(v) for v in acc.values()) * 1.06)
+    ax.grid(axis="y", alpha=0.3, zorder=0)
+    ax.legend(ncol=6, frameon=False, fontsize=9,
+              loc="upper center", bbox_to_anchor=(0.5, -0.11))
+    ax.set_axisbelow(True)
+    ax.annotate("weeks per month: " + "  ".join(
+        f"{MONTHS[m-1]} {n_init[m]}" for m in months),
+        xy=(0.5, -0.22), xycoords="axes fraction", ha="center", va="top",
+        fontsize=8, color="#444444")
+    fig.savefig(out, dpi=180, bbox_inches="tight")
+
+
+def replot_from_csv(csv_path: str, out: str, *, show_sd: bool) -> None:
+    """Restyle a previously written CSV -- no model, no data pass, no GPU."""
+    inv = {v: k for k, v in LABELS.items()}
+
+    def _key(name: str) -> str:
+        # The CSV keeps a "(debiased)" suffix for readability; the legend does
+        # not, so strip it before mapping a row back to its source key.
+        return inv[name.replace(" (debiased)", "")]
+
+    rows = [ln.rstrip("\n").split(",") for ln in open(csv_path) if ln.strip()]
+    months = [MONTHS.index(h) + 1 for h in rows[0][1:]]
+    acc, sd, sources, n_init = {}, {}, [], {}
+    for r in rows[1:]:
+        name, vals = r[0], [float(v) for v in r[1:]]
+        if name == "n_weeks":
+            n_init = {m: int(v) for m, v in zip(months, vals)}
+        elif name.endswith(" sd"):
+            sd[_key(name[:-3])] = vals
+        elif name.endswith(" pooled"):
+            continue
+        else:
+            key = _key(name)
+            sources.append(key)
+            acc[key] = vals
+    debias = "debiased_mean" in sources
+    _plot(months, acc, sd, sources, n_init, out=out, show_sd=show_sd,
+          debias=debias, matched=True, lo=8, hi=14, years=(2020, 2024))
+
+
 @hydra.main(version_base="1.3", config_path="../conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -127,6 +207,7 @@ def main(cfg: DictConfig) -> None:
     # part of the input, so the model sees a genuine single-expert request (which
     # it is trained for, via expert_dropout).
     debias = bool(cfg.get("debias_experts", False))
+    show_sd = bool(cfg.get("error_bars", True))
     sources = ([*experts, "debiased_mean", "gate"] if debias
                else [*experts, "equal_weight", "gate"])
     mix_space = str(cfg.model.get("mix_space", "physical"))
@@ -323,50 +404,10 @@ def main(cfg: DictConfig) -> None:
         logger.info("  %-16s pooled %s", LABELS[s], " ".join(
             f"{MONTHS[m-1]}={a:.3f}" for m, a in zip(months, pooled[s])))
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(11, 6.4))
-    xpos = np.arange(len(months))
-    width = 0.8 / len(sources)
-    for k, s in enumerate(sources):
-        lbl = LABELS[s] + (" (debiased)" if debias and s in experts else "")
-        ax.bar(xpos + (k - (len(sources) - 1) / 2) * width, acc[s], width,
-               yerr=sd[s], error_kw=dict(ecolor="#333333", elinewidth=0.9,
-                                         capsize=2, capthick=0.9),
-               label=lbl, color=COLOURS.get(s, "#999999"),
-               edgecolor="black", linewidth=0.5,
-               hatch="//" if s == "gate" else None, zorder=3)
-    ax.set_xticks(xpos, [MONTHS[m - 1] for m in months])
-    ax.set_ylabel("Anomaly correlation (ACC)\nmean of per-week ACC, error bars 1 s.d.")
-    ax.set_xlabel("Month (of the week-2 midpoint)")
-    ax.set_title(
-        "Week-2 accumulated precipitation ACC, IMD region\n"
-        f"leads {lo}-{hi} summed to weekly totals; "
-        f"{cfg.dataset.val.years[0]}-{cfg.dataset.val.years[1]} pooled per month"
-        + ("; weeks where every source is available"
-           if matched else "; each source on the weeks it covers")
-        + ("\nexperts DEBIASED by the gate (single-expert input)" if debias else "")
-    )
-    ax.axhline(0.0, color="black", linewidth=0.8)
-    # Headroom so the legend never sits on top of a bar.
-    top = max(a + d for s in sources for a, d in zip(acc[s], sd[s]))
-    bot = min(0.0, min(a - d for s in sources for a, d in zip(acc[s], sd[s])))
-    ax.set_ylim(bot * 1.08, top * 1.05)
-    ax.grid(axis="y", alpha=0.3, zorder=0)
-    # Below the axes: the debiased labels are long enough to overflow a
-    # single in-plot row.
-    ax.legend(ncol=3, frameon=False, fontsize=9,
-              loc="upper center", bbox_to_anchor=(0.5, -0.13))
-    ax.set_axisbelow(True)
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
-    # Below the axes, not over the bars.
-    fig.text(0.5, 0.012, "weeks per month: " + "  ".join(
-        f"{MONTHS[m-1]} {n_init[m]}" for m in months),
-        ha="center", va="bottom", fontsize=8, color="#444444")
+    _plot(months, acc, sd, sources, n_init, out=str(cfg.out), show_sd=show_sd,
+          debias=debias, matched=matched, lo=lo, hi=hi,
+          years=(cfg.dataset.val.years[0], cfg.dataset.val.years[1]))
     out = str(cfg.out)
-    fig.savefig(out, dpi=180)
     logger.info("wrote %s", out)
 
     csv = Path(out).with_suffix(".csv")
