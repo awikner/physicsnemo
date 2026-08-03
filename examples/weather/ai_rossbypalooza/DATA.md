@@ -21,7 +21,7 @@ under **`hindcasts_mowe/{model}/{YYYY}.zarr`**:
 | expert | built from | inits | notes |
 |---|---|---|---|
 | `pangu_s2s` | `physicsnemo-zarr/hindcasts/pangu_s2s/` (subset + 3-D flattened) | 95/yr (days 1,5,9,…,29 @00Z), 2000–2024 | 21-variable subset (below) |
-| `sfno_era5` | `physicsnemo-zarr/hindcasts/sfno_era5/` (subset + flattened) | same | v3 checkpoint; same subset |
+| `sfno_era5` | `physicsnemo-zarr/hindcasts/sfno_era5/` (subset + flattened) | same | **v4** checkpoint (`SfnoPlasim.0.30.mdlus_ema_v4parity`, per the source store's own attrs); same subset |
 | `graphcast` | `hindcasts_dsi/zarr/graphcast_e2s` **merged with** `graphcast_wb2` (e2s wins per (init, variable); `init_source` coord records provenance) | union, 2000–2024 | regridded 0.25°→1° (1-D conservative); `u_component_of_wind_250` comes only from wb2 (NaN on e2s-only inits); wb2-sourced precip is NaN at lead day 7 |
 | `aifs_single_v2` | `hindcasts_dsi/zarr/aifs_single_v2` | 91/yr, 2000–2024 | regridded 0.25°→1° |
 
