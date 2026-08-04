@@ -239,6 +239,24 @@ def main(cfg: DictConfig) -> None:
                 load_checkpoint(str(cfg.checkpoint), models=model, device=dev))
     model.eval()
 
+    # Noise-conditioned gate: score the ACC of the ENSEMBLE MEAN (the correct
+    # deterministic summary of a probabilistic forecast). Seeded per batch so
+    # the figure is reproducible.
+    noise_dim = getattr(model, "noise_dim", None)
+    acc_ens = int(cfg.get("acc_ens_size", 8)) if noise_dim else 0
+    acc_seed = int(cfg.get("acc_noise_seed", 0))
+    batch_counter = 0
+
+    def _noise(n_rows: int) -> torch.Tensor:
+        nonlocal batch_counter
+        g = torch.Generator()
+        g.manual_seed(acc_seed * 1_000_003 + batch_counter)
+        batch_counter += 1
+        return torch.randn(n_rows, acc_ens, int(noise_dim), generator=g).to(dev)
+
+    if acc_ens:
+        logger.info("ensemble gate: ACC of the %d-member mean", acc_ens)
+
     # Per init: running weekly sums, per-source lead counts, and the clim sum.
     sums = defaultdict(lambda: defaultdict(lambda: np.zeros(sel.sum())))
     counts = defaultdict(lambda: defaultdict(int))
@@ -257,7 +275,10 @@ def main(cfg: DictConfig) -> None:
             x = batch["expert_inputs"].to(dev)
             mask = batch["expert_mask"].to(dev)
             taus = batch["lead_days"].to(dev)
-            weights, biases = model(x, mask, taus)
+            if acc_ens:
+                weights, biases = model(x, mask, taus, _noise(x.shape[0]))
+            else:
+                weights, biases = model(x, mask, taus)
             e_mm = denormalize_precip(
                 x[:, :, 0], mean=ds.precip_mean, std=ds.precip_std,
                 transform=ds.precip_transform,
@@ -269,6 +290,8 @@ def main(cfg: DictConfig) -> None:
                     mix(weights, biases, x[:, :, 0], mask=mask),
                     mean=ds.precip_mean, std=ds.precip_std,
                     transform=ds.precip_transform)
+            if g_mm.ndim == 4:  # (B, ens, H, W) -> ensemble mean
+                g_mm = g_mm.mean(dim=1)
             live_t = mask > 0
             live = live_t.cpu().numpy()
             if debias:
@@ -282,7 +305,10 @@ def main(cfg: DictConfig) -> None:
                     xi[:, ei] = x[sub][:, ei]
                     mi = torch.zeros_like(mask[sub])
                     mi[:, ei] = 1.0
-                    wi, bi = model(xi, mi, taus[sub])
+                    if acc_ens:
+                        wi, bi = model(xi, mi, taus[sub], _noise(xi.shape[0]))
+                    else:
+                        wi, bi = model(xi, mi, taus[sub])
                     ei_mm = denormalize_precip(
                         xi[:, :, 0], mean=ds.precip_mean, std=ds.precip_std,
                         transform=ds.precip_transform)
@@ -293,6 +319,8 @@ def main(cfg: DictConfig) -> None:
                             mix(wi, bi, xi[:, :, 0], mask=mi),
                             mean=ds.precip_mean, std=ds.precip_std,
                             transform=ds.precip_transform)
+                    if out.ndim == 4:  # (B, ens, H, W) -> ensemble mean
+                        out = out.mean(dim=1)
                     per[sub, ei] = out
                 src_fields = per
                 agg = (per * live_t.float()[..., None, None]).sum(1) / (

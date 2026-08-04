@@ -374,7 +374,7 @@ greyscale printing.
 ## 8. Tests
 
 ```bash
-pytest test/recipes/ai_rossbypalooza/ -m ""     # 166 tests; -m "" includes slow
+pytest test/recipes/ai_rossbypalooza/ -m ""     # 199 tests; -m "" includes slow
 ```
 
 Covers cross-schema channel identity, every precip unit/axis/offset combination,
@@ -382,17 +382,129 @@ conservative regridding, index union and gap handling, masked-softmax exactness,
 the arithmetic-vs-geometric mixing distinction, the loss-ranking flip the
 variance term is built to cause, EMA round-trips, early stopping, the day-of-year
 ACC reference (a case where ACC flips sign against a monthly reference), the
-intensity thresholds, and an end-to-end train→infer round trip.
+intensity thresholds, and an end-to-end train→infer round trip. The §10 upgrades
+add: the afCRPS estimator pinned to `physicsnemo.metrics.general.crps.kcrps`
+(fair AND biased identities), calibrated-spread preference, FSS displacement
+forgiveness / mask isolation / dry-batch guards, AMSE blur-vs-displacement
+separation, gate-TV properties, ensemble validator determinism and key
+coverage, the CRPS/warm-start/config-guard smoke runs, and ensemble inference
+quantile round-trips.
 
-## 9. Not yet built
+## 9. Probabilistic + anti-double-penalty upgrades (2026-08)
+
+Four additions, all config-selected; **a run with the pre-existing configs is
+behavior-identical**.
+
+### 9.1 FGN-style CRPS ensemble (`model=mowe_precip_ens loss=regional_crps`)
+
+The gate's dormant `noise_dim` path is now live: a 32-dim Gaussian draw per
+member conditions every DiT block through AdaLN (FGN, arXiv:2506.10772), and
+training minimizes the **almost-fair CRPS** (`alpha=0.95`, AIFS-CRPS
+arXiv:2412.15832) over `training.ens_size: 2` members, region-weighted in
+mm/day (`losses.RegionalAlmostFairCRPS`). train.py refuses inconsistent knob
+combinations (CRPS loss ⇔ `noise_dim` ⇔ `ens_size >= 2`).
+
+* **Warm start**: `training.init_from=<path to deterministic checkpoints_best>`
+  — the condition embedder is zero-initialized, so members start identical to
+  the deterministic gate and grow spread by gradient. Refused across patch
+  sizes. Resume beats `init_from`.
+* **Validation** draws a fixed-seed 8-member ensemble (`validation.ens_size`);
+  the ensemble MEAN feeds every pre-existing metric key, and new additive keys
+  appear: `gate/crps_*` (fair), `gate/spread_skill_*` (target ~1),
+  `gate/rank_hist_*` (+ `rank_hist_dev`, 0 = flat; seeded jitter breaks the
+  0-mm ties that would otherwise fake a U-shape), and
+  `expert_ensemble/crps_mean` — the equal-weight all-live-expert ensemble, the
+  CRPSS baseline. The monitored `loss` is the training criterion on the FULL
+  member stack.
+* **Inference**: `tools/infer_mowe.py` writes the ensemble mean into the usual
+  variable plus `_q10/_q50/_q90` (and `_members` with `+save_members=true`);
+  noise is seeded per (init, lead) pair so outputs are batch-order-independent.
+  `tools/plot_week2_acc.py` scores the ACC of the member mean
+  (`+acc_ens_size=8`).
+* Spread watch-item: each member is still a convex mixture (amplitude cap),
+  so calibrated spread must come from across-member variance via the noise —
+  follow `ens_std_mm` in the train logs; saturation at the bias-field lever's
+  limit is a science finding, not a bug.
+
+### 9.2 Neighborhood FSS term (`loss=regional_fss_mse`)
+
+`losses.RegionalPrecipFSS` adds a differentiable fractions-skill-score term to
+an anchor loss (never alone — FSS-only is degenerate): soft exceedance
+`sigmoid(10 (x - T)/T)` on BOTH fields, weight-masked pooling
+(`pooled_fractions` — zero-padding and the 378-gridpoint mask are inert by
+construction), windows 3 and 5 cells. Thresholds are **per-gridpoint JJAS
+climatological percentiles** (75/90/95) from a store you must build first:
+
+```bash
+python tools/compute_precip_quantiles.py \
+    --imerg-root <...>/physicsnemo-zarr/imerg --years 2000-2019 \
+    --out <...>/physicsnemo-zarr/normalization/imerg_precip_quantiles_jjas.zarr
+```
+
+(paths pre-wired as `dataset.normalization.precip_quantiles` in all three
+cluster configs; `thresholds.kind: fixed` remains available for ablations).
+With an ensemble anchor (`loss=regional_crps_fss`) the exceedance is averaged
+over members before pooling — the probabilistic FSS (Necker et al. 2024).
+The same thresholds drive a hard-exceedance **verification FSS**
+(`{source}/fss_w{k}_p{q}`) reported for every arm via `validation.fss`.
+
+### 9.3 AMSE — amplitude-preserving MSE (`loss=regional_amse`)
+
+`losses.RegionalPrecipAMSE` implements the Subich et al. (arXiv:2501.19374)
+double-penalty fix on pooling-derived scale bands (<3°, 3–7°, >7° + a mean
+term — spherical harmonics don't apply to a masked box): per band,
+`(sigma_x - sigma_y)^2 + 2 max(sigma_x^2, sigma_y^2)(1 - rho)`, so shrinking
+small-scale amplitude no longer pays where placement is unpredictable.
+Subsumes `var_weight` (its single-band special case — do not combine). The
+banded amplitude ratios are also a validation diagnostic for every arm
+(`{source}/amp_band{i}`, ~1 everywhere = intensity preserved).
+
+*Skipped on purpose (redundancy analysis in the 2026-08-03 plan): pointwise
+gradient matching (k²-weighted MSE — amplifies the double penalty exactly
+where week-2 coherence is zero) and TV smoothing of the precip field itself
+(re-blurs; the anti-blur objectives exist to prevent that).*
+
+### 9.4 Patch (2,2) preset + gate-map TV
+
+* `model=mowe_precip_p2`: 16 200 tokens (~16× attention FLOPs vs (4,4)),
+  pos_embed alone ~3.1M params → drop_path raised to 0.25; always trained from
+  scratch (no pos_embed resize path). Comma-free preset so PBS/Slurm
+  submissions avoid the `EXTRA_FILE` trap.
+* `training.gate_tv_weight`: weighted TV penalty on the gate weight/bias maps
+  over the supervised region — smooths the MIXTURE PARAMETERS (coherent,
+  interpretable expert-selection regimes; suppresses patch-boundary
+  blockiness, which patch (2,2) makes likelier) without re-blurring the rain
+  the experts carry.
+
+### 9.5 Experiment matrix (Midway3 H100 primary; CV winners on Derecho)
+
+| # | Arm | Overrides | Isolates |
+|---|-----|-----------|----------|
+| 0 | baseline re-run | `loss=regional_mse_physical_var run_name=mowe_base_r2` | infra + new-metric baselines |
+| 1 | FSS+MSE | `loss=regional_fss_mse` | neighborhood term |
+| 2 | AMSE | `loss=regional_amse` | spectral-amplitude fix (head-to-head with 1) |
+| 3 | patch (2,2) | `model=mowe_precip_p2 loss=regional_mse_physical_var` | token resolution (~4–8× cost) |
+| 4 | CRPS scratch | `model=mowe_precip_ens loss=regional_crps` | probabilistic training |
+| 5 | CRPS warm | 4 + `training.init_from=<mowe_base_r2 best>` | warm vs cold |
+| 6 | gate TV | winner of {0,1,2} + `training.gate_tv_weight=0.05` | mixture smoothness |
+
+Conditional follow-ups only if parents win: `loss.alpha=1.0`, FSS
+weight/fixed-threshold ablations, `loss=regional_crps_fss`, patch × winner
+loss. Success bars (val, vs §3): deterministic arms — CSI_20mm > 0.196,
+exc_bias_20mm ∈ (0.61, ~1.3), SEEPS ≤ 0.839, RMSE ≤ 9.43, finer-band `amp_band`
+closer to 1, `fss_w3_p90` above baseline; CRPS arms — `gate/crps_mean` <
+`expert_ensemble/crps_mean`, spread/skill ∈ [0.8, 1.2], `rank_hist_dev` < 0.15,
+ens-mean RMSE ≤ 9.43.
+
+## 10. Not yet built
 
 * The plan's **primary** target is week-2 *accumulated* precip as tercile and
   exceedance probabilities; this trains and scores *daily* precip (the secondary
-  target).
-* The gate is deterministic (`noise_dim: null`), so BSS, RPSS, AUC, CRPS and rank
-  histograms cannot be computed. A quantile/CRPS head is the natural next step.
-* No FSS, no block-bootstrap significance.
+  target). (BSS/RPSS/AUC on the weekly aggregates remain future work; the
+  daily-level CRPS/rank-histogram machinery from §9.1 now exists.)
+* No block-bootstrap significance.
 * AIFS alone still beats every gate variant on July ACC (0.408 vs 0.355),
   amplitude, heavy-rain frequency, and CSI. A convex combination cannot exceed
-  its inputs' amplitude, so the per-expert bias fields are the only lever with
-  real headroom there.
+  its inputs' amplitude, so the per-expert bias fields — and now the
+  across-member ensemble variance of §9.1 — are the only levers with real
+  headroom there.

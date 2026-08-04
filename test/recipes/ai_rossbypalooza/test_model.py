@@ -172,3 +172,28 @@ class TestExpertDropout:
         a = expert_dropout(x, mask, 0.5, generator=torch.Generator().manual_seed(5))
         b = expert_dropout(x, mask, 0.5, generator=torch.Generator().manual_seed(5))
         torch.testing.assert_close(a[1], b[1])
+
+
+def test_noise_required_error_message():
+    """A noise_dim gate called without noise must fail actionably, not with a
+    bare AttributeError on noise.size (every forward call site passes here)."""
+    model = MoWEPrecipGate(
+        input_size=(8, 16),
+        in_channels=4,
+        n_experts=3,
+        patch_size=(2, 2),
+        hidden_size=32,
+        depth=1,
+        num_heads=2,
+        attention_backend="timm",
+        noise_dim=8,
+    )
+    x = torch.randn(2, 3, 4, 8, 16)
+    mask = torch.ones(2, 3)
+    t = torch.tensor([8, 8])
+    with pytest.raises(ValueError, match="requires noise"):
+        model(x, mask, t)
+    with pytest.raises(ValueError, match="noise must be"):
+        model(x, mask, t, torch.randn(2, 5, 4))  # wrong noise_dim
+    with pytest.raises(ValueError, match="noise must be"):
+        model(x, mask, t, torch.randn(3, 5, 8))  # wrong batch

@@ -146,6 +146,16 @@ class MoWEPrecipGate(DiT):
         net_in = torch.cat([x.reshape(b, e * c, h, w), planes], dim=1)
 
         if self.noise_dim:
+            if noise is None:
+                raise ValueError(
+                    f"model was built with noise_dim={self.noise_dim}; forward "
+                    f"requires noise of shape (B, n_ens, {self.noise_dim})"
+                )
+            if noise.ndim != 3 or noise.shape[0] != b or noise.shape[2] != self.noise_dim:
+                raise ValueError(
+                    f"noise must be (B={b}, n_ens, {self.noise_dim}), "
+                    f"got {tuple(noise.shape)}"
+                )
             n_ens = noise.size(1)
             net_in = (
                 net_in.unsqueeze(1)

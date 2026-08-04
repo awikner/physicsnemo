@@ -55,8 +55,10 @@ from datapipes.sampler import MixturePairSampler
 from losses import (
     build_loss,
     denormalize_precip,
+    gate_smoothness_penalty,
     imd_valid_mask,
     region_weights,
+    resolve_fss_thresholds,
 )
 from mowe_precip import MoWEPrecipGate, expert_dropout, mix
 from seeps import SeepsClimatology
@@ -133,6 +135,34 @@ def _build_loader(dataset, sampler, loader_cfg) -> DataLoader:
         )
         kwargs["prefetch_factor"] = int(loader_cfg.get("prefetch_factor", 2))
     return DataLoader(dataset, **kwargs)
+
+
+def _is_crps_family(cfg_loss) -> bool:
+    """True when the loss scores an ensemble (regional_crps, alone or as the
+    anchor of a regional_fss composite) — such losses require the
+    noise-conditioned gate, and vice versa."""
+    name = str(cfg_loss.get("name", "regional_mse"))
+    if name == "regional_crps":
+        return True
+    if name == "regional_fss":
+        anchor = cfg_loss.get("anchor", None)
+        return anchor is not None and str(anchor.get("name", "")) == "regional_crps"
+    return False
+
+
+def _latest_mdlus(path: Path) -> Path:
+    """Newest .mdlus in a checkpoint dir ({Class}.{rank}.{epoch}.mdlus)."""
+    if path.is_file():
+        return path
+    cands = sorted(
+        path.glob("*.mdlus"),
+        key=lambda p: (
+            int(p.stem.split(".")[-1]) if p.stem.split(".")[-1].isdigit() else -1
+        ),
+    )
+    if not cands:
+        raise FileNotFoundError(f"training.init_from: no .mdlus files in {path}")
+    return cands[-1]
 
 
 def _build_scheduler(optimizer, *, warmup_steps: int, total_steps: int, min_lr_ratio: float):
@@ -212,6 +242,13 @@ def run(cfg: DictConfig) -> None:
             gradient_as_bucket_view=True,
         )
 
+    # FGN-style probabilistic gate: noise_dim is an architecture knob
+    # (model.params, plumbed to DiT's condition path), ens_size a loop knob.
+    # Fresh noise is drawn per training forward pass; each member is one
+    # noise draw through the SAME gate on the SAME inputs.
+    noise_dim = model_kwargs.get("noise_dim") or None
+    ens_size = int(cfg.training.get("ens_size", 2)) if noise_dim else 0
+
     # ---------------- loss / optimizer ----------------
     region = list(cfg.region.lat) + list(cfg.region.lon)
     box = (region[0], region[1], region[2], region[3])
@@ -248,6 +285,27 @@ def run(cfg: DictConfig) -> None:
         extra_mask=imd_mask,
         pred_space="physical" if mix_space == "physical" else "normalized",
     ).to(dist.device)
+
+    # The three ensemble knobs must agree; guessing here would train the
+    # wrong objective silently (an MSE over members scores them independently,
+    # a 1-member CRPS is just the MAE).
+    crps_family = _is_crps_family(cfg.loss)
+    if crps_family and not noise_dim:
+        raise ValueError(
+            "a CRPS-family loss trains an ensemble: set model.params.noise_dim "
+            "(e.g. 32, model=mowe_precip_ens) and training.ens_size >= 2"
+        )
+    if noise_dim and not crps_family:
+        raise ValueError(
+            "model.params.noise_dim is set but the loss is deterministic; "
+            "use loss=regional_crps (or regional_fss with a regional_crps "
+            "anchor), or unset noise_dim"
+        )
+    if noise_dim and ens_size < 2:
+        raise ValueError(
+            f"training.ens_size must be >= 2 with noise_dim set, got {ens_size} "
+            "(fair CRPS needs at least two members per step)"
+        )
 
     cfg_train = cfg.training
     optimizer = torch.optim.AdamW(
@@ -286,6 +344,17 @@ def run(cfg: DictConfig) -> None:
             f"validation region: {int((val_weights > 0).sum())} gridpoints"
             + (" (box n IMD coverage)" if imd_mask is not None else " (box)")
         )
+        # Hard-threshold FSS verification metric (all arms). Uses the same
+        # threshold machinery as the FSS loss so metric and loss agree.
+        fss_cfg = cfg.validation.get("fss", None)
+        val_fss_windows = None
+        val_fss_maps = None
+        val_fss_labels = None
+        if fss_cfg is not None:
+            val_fss_windows = [int(k) for k in fss_cfg.get("windows", (3, 5))]
+            val_fss_maps, val_fss_labels = resolve_fss_thresholds(
+                fss_cfg.thresholds, val_ds.lat, val_ds.lon
+            )
         validator = MixtureValidator(
             expert_names=val_ds.expert_names,
             lead_days=(int(val_lead_days[0]), int(val_lead_days[1])),
@@ -298,7 +367,43 @@ def run(cfg: DictConfig) -> None:
             monthly=True,
             loss_fn=loss_fn,
             mix_space=mix_space,
+            ens_size=int(cfg.validation.get("ens_size", 8)) if noise_dim else 0,
+            noise_dim=noise_dim,
+            noise_seed=int(cfg.validation.get("noise_seed", 0)),
+            fss_windows=val_fss_windows,
+            fss_threshold_maps=val_fss_maps,
+            fss_threshold_labels=val_fss_labels,
+            amp_band_windows=[
+                int(k) for k in cfg.validation.get("amp_band_windows", (3, 7))
+            ],
         )
+
+    # ---------------- warm start ----------------
+    # Optional: initialize from a deterministic checkpoint (e.g. a
+    # checkpoints_best dir). Placed BEFORE the EMA wrapper so the average
+    # starts from the loaded weights. The condition-embedder Linear that the
+    # checkpoint lacks is zero-initialized, so a warm-started ensemble gate
+    # initially reproduces the deterministic gate identically for every
+    # member and grows spread by gradient. Resume beats init_from.
+    init_from = cfg_train.get("init_from", None)
+    if init_from:
+        if any(Path("./checkpoints").glob("*.mdlus")):
+            plog.info("training.init_from ignored: resuming from ./checkpoints")
+        else:
+            src = _latest_mdlus(Path(to_absolute_path(str(init_from))))
+            try:
+                inner_model.load(str(src), map_location=dist.device, strict=False)
+            except (RuntimeError, ValueError) as e:
+                raise RuntimeError(
+                    f"warm start from {src} failed. Checkpoints are NOT "
+                    "transferable across patch_size (the learnable pos_embed "
+                    "and detokenizer head change shape) — train that arm from "
+                    f"scratch. Original error: {e}"
+                ) from e
+            plog.info(
+                f"warm-started from {src} (strict=False; missing "
+                "condition-embedder keys stay zero-initialized)"
+            )
 
     ema_cfg = cfg_train.get("ema", None)
     ema = None
@@ -338,9 +443,16 @@ def run(cfg: DictConfig) -> None:
     best_loss = float("inf")
     epochs_since_best = 0
 
+    gate_tv_weight = float(cfg_train.get("gate_tv_weight", 0.0) or 0.0)
+
     # ---------------- training loop ----------------
+    # A resume at/after max_epochs skips the loop entirely; the final save
+    # below must still see a defined epoch.
+    epoch = start_epoch - 1
     for epoch in range(start_epoch, max_epochs):
         train_sampler.set_epoch(epoch)
+        if hasattr(loss_fn, "set_epoch"):
+            loss_fn.set_epoch(epoch)  # FSS-weight ramp (train mode only)
         model.train()
         # LaunchLogger epochs are 1-indexed (iter starts at (epoch-1)*num_mini_batch).
         with LaunchLogger(
@@ -362,7 +474,15 @@ def run(cfg: DictConfig) -> None:
                     dtype=torch.bfloat16,
                     enabled=amp_enabled,
                 ):
-                    weights, biases = model(x, mask, taus)
+                    if noise_dim:
+                        # Fresh draws per forward pass (FGN recipe); the
+                        # per-rank torch.manual_seed above decorrelates ranks.
+                        noise = torch.randn(
+                            x.shape[0], ens_size, noise_dim, device=dist.device
+                        )
+                        weights, biases = model(x, mask, taus, noise)
+                    else:
+                        weights, biases = model(x, mask, taus)
                     expert_precip = x[:, :, 0]
                     if mix_space == "physical":
                         expert_precip = denormalize_precip(
@@ -373,6 +493,12 @@ def run(cfg: DictConfig) -> None:
                         )
                     pred = mix(weights, biases, expert_precip, mask=mask)
                     loss = loss_fn(pred.float(), target, target_mm)
+                    tv_term = None
+                    if gate_tv_weight > 0:
+                        tv_term = gate_smoothness_penalty(
+                            weights.float(), biases.float(), loss_fn.weights
+                        )
+                        loss = loss + gate_tv_weight * tv_term
                 loss.backward()
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -383,14 +509,28 @@ def run(cfg: DictConfig) -> None:
                     ema.update(inner_model, epoch=epoch)
                 scheduler.step()
                 scalars = {"loss": loss, "lr": optimizer.param_groups[0]["lr"]}
-                # Composite loss: log the two terms so bias_weight is tunable
-                # from the curves rather than by guesswork.
-                if getattr(loss_fn, "bias_weight", 0.0) > 0:
-                    scalars["mse_term"] = loss_fn.last_mse
-                    scalars["bias_mm"] = loss_fn.last_bias_mm
-                if getattr(loss_fn, "var_weight", 0.0) > 0:
-                    scalars["mse_term"] = loss_fn.last_mse
-                    scalars["amp_spatial"] = loss_fn.last_amp
+                # Composite losses: log the individual terms so their weights
+                # are tunable from the curves rather than by guesswork. For an
+                # FSS composite the anchor carries the per-term diagnostics.
+                term_src = getattr(loss_fn, "anchor", loss_fn)
+                if getattr(term_src, "bias_weight", 0.0) > 0:
+                    scalars["mse_term"] = term_src.last_mse
+                    scalars["bias_mm"] = term_src.last_bias_mm
+                if getattr(term_src, "var_weight", 0.0) > 0:
+                    scalars["mse_term"] = term_src.last_mse
+                    scalars["amp_spatial"] = term_src.last_amp
+                if getattr(term_src, "alpha", None) is not None:  # CRPS family
+                    scalars["crps_skill"] = term_src.last_skill
+                    scalars["crps_spread"] = term_src.last_spread
+                    scalars["ens_std_mm"] = term_src.last_ens_std
+                if hasattr(term_src, "last_amp_bands") and term_src.last_amp_bands:
+                    for bi, v in enumerate(term_src.last_amp_bands):
+                        scalars[f"amp_band{bi}"] = v
+                if hasattr(loss_fn, "last_fss_term"):
+                    scalars["fss_term"] = loss_fn.last_fss_term
+                    scalars["anchor_term"] = loss_fn.last_anchor
+                if tv_term is not None:
+                    scalars["tv_term"] = tv_term
                 log.log_minibatch(_ddp_mean_scalars(scalars, dist=dist))
 
         # ---------------- validation ----------------

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Amplitude-preserving MSE (Subich et al., arXiv:2501.19374), adapted from
+# spherical harmonics to weight-masked pooling bands (the supervised region
+# is a masked box, not the sphere). Per scale band,
+#   (sigma_x - sigma_y)^2 + 2 max(sigma_x^2, sigma_y^2) (1 - rho)
+# — shrinking small-scale amplitude no longer reduces the decorrelation
+# penalty, so the MSE hedge that produces intensity blurring is removed at
+# the objective level rather than patched (var_weight is exactly this loss's
+# single-band special case, hence no var_weight here).
+#
+# windows [3, 7]: bands < ~3 deg, 3–7 deg, > 7 deg on the 1-degree grid,
+# plus a separate regional-mean bias term. scale_mm divides quadratically
+# like the MSE losses.
+name: regional_amse
+windows: [3, 7]
+scale_mm: 9.3
+lat_weighted: true

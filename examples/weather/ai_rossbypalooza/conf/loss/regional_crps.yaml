@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Almost-fair CRPS on the mixture ensemble, physical mm/day (FGN recipe,
+# arXiv:2506.10772; afCRPS from AIFS-CRPS, arXiv:2412.15832). Requires the
+# noise-conditioned gate: model=mowe_precip_ens (noise_dim 32) and
+# training.ens_size >= 2 — train.py refuses inconsistent combinations.
+#
+# alpha=1.0 is the pure fair (unbiased) estimator; the biased default of
+# physicsnemo's crps() wrapper would reward under-dispersion at small N.
+# alpha=0.95 mixes in 5% of the biased estimator to re-anchor the one member
+# fair CRPS leaves unconstrained when all others equal the observation
+# (a real degeneracy under bf16).
+#
+# scale_mm divides LINEARLY (CRPS is first-order in the error; the MSE losses
+# divide by scale_mm^2): 4.0 puts a typical regional CRPS (~3-4 mm/day) near
+# 1.0 so the tuned lr / grad_clip_norm transfer.
+name: regional_crps
+alpha: 0.95
+scale_mm: 4.0
+lat_weighted: true

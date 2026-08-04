@@ -43,6 +43,9 @@ normalization:
   # training years) carries the transform metadata the datapipe applies.
   precip_stats: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_precip_stats_log.zarr
   seeps_climatology: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_seeps_climatology.zarr
+  # Climatological JJAS daily-precip percentile maps (FSS loss + metric
+  # thresholds); written by tools/compute_precip_quantiles.py.
+  precip_quantiles: /glade/derecho/scratch/awikner/physicsnemo-zarr/normalization/imerg_precip_quantiles_jjas.zarr
 
 experts:
   - name: pangu_s2s

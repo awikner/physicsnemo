@@ -34,7 +34,13 @@ from collections.abc import Sequence
 import torch
 import torch.distributed as dist
 
-from losses import denormalize_precip, normalize_precip
+from losses import (
+    almost_fair_crps,
+    denormalize_precip,
+    normalize_precip,
+    pooled_fractions,
+    scale_bands,
+)
 from mowe_precip import mix
 from seeps import (
     P1_MAX,
@@ -284,6 +290,209 @@ class StreamingThresholdScores:
         return {"exc_bias": exc_bias, "csi": csi}
 
 
+class StreamingEnsembleScores:
+    """Per-lead fair CRPS, spread/skill and rank histogram, DDP-safe.
+
+    Verification-grade probabilistic scores for an ensemble prediction
+    ``(B, N, H, W)``:
+
+    * ``crps`` — the FAIR estimator (``almost_fair_crps`` at alpha = 1),
+      unbiased in N, so values at the validation ensemble size are
+      comparable across configs regardless of the training-time alpha/N.
+    * ``spread_skill`` — ``sqrt((N+1)/N * mean ens variance) / RMSE(ens
+      mean)`` (fair-corrected); ~1 for a calibrated ensemble.
+    * rank histogram — rank of the observation among the members with
+      seeded random jitter tie-breaking. Daily monsoon precip is
+      zero-inflated, so exact ties at 0 mm are the NORM, not the exception;
+      deterministic tie-breaking would fake a U-shape. The jitter generator
+      lives on CPU with a fixed seed so runs are reproducible.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_leads: int,
+        ens_size: int,
+        region_weights: torch.Tensor,
+        device: torch.device,
+        jitter_seed: int = 0,
+    ) -> None:
+        if ens_size < 2:
+            raise ValueError(f"ens_size must be >= 2, got {ens_size}")
+        self.ens_size = int(ens_size)
+        self.weights = region_weights.to(device=device, dtype=torch.float32)
+        self.crps_sum = torch.zeros(n_leads, device=device)
+        self.var_sum = torch.zeros(n_leads, device=device)
+        self.msqe_sum = torch.zeros(n_leads, device=device)
+        self.w_sum = torch.zeros(n_leads, device=device)
+        self.rank_counts = torch.zeros(n_leads, ens_size + 1, device=device)
+        self._gen = torch.Generator()
+        self._gen.manual_seed(int(jitter_seed))
+
+    @torch.no_grad()
+    def update(
+        self, lead_index: int, pred_ens_mm: torch.Tensor, target_mm: torch.Tensor
+    ) -> None:
+        if pred_ens_mm.ndim != 4 or pred_ens_mm.shape[1] != self.ens_size:
+            raise ValueError(
+                f"expected (B, {self.ens_size}, H, W), got {tuple(pred_ens_mm.shape)}"
+            )
+        finite = torch.isfinite(target_mm)
+        w = self.weights.unsqueeze(0) * finite.float()
+        obs = torch.nan_to_num(target_mm)
+        crps = almost_fair_crps(pred_ens_mm, obs, alpha=1.0)
+        self.crps_sum[lead_index] += (w * crps).sum()
+        self.w_sum[lead_index] += w.sum()
+        mean = pred_ens_mm.mean(dim=1)
+        var = pred_ens_mm.var(dim=1, unbiased=True)
+        self.var_sum[lead_index] += (w * var).sum()
+        self.msqe_sum[lead_index] += (w * (mean - obs) ** 2).sum()
+        # 1e-4 mm/day jitter: far below any meteorological difference, far
+        # above float noise -- randomizes only genuine ties (mostly 0 mm).
+        jm = torch.rand(pred_ens_mm.shape, generator=self._gen)
+        jo = torch.rand(obs.shape, generator=self._gen)
+        m_j = pred_ens_mm + 1e-4 * jm.to(pred_ens_mm.device)
+        o_j = (obs + 1e-4 * jo.to(obs.device)).unsqueeze(1)
+        rank = (m_j < o_j).sum(dim=1)  # (B, H, W) in 0..N
+        for r in range(self.ens_size + 1):
+            self.rank_counts[lead_index, r] += (w * (rank == r).float()).sum()
+
+    def finalize(self) -> dict[str, torch.Tensor]:
+        for t in (
+            self.crps_sum,
+            self.var_sum,
+            self.msqe_sum,
+            self.w_sum,
+            self.rank_counts,
+        ):
+            _all_reduce_sum(t)
+        denom = self.w_sum.clamp(min=1e-12)
+        crps = self.crps_sum / denom
+        n = self.ens_size
+        spread = torch.sqrt((n + 1) / n * self.var_sum / denom)
+        skill = torch.sqrt(self.msqe_sum / denom)
+        spread_skill = spread / skill.clamp(min=1e-12)
+        empty = self.w_sum <= 0
+        for v in (crps, spread_skill):
+            v[empty] = float("nan")
+        pooled = self.rank_counts.sum(dim=0)
+        pooled = pooled / pooled.sum().clamp(min=1e-12)
+        uniform = 1.0 / (n + 1)
+        rank_hist_dev = 0.5 * (pooled - uniform).abs().sum()
+        return {
+            "crps": crps,
+            "spread_skill": spread_skill,
+            "rank_hist": pooled,
+            "rank_hist_dev": rank_hist_dev,
+        }
+
+
+class StreamingFSS:
+    """Hard-threshold fractions skill score, weight-masked pooling, DDP-safe.
+
+    The verification-grade counterpart of the FSS loss term (same
+    ``pooled_fractions`` and the same threshold maps, but a HARD exceedance
+    indicator): per (window k, threshold q),
+    ``FSS = 1 - sum w (f_p - f_o)^2 / sum w (f_p^2 + f_o^2)`` accumulated
+    over all batches. NaN when the reference sum is 0 (threshold never
+    reached by either field).
+    """
+
+    def __init__(
+        self,
+        *,
+        windows: Sequence[int],
+        threshold_maps: torch.Tensor,
+        threshold_labels: Sequence[str],
+        region_weights: torch.Tensor,
+        device: torch.device,
+    ) -> None:
+        self.windows = [int(k) for k in windows]
+        self.labels = [str(s) for s in threshold_labels]
+        self.maps = threshold_maps.to(device=device, dtype=torch.float32)
+        self.weights = region_weights.to(device=device, dtype=torch.float32)
+        k, q = len(self.windows), len(self.labels)
+        self.fbs = torch.zeros(k, q, device=device)
+        self.fbs_ref = torch.zeros(k, q, device=device)
+
+    @torch.no_grad()
+    def update(self, pred_mm: torch.Tensor, target_mm: torch.Tensor) -> None:
+        finite = torch.isfinite(target_mm)
+        obs = torch.nan_to_num(target_mm)
+        for qi in range(self.maps.shape[0]):
+            thr = self.maps[qi]
+            b_p = (pred_mm > thr).float()
+            b_o = (obs > thr).float()
+            for ki, k in enumerate(self.windows):
+                f_p, w_pool = pooled_fractions(b_p, self.weights, finite, k)
+                f_o, _ = pooled_fractions(b_o, self.weights, finite, k)
+                self.fbs[ki, qi] += (w_pool * (f_p - f_o) ** 2).sum()
+                self.fbs_ref[ki, qi] += (w_pool * (f_p**2 + f_o**2)).sum()
+
+    def finalize(self) -> dict[str, float]:
+        _all_reduce_sum(self.fbs)
+        _all_reduce_sum(self.fbs_ref)
+        out: dict[str, float] = {}
+        for ki, k in enumerate(self.windows):
+            for qi, label in enumerate(self.labels):
+                ref = float(self.fbs_ref[ki, qi])
+                val = 1.0 - float(self.fbs[ki, qi]) / ref if ref > 0 else float("nan")
+                out[f"fss_w{k}_{label}"] = val
+        return out
+
+
+class StreamingBandAmp:
+    """Per-scale-band amplitude ratio sigma_pred / sigma_obs, DDP-safe.
+
+    The regional effective-resolution diagnostic: the same pooling-band
+    decomposition as the AMSE loss (``losses.scale_bands``), reporting how
+    much of the observed variance the forecast keeps at each scale. ~1
+    everywhere = intensity preserved; falling with band fineness = the
+    classic MSE blur signature. Reported for every arm so loss ablations
+    are comparable.
+    """
+
+    def __init__(
+        self,
+        *,
+        windows: Sequence[int],
+        region_weights: torch.Tensor,
+        device: torch.device,
+    ) -> None:
+        self.windows = [int(k) for k in windows]
+        n_bands = len(self.windows) + 1
+        self.weights = region_weights.to(device=device, dtype=torch.float32)
+        self.sp = torch.zeros(n_bands, device=device)
+        self.st = torch.zeros(n_bands, device=device)
+        self.w_sum = torch.zeros(n_bands, device=device)
+
+    @torch.no_grad()
+    def update(self, pred_mm: torch.Tensor, target_mm: torch.Tensor) -> None:
+        finite = torch.isfinite(target_mm)
+        obs = torch.nan_to_num(target_mm)
+        w = self.weights.unsqueeze(0) * finite.float()
+        wsum = w.sum(dim=(-2, -1)).clamp(min=1e-12)
+
+        def wmean(f):
+            return (f * w).sum(dim=(-2, -1)) / wsum
+
+        p_bands = scale_bands(pred_mm, self.weights, finite, self.windows)
+        o_bands = scale_bands(obs, self.weights, finite, self.windows)
+        for bi, (bp, bo) in enumerate(zip(p_bands, o_bands)):
+            bp = bp - wmean(bp)[:, None, None]
+            bo = bo - wmean(bo)[:, None, None]
+            self.sp[bi] += (w * bp**2).sum()
+            self.st[bi] += (w * bo**2).sum()
+            self.w_sum[bi] += w.sum()
+
+    def finalize(self) -> torch.Tensor:
+        for t in (self.sp, self.st, self.w_sum):
+            _all_reduce_sum(t)
+        amp = torch.sqrt(self.sp.clamp(min=0.0) / self.st.clamp(min=1e-12))
+        amp[self.w_sum <= 0] = float("nan")
+        return amp
+
+
 class MixtureValidator:
     """Scores the gate + baselines over a validation loader.
 
@@ -299,6 +508,15 @@ class MixtureValidator:
     (pooled over all validation years) + ``imd_{...}_mean``. With
     ``loss_fn`` set, also ``{source}/loss`` and a bare ``loss`` (the gate's),
     the training criterion evaluated on the val split.
+
+    Additive metrics (never renaming existing keys):
+    ``{source}/amp_band{i}`` banded amplitude ratios always; with FSS
+    threshold maps, ``{source}/fss_w{k}_{label}``; in ensemble mode
+    (``ens_size`` + ``noise_dim`` set), ``gate/crps_lead{tau}`` /
+    ``gate/crps_mean`` (fair), ``gate/spread_skill_*``,
+    ``gate/rank_hist_{i}`` + ``gate/rank_hist_dev``, and
+    ``expert_ensemble/crps_mean`` (the equal-weight all-live-expert
+    ensemble — the CRPSS baseline).
     """
 
     def __init__(
@@ -317,6 +535,13 @@ class MixtureValidator:
         loss_fn=None,
         mix_space: str = "physical",
         thresholds: Sequence[float] = (1.0, 5.0, 10.0, 20.0, 50.0),
+        ens_size: int = 0,
+        noise_dim: int | None = None,
+        noise_seed: int = 0,
+        fss_windows: Sequence[int] | None = None,
+        fss_threshold_maps: torch.Tensor | None = None,
+        fss_threshold_labels: Sequence[str] | None = None,
+        amp_band_windows: Sequence[int] = (3, 7),
     ) -> None:
         self.expert_names = list(expert_names)
         self.lead_lo, self.lead_hi = int(lead_days[0]), int(lead_days[1])
@@ -337,6 +562,24 @@ class MixtureValidator:
         self.mix_space = str(mix_space)
         # Daily-rain thresholds (mm/day) for the intensity-resolved scores.
         self.thresholds = [float(t) for t in thresholds]
+        # Ensemble mode: with the noise-conditioned gate, draw a fixed-seed
+        # ensemble per batch, route the ENSEMBLE MEAN into every existing
+        # deterministic accumulator (zero metric-key churn) and add the
+        # probabilistic scores on top. The gate's monitored `loss` is the
+        # training criterion on the FULL ensemble (afCRPS at this ens_size:
+        # the fair estimator is unbiased in N, so the val value is comparable
+        # across ensemble sizes, just lower-variance than the train one).
+        self.ensemble = bool(ens_size and noise_dim)
+        self.ens_size = int(ens_size)
+        self.noise_dim = None if noise_dim is None else int(noise_dim)
+        self.noise_seed = int(noise_seed)
+        # Hard-threshold FSS metric (all arms when threshold maps are given).
+        self.fss_windows = None if fss_windows is None else [int(k) for k in fss_windows]
+        self.fss_threshold_maps = fss_threshold_maps
+        self.fss_threshold_labels = (
+            None if fss_threshold_labels is None else [str(s) for s in fss_threshold_labels]
+        )
+        self.amp_band_windows = [int(k) for k in amp_band_windows]
         # Monthly scores: one bin per calendar month of the valid day,
         # pooled over all validation years.
         # monthly=None: enable when the climatology carries clim_mean.
@@ -398,6 +641,47 @@ class MixtureValidator:
             if self.thresholds
             else None
         )
+        fss = None
+        if self.fss_windows and self.fss_threshold_maps is not None:
+            fss = {
+                s: StreamingFSS(
+                    windows=self.fss_windows,
+                    threshold_maps=self.fss_threshold_maps,
+                    threshold_labels=self.fss_threshold_labels,
+                    region_weights=self.region_weights,
+                    device=self.device,
+                )
+                for s in self._sources()
+            }
+        band_amp = {
+            s: StreamingBandAmp(
+                windows=self.amp_band_windows,
+                region_weights=self.region_weights,
+                device=self.device,
+            )
+            for s in self._sources()
+        }
+        ens_scores = None
+        expert_ens_scores = None
+        if self.ensemble:
+            ens_scores = StreamingEnsembleScores(
+                n_leads=self.n_leads,
+                ens_size=self.ens_size,
+                region_weights=self.region_weights,
+                device=self.device,
+                jitter_seed=self.noise_seed,
+            )
+            # CRPSS baseline: the live experts as an equal-weight ensemble,
+            # restricted to samples where all experts are live so the member
+            # count is fixed (noted in MOWE.md).
+            if len(self.expert_names) >= 2:
+                expert_ens_scores = StreamingEnsembleScores(
+                    n_leads=self.n_leads,
+                    ens_size=len(self.expert_names),
+                    region_weights=self.region_weights,
+                    device=self.device,
+                    jitter_seed=self.noise_seed,
+                )
         weight_maps: dict = {}
         loss_sums = (
             {s: torch.zeros((), device=self.device) for s in self._sources()}
@@ -412,6 +696,7 @@ class MixtureValidator:
 
         was_training = model.training
         model.eval()
+        batch_counter = 0
         for batch in loader:
             x = batch["expert_inputs"].to(self.device, non_blocking=True)
             mask = batch["expert_mask"].to(self.device, non_blocking=True)
@@ -425,24 +710,46 @@ class MixtureValidator:
             )
             doys = doy_from_hours_since_1900(batch["valid_time"]).to(self.device)
 
-            weights, biases = model(x, mask, taus)
+            if self.ensemble:
+                # CPU generator, fixed seed per batch: the noise (and hence
+                # every probabilistic score) is identical across epochs and
+                # independent of device, so spread/CRPS curves are
+                # comparable epoch to epoch.
+                g = torch.Generator()
+                g.manual_seed(self.noise_seed * 1_000_003 + batch_counter)
+                noise = torch.randn(
+                    x.shape[0], self.ens_size, self.noise_dim, generator=g
+                ).to(self.device)
+                weights, biases = model(x, mask, taus, noise)
+            else:
+                weights, biases = model(x, mask, taus)
+            batch_counter += 1
             expert_mm = denormalize_precip(
                 x[:, :, 0],
                 mean=self.precip_mean,
                 std=self.precip_std,
                 transform=self.precip_transform,
             )
+            # In ensemble mode pred_* carries a member axis (B, N, H, W);
+            # the ENSEMBLE MEAN feeds every deterministic accumulator below,
+            # so metric keys and semantics match the deterministic arms.
             if self.mix_space == "physical":
                 pred_norm = None
-                pred_mm = mix(weights, biases, expert_mm, mask=mask).clamp(min=0.0)
+                pred_full = mix(weights, biases, expert_mm, mask=mask).clamp(min=0.0)
             else:
                 pred_norm = mix(weights, biases, x[:, :, 0], mask=mask)
-                pred_mm = denormalize_precip(
+                pred_full = denormalize_precip(
                     pred_norm,
                     mean=self.precip_mean,
                     std=self.precip_std,
                     transform=self.precip_transform,
                 )
+            if self.ensemble:
+                pred_ens_mm = pred_full
+                pred_mm = pred_full.mean(dim=1)
+            else:
+                pred_ens_mm = None
+                pred_mm = pred_full
             live = mask > 0
             eq_mm = (expert_mm * live.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
             eq_mm = eq_mm / live.sum(dim=1).clamp(min=1).unsqueeze(-1).unsqueeze(-1)
@@ -452,8 +759,13 @@ class MixtureValidator:
                 # space the loss expects (its pred_space) -- so each source's
                 # loss and its RMSE describe the same forecast. The gate's
                 # value is byte-for-byte what the training loss sees.
+                # The gate's loss sees the FULL ensemble (the training
+                # criterion); deterministic sources score as 1-member
+                # ensembles under a CRPS loss (their regional MAE), which is
+                # exactly the CRPS of a deterministic forecast.
+                gate_pred = pred_ens_mm if self.ensemble else pred_mm
                 if self.mix_space == "physical":
-                    preds_for_loss = {"gate": pred_mm, "equal_weight": eq_mm}
+                    preds_for_loss = {"gate": gate_pred, "equal_weight": eq_mm}
                     for ei, name in enumerate(self.expert_names):
                         preds_for_loss[name] = expert_mm[:, ei]
                 else:
@@ -500,9 +812,20 @@ class MixtureValidator:
                     seeps[name].update(
                         li, expert_mm[esel, ei], target_mm[esel], months[esel]
                     )
+                if ens_scores is not None:
+                    ens_scores.update(li, pred_ens_mm[sel], t_mm)
+                if expert_ens_scores is not None:
+                    all_live = sel & (live.sum(dim=1) == len(self.expert_names))
+                    if all_live.any():
+                        expert_ens_scores.update(
+                            li, expert_mm[all_live], target_mm[all_live]
+                        )
                 key = f"weights_lead{int(tau)}"
                 if len(weight_maps) < self.n_weight_map_samples and key not in weight_maps:
-                    weight_maps[key] = weights[sel][0].float().cpu().numpy()
+                    wm = weights[sel][0]
+                    if wm.ndim == 4:  # (ens, E, H, W) -> member 0
+                        wm = wm[0]
+                    weight_maps[key] = wm.float().cpu().numpy()
 
             if thresh is not None:
                 thresh["gate"].update(pred_mm, target_mm)
@@ -511,6 +834,16 @@ class MixtureValidator:
                     esel = live[:, ei]
                     if esel.any():
                         thresh[name].update(expert_mm[esel, ei], target_mm[esel])
+
+            for acc in (fss, band_amp):
+                if acc is None:
+                    continue
+                acc["gate"].update(pred_mm, target_mm)
+                acc["equal_weight"].update(eq_mm, target_mm)
+                for ei, name in enumerate(self.expert_names):
+                    esel = live[:, ei]
+                    if esel.any():
+                        acc[name].update(expert_mm[esel, ei], target_mm[esel])
 
             if monthly is not None:
                 for code in months.unique().tolist():
@@ -571,6 +904,38 @@ class MixtureValidator:
                         val = float(arr[i])
                         if not math.isnan(val):
                             metrics[f"{s}/{name}_{tag}mm"] = val
+        if fss is not None:
+            for s in self._sources():
+                for key, val in fss[s].finalize().items():
+                    if not math.isnan(val):
+                        metrics[f"{s}/{key}"] = val
+        for s in self._sources():
+            amp = band_amp[s].finalize()
+            for bi in range(amp.numel()):
+                val = float(amp[bi])
+                if not math.isnan(val):
+                    metrics[f"{s}/amp_band{bi}"] = val
+        if ens_scores is not None:
+            ev = ens_scores.finalize()
+            for li in range(self.n_leads):
+                tau = self.lead_lo + li
+                metrics[f"gate/crps_lead{tau}"] = float(ev["crps"][li])
+                metrics[f"gate/spread_skill_lead{tau}"] = float(
+                    ev["spread_skill"][li]
+                )
+            # NaN-aware: a lead with no samples must not blank the mean the
+            # success criteria (CRPSS, spread-skill window) are read from.
+            metrics["gate/crps_mean"] = float(ev["crps"].nanmean())
+            metrics["gate/spread_skill_mean"] = float(ev["spread_skill"].nanmean())
+            metrics["gate/rank_hist_dev"] = float(ev["rank_hist_dev"])
+            for i in range(ev["rank_hist"].numel()):
+                metrics[f"gate/rank_hist_{i}"] = float(ev["rank_hist"][i])
+        if expert_ens_scores is not None:
+            ev = expert_ens_scores.finalize()
+            metrics["expert_ensemble/crps_mean"] = float(ev["crps"].nanmean())
+            metrics["expert_ensemble/spread_skill_mean"] = float(
+                ev["spread_skill"].nanmean()
+            )
 
         if loss_sums is not None:
             for s in self._sources():

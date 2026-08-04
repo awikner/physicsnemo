@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Production deterministic arm + neighborhood-FSS term. The anchor is
+# regional_mse_physical_var verbatim (the strongest measured arm); the FSS
+# term relaxes exact-location conditioning — week-2 displacement error is
+# O(several hundred km) = 3–5 cells at 1 degree, so pixel losses double-
+# penalize placement the gate cannot know (Lagerquist & Ebert-Uphoff 2022:
+# neighborhood losses win precisely when displacement grows with lead).
+#
+# Thresholds are per-gridpoint climatological percentiles of JJAS daily
+# IMERG precip (percentiles isolate displacement error from frequency bias),
+# read from the store written by tools/compute_precip_quantiles.py — build
+# that store BEFORE launching this arm. Soft exceedance
+# sigmoid(sharpness * (x - T) / T) on BOTH fields (term = 0 for a perfect
+# forecast); pooling is weight-masked so the 378-gridpoint supervised region
+# never leaks fake dry borders into the fractions.
+#
+# fss_weight: the term lives in [0, 1] while the anchor sits near ~1
+# (scale_mm=9.3), so 0.3 makes it a substantial-but-secondary term.
+# ramp_epochs > 0 would anneal it in (train mode only); the anchor already
+# prevents the FSS-only degeneracy, so the ramp is off by default.
+name: regional_fss
+anchor:
+  name: regional_mse
+  space: physical
+  scale_mm: 9.3
+  var_weight: 1.0
+  lat_weighted: true
+windows: [3, 5]
+thresholds:
+  kind: percentile
+  values: [75, 90, 95]
+  store: ${dataset.normalization.precip_quantiles}
+  floor_mm: 1.0
+sharpness: 10.0
+fss_weight: 0.3
+ramp_epochs: 0
+lat_weighted: true

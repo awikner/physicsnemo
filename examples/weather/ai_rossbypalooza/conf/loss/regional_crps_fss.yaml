@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Combination arm (run only if the CRPS and FSS parents both win): almost-
+# fair CRPS anchor over the noise-conditioned ensemble + the probabilistic
+# FSS term. With an ensemble prediction the exceedance is averaged over
+# members BEFORE pooling — the probabilistic FSS (Necker et al. 2024), which
+# is immune to member-noise inflation. Requires model=mowe_precip_ens and
+# training.ens_size >= 2, plus the quantile store (see regional_fss_mse).
+name: regional_fss
+anchor:
+  name: regional_crps
+  alpha: 0.95
+  scale_mm: 4.0
+  lat_weighted: true
+windows: [3, 5]
+thresholds:
+  kind: percentile
+  values: [75, 90, 95]
+  store: ${dataset.normalization.precip_quantiles}
+  floor_mm: 1.0
+sharpness: 10.0
+fss_weight: 0.3
+ramp_epochs: 0
+lat_weighted: true

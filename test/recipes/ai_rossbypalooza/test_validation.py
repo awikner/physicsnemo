@@ -500,3 +500,139 @@ def test_validator_emits_threshold_keys(tmp_path):
     metrics, _ = v.run(_PickExpertZero(), [_batch(target, [0.0, 2.0], month=7)])
     for key in ("gate/exc_bias_1mm", "gate/csi_10mm", "equal_weight/exc_bias_20mm"):
         assert key in metrics, key
+
+
+# --------------------------------------------------------------------------- #
+# Ensemble mode + new additive metrics
+# --------------------------------------------------------------------------- #
+
+
+class _NoisyGate(torch.nn.Module):
+    """Stub noise-conditioned gate: all weight on expert 0, bias = 0.5 * z0
+    per member — members differ deterministically given the noise."""
+
+    def forward(self, x, mask, t, noise=None):
+        assert noise is not None and noise.ndim == 3
+        b, e = x.shape[0], x.shape[1]
+        n = noise.shape[1]
+        h, w = x.shape[-2], x.shape[-1]
+        weights = torch.zeros(b, n, e, h, w)
+        weights[:, :, 0] = 1.0
+        biases = (
+            noise[..., 0].view(b, n, 1, 1, 1).expand(b, n, e, h, w) * 0.5
+        ).contiguous()
+        return weights, biases
+
+
+def _ens_validator(tmp_path, *, loss_fn=None, fss=False):
+    from losses import RegionalAlmostFairCRPS
+
+    if loss_fn is None:
+        loss_fn = RegionalAlmostFairCRPS(
+            GRID_LAT, GRID_LON, BOX, pred_space="physical"
+        )
+    kw = {}
+    if fss:
+        kw["fss_windows"] = [3]
+        kw["fss_threshold_maps"] = torch.full((1, H, W), 1.0)
+        kw["fss_threshold_labels"] = ["p90"]
+    return MixtureValidator(
+        expert_names=["e0", "e1"],
+        lead_days=(8, 9),
+        region_weights=region_weights(GRID_LAT, GRID_LON, BOX),
+        seeps_climatology=SeepsClimatology(_clim(tmp_path / "clim.zarr")),
+        precip_mean=0.0,
+        precip_std=1.0,
+        precip_transform=None,
+        device=torch.device("cpu"),
+        loss_fn=loss_fn,
+        ens_size=3,
+        noise_dim=4,
+        noise_seed=7,
+        **kw,
+    )
+
+
+def test_ensemble_validator_keys_and_determinism(tmp_path):
+    torch.manual_seed(0)
+    target = torch.rand(4, H, W) * 5 + 1
+    batch = _batch(target, offsets=[0.4, -0.6])
+    validator = _ens_validator(tmp_path, fss=True)
+    model = _NoisyGate()
+    m1, _ = validator.run(model, [batch])
+    m2, _ = validator.run(model, [batch])
+    # Seeded noise: probabilistic scores identical across passes/epochs.
+    assert m1["gate/crps_mean"] == m2["gate/crps_mean"]
+    assert m1["gate/crps_mean"] > 0
+    for key in (
+        "gate/crps_lead8",
+        "gate/spread_skill_mean",
+        "gate/rank_hist_dev",
+        "expert_ensemble/crps_mean",
+        "gate/fss_w3_p90",
+        "gate/amp_band0",
+        "equal_weight/amp_band0",
+    ):
+        assert key in m1, key
+    # Rank histogram normalizes to 1 over ens_size + 1 bins.
+    hist = [m1[f"gate/rank_hist_{i}"] for i in range(4)]
+    assert sum(hist) == pytest.approx(1.0, abs=1e-6)
+    # Pre-existing deterministic keys still emitted, fed by the ens mean.
+    for key in ("gate/rmse_lead8", "equal_weight/rmse_lead8", "e0/rmse_lead8",
+                "gate/csi_1mm", "loss"):
+        assert key in m1, key
+
+
+def test_ensemble_gate_loss_uses_full_ensemble(tmp_path):
+    """The monitored `loss` equals the CRPS loss on the member stack, not on
+    the ensemble mean (a collapsed read would hide all spread)."""
+    from losses import RegionalAlmostFairCRPS
+
+    torch.manual_seed(1)
+    target = torch.rand(2, H, W) * 5 + 1
+    batch = _batch(target, offsets=[0.0, 0.0])
+    loss_fn = RegionalAlmostFairCRPS(GRID_LAT, GRID_LON, BOX, pred_space="physical")
+    validator = _ens_validator(tmp_path, loss_fn=loss_fn)
+    model = _NoisyGate()
+    metrics, _ = validator.run(model, [batch])
+
+    # Reproduce the members by hand from the seeded noise recipe.
+    g = torch.Generator()
+    g.manual_seed(7 * 1_000_003 + 0)
+    noise = torch.randn(2, 3, 4, generator=g)
+    members = (target.unsqueeze(1) + 0.5 * noise[..., 0:1, None]).clamp(min=0.0)
+    expected = float(
+        loss_fn(members, target.unsqueeze(1), target.unsqueeze(1))
+    )
+    assert metrics["loss"] == pytest.approx(expected, rel=1e-5)
+    mean_read = float(
+        loss_fn(members.mean(dim=1), target.unsqueeze(1), target.unsqueeze(1))
+    )
+    assert metrics["loss"] != pytest.approx(mean_read, rel=1e-3)
+
+
+def test_deterministic_validator_unchanged_with_new_kwargs(tmp_path):
+    """fss/amp kwargs are additive: the deterministic path still works and
+    the FSS metric appears for every source."""
+    loss_fn = RegionalPrecipMSE(GRID_LAT, GRID_LON, BOX)
+    validator = MixtureValidator(
+        expert_names=["e0", "e1"],
+        lead_days=(8, 9),
+        region_weights=region_weights(GRID_LAT, GRID_LON, BOX),
+        seeps_climatology=SeepsClimatology(_clim(tmp_path / "clim.zarr")),
+        precip_mean=0.0,
+        precip_std=1.0,
+        precip_transform=None,
+        device=torch.device("cpu"),
+        loss_fn=loss_fn,
+        fss_windows=[3],
+        fss_threshold_maps=torch.full((1, H, W), 1.0),
+        fss_threshold_labels=["p90"],
+    )
+    torch.manual_seed(2)
+    target = torch.rand(2, H, W) * 5
+    batch = _batch(target, offsets=[0.3, -0.3])
+    metrics, _ = validator.run(_PickExpertZero(), [batch])
+    for key in ("gate/fss_w3_p90", "e0/fss_w3_p90", "gate/amp_band0", "loss"):
+        assert key in metrics, key
+    assert "gate/crps_mean" not in metrics  # ensemble keys stay ensemble-only

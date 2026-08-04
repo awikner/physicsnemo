@@ -10,3 +10,26 @@ every_n_epochs: 1
 # Written by tools/compute_seeps_climatology.py (IMERG train years).
 # Cluster-specific path comes from the dataset config's normalization block.
 seeps_climatology: ${dataset.normalization.seeps_climatology}
+
+# Ensemble scoring (only active when model.params.noise_dim is set): members
+# drawn with a FIXED seed per batch so CRPS/spread/rank-histogram curves are
+# comparable epoch to epoch. 8 members: fair CRPS is unbiased in N, this
+# just reduces its variance vs the train-time 2.
+ens_size: 8
+noise_seed: 0
+
+# Hard-threshold FSS verification metric (all arms), same thresholds and
+# pooling as the FSS loss. Requires the quantile store
+# (tools/compute_precip_quantiles.py); delete this block to skip the metric.
+fss:
+  windows: [3, 5]
+  thresholds:
+    kind: percentile
+    values: [75, 90, 95]
+    store: ${dataset.normalization.precip_quantiles}
+    floor_mm: 1.0
+
+# Scale bands for the banded amplitude diagnostic (sigma_pred/sigma_obs per
+# band — the regional effective-resolution readout; matches the AMSE loss
+# bands so loss ablations are directly comparable).
+amp_band_windows: [3, 7]

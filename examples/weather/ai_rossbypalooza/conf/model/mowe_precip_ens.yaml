@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Noise-conditioned (FGN-style) MoWEPrecipGate: identical to mowe_precip
+# except noise_dim, which routes a per-member 32-dim Gaussian draw through
+# DiT's AdaLN conditioning in every block (arXiv:2506.10772 uses 32; the
+# low-dim bottleneck is what forces spatially coherent members). The
+# condition embedder is zero-initialized, so a deterministic checkpoint
+# warm-starts cleanly (training.init_from). Pair with loss=regional_crps
+# (or regional_crps_fss) and training.ens_size >= 2.
+name: mowe_precip
+params:
+  patch_size: [4, 4]        # 180x360 -> 45x90 = 4050 tokens
+  hidden_size: 192
+  depth: 4
+  num_heads: 6              # head dim 32
+  mlp_ratio: 4.0
+  attention_backend: timm   # transformer_engine on H100/A100 if available
+  layernorm_backend: torch
+  noise_dim: 32             # FGN-style ensemble conditioning
+  drop_path: 0.15           # stochastic depth, expanded to 0..0.15 over blocks
+
+# See conf/model/mowe_precip.yaml for the mix_space discussion; per-member
+# mixing happens in mm/day exactly like the deterministic gate.
+mix_space: physical

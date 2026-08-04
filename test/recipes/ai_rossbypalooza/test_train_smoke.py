@@ -382,3 +382,228 @@ def test_inference_writes_gate_forecasts(smoke_cfg, monkeypatch):
     np.testing.assert_array_equal(np.isfinite(w), np.isfinite(b))
     assert ds["gate_biases"].attrs["units"] == "mm/day"   # physical mixing
     assert np.abs(b[np.isfinite(b)]).max() < 1e4          # finite, sane scale
+
+
+# --------------------------------------------------------------------------- #
+# Probabilistic (noise + CRPS) arm
+# --------------------------------------------------------------------------- #
+
+
+def _crps_overrides(max_epochs=2):
+    return {
+        "model": {"params": {"noise_dim": 4}},
+        "loss": {"name": "regional_crps", "alpha": 0.95, "scale_mm": 4.0},
+        "training": {"max_epochs": max_epochs, "ens_size": 2},
+        "validation": {"every_n_epochs": 1, "ens_size": 3, "noise_seed": 0},
+    }
+
+
+@pytest.mark.slow
+def test_train_smoke_crps_and_resume(smoke_cfg):
+    """The noise-conditioned CRPS arm trains end to end, validates with the
+    ensemble metrics, checkpoints, and resumes."""
+    import train as train_mod
+    from pathlib import Path
+
+    torch.manual_seed(0)
+    cfg = OmegaConf.merge(smoke_cfg, _crps_overrides(max_epochs=2))
+    train_mod.run(cfg)
+    assert list(Path("checkpoints").glob("*")), "no checkpoint written"
+    cfg2 = OmegaConf.merge(smoke_cfg, _crps_overrides(max_epochs=3))
+    train_mod.run(cfg2)
+
+
+@pytest.mark.slow
+def test_crps_config_guards(smoke_cfg):
+    """The three ensemble knobs must agree; each mismatch fails actionably."""
+    import train as train_mod
+
+    with pytest.raises(ValueError, match="noise_dim"):
+        train_mod.run(
+            OmegaConf.merge(
+                smoke_cfg,
+                {"loss": {"name": "regional_crps", "alpha": 0.95}},
+            )
+        )
+    with pytest.raises(ValueError, match="deterministic"):
+        train_mod.run(
+            OmegaConf.merge(smoke_cfg, {"model": {"params": {"noise_dim": 4}}})
+        )
+    with pytest.raises(ValueError, match="ens_size"):
+        train_mod.run(
+            OmegaConf.merge(
+                smoke_cfg,
+                {
+                    "model": {"params": {"noise_dim": 4}},
+                    "loss": {"name": "regional_crps"},
+                    "training": {"ens_size": 1},
+                },
+            )
+        )
+
+
+@pytest.mark.slow
+def test_warm_start_from_deterministic(smoke_cfg, tmp_path):
+    """A deterministic checkpoint warm-starts the noise_dim gate; the zero-
+    initialized condition embedder makes the first forward's members
+    identical. A patch-size change is refused, not silently part-loaded."""
+    import train as train_mod
+    from pathlib import Path
+
+    from mowe_precip import MoWEPrecipGate
+
+    torch.manual_seed(0)
+    cfg = OmegaConf.merge(
+        smoke_cfg,
+        {"training": {"max_epochs": 1}, "validation": {"every_n_epochs": 1}},
+    )
+    train_mod.run(cfg)
+    det_ckpts = Path("checkpoints").resolve()
+    assert list(det_ckpts.glob("*.mdlus"))
+
+    # The zero-init property, via the same loader train.py uses.
+    gate = MoWEPrecipGate(
+        input_size=(8, 8),
+        in_channels=3,
+        n_experts=2,
+        patch_size=(2, 2),
+        hidden_size=32,
+        depth=1,
+        num_heads=2,
+        mlp_ratio=2.0,  # must match smoke_cfg's model params
+        attention_backend="timm",
+        noise_dim=4,
+    )
+    src = train_mod._latest_mdlus(det_ckpts)
+    gate.load(str(src), strict=False)
+    x = torch.randn(2, 2, 3, 8, 8)
+    mask = torch.ones(2, 2)
+    noise = torch.randn(2, 3, 4) * 10.0
+    with torch.no_grad():
+        w, b = gate(x, mask, torch.tensor([8, 8]), noise)
+    torch.testing.assert_close(w[:, 0], w[:, 1])
+    torch.testing.assert_close(b[:, 0], b[:, 2])
+
+    # End-to-end warm start in a fresh run dir.
+    run2 = tmp_path / "run2"
+    run2.mkdir()
+    import os
+
+    cwd = os.getcwd()
+    os.chdir(run2)
+    try:
+        cfg2 = OmegaConf.merge(smoke_cfg, _crps_overrides(max_epochs=1))
+        cfg2 = OmegaConf.merge(cfg2, {"training": {"init_from": str(det_ckpts)}})
+        train_mod.run(cfg2)
+        assert list(Path("checkpoints").glob("*")), "warm-started run saved nothing"
+    finally:
+        os.chdir(cwd)
+
+    # Across patch sizes the load must refuse loudly.
+    run3 = tmp_path / "run3"
+    run3.mkdir()
+    os.chdir(run3)
+    try:
+        cfg3 = OmegaConf.merge(smoke_cfg, _crps_overrides(max_epochs=1))
+        cfg3 = OmegaConf.merge(
+            cfg3,
+            {
+                "model": {"params": {"patch_size": [4, 4]}},
+                "training": {"init_from": str(det_ckpts)},
+            },
+        )
+        with pytest.raises(RuntimeError, match="patch_size"):
+            train_mod.run(cfg3)
+    finally:
+        os.chdir(cwd)
+
+
+@pytest.mark.slow
+def test_train_smoke_fss_amse_and_gate_tv(smoke_cfg, tmp_path):
+    """The FSS composite (fixed thresholds), the AMSE loss, and the gate-map
+    TV penalty all train end to end on the synthetic fixture."""
+    import os
+
+    import train as train_mod
+
+    torch.manual_seed(0)
+    fss_cfg = OmegaConf.merge(
+        smoke_cfg,
+        {
+            "loss": {
+                "name": "regional_fss",
+                "anchor": {"name": "regional_mse", "space": "normalized",
+                           "lat_weighted": True},
+                "thresholds": {"kind": "fixed", "values_mm": [1.0, 5.0]},
+                "windows": [3],
+                "fss_weight": 0.3,
+                "ramp_epochs": 2,
+            },
+            "training": {"max_epochs": 2, "gate_tv_weight": 0.01},
+            "validation": {"every_n_epochs": 1},
+        },
+    )
+    train_mod.run(fss_cfg)
+
+    # Fresh run dir: the AMSE arm must not resume the FSS arm's checkpoints.
+    amse_dir = tmp_path / "run_amse"
+    amse_dir.mkdir()
+    cwd = os.getcwd()
+    os.chdir(amse_dir)
+    try:
+        amse_cfg = OmegaConf.merge(
+            smoke_cfg,
+            {
+                "run_name": "smoke_amse",
+                "loss": {"name": "regional_amse", "windows": [3], "scale_mm": 9.3},
+                "training": {"max_epochs": 2},
+            },
+        )
+        train_mod.run(amse_cfg)
+    finally:
+        os.chdir(cwd)
+
+
+@pytest.mark.slow
+def test_ensemble_inference_writes_quantiles(smoke_cfg):
+    """infer_mowe on a noise_dim checkpoint writes the ensemble mean into the
+    usual variable plus member quantiles (and members when asked)."""
+    from pathlib import Path
+
+    import train as train_mod
+
+    torch.manual_seed(0)
+    cfg = OmegaConf.merge(smoke_cfg, _crps_overrides(max_epochs=2))
+    train_mod.run(cfg)
+    best = Path("checkpoints_best")
+    assert list(best.glob("*")), "no best checkpoint from the CRPS smoke run"
+
+    out = Path("forecasts_ens.zarr")
+    import tools.infer_mowe as infer
+
+    icfg = OmegaConf.merge(
+        cfg,
+        {"checkpoint": str(best.resolve()), "out": str(out.resolve()),
+         "split": "val", "save_gate": True,
+         "ens_size": 3, "noise_seed": 1, "save_members": True},
+    )
+    infer.main.__wrapped__(icfg)
+
+    ds = xr.open_zarr(out)
+    assert ds.attrs["ens_size"] == 3
+    for v in ("total_precipitation_24hr", "total_precipitation_24hr_q10",
+              "total_precipitation_24hr_q50", "total_precipitation_24hr_q90",
+              "total_precipitation_24hr_members", "gate_weights"):
+        assert v in ds, v
+    assert ds["total_precipitation_24hr_members"].sizes["member"] == 3
+    mean = ds["total_precipitation_24hr"].values
+    members = ds["total_precipitation_24hr_members"].values
+    finite = np.isfinite(mean)
+    assert finite.any()
+    # The written mean IS the member mean.
+    np.testing.assert_allclose(
+        mean[finite], members.mean(axis=2)[finite], rtol=1e-5, atol=1e-6
+    )
+    q10 = ds["total_precipitation_24hr_q10"].values
+    q90 = ds["total_precipitation_24hr_q90"].values
+    assert (q10[finite] <= q90[finite] + 1e-6).all()

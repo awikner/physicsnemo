@@ -91,7 +91,14 @@ EPOCH = cftime.DatetimeGregorian(1900, 1, 1)
 
 
 def _skeleton(
-    ds, leads: np.ndarray, *, save_gate: bool, mix_space: str, attrs: dict
+    ds,
+    leads: np.ndarray,
+    *,
+    save_gate: bool,
+    mix_space: str,
+    attrs: dict,
+    ens_size: int = 0,
+    save_members: bool = False,
 ) -> xr.Dataset:
     """All-NaN store laid out on the split's own (init, lead) axes."""
     inits = [cftime.DatetimeGregorian(*k) for k in ds.index.init_keys]
@@ -100,9 +107,37 @@ def _skeleton(
         "total_precipitation_24hr": (
             ("init_time", "lead_time", "lat", "lon"),
             np.full(shape, np.nan, "float32"),
-            {"units": "mm/day", "description": "MoWE gate mixture"},
+            {
+                "units": "mm/day",
+                "description": (
+                    "MoWE gate mixture"
+                    + (f" (mean of {ens_size} noise-draw members)" if ens_size else "")
+                ),
+            },
         )
     }
+    if ens_size:
+        for tag, q in (("q10", 10), ("q50", 50), ("q90", 90)):
+            data[f"total_precipitation_24hr_{tag}"] = (
+                ("init_time", "lead_time", "lat", "lon"),
+                np.full(shape, np.nan, "float32"),
+                {
+                    "units": "mm/day",
+                    "description": f"member {q}th percentile of the "
+                    f"{ens_size}-member gate ensemble",
+                },
+            )
+        if save_members:
+            mshape = (shape[0], shape[1], ens_size, *shape[2:])
+            data["total_precipitation_24hr_members"] = (
+                ("init_time", "lead_time", "member", "lat", "lon"),
+                np.full(mshape, np.nan, "float32"),
+                {
+                    "units": "mm/day",
+                    "description": "individual gate ensemble members "
+                    "(seeded per (init, lead) pair — reproducible)",
+                },
+            )
     if save_gate:
         gshape = (shape[0], shape[1], len(ds.experts), *shape[2:])
         data["gate_weights"] = (
@@ -119,16 +154,19 @@ def _skeleton(
                             "mixing space (model.mix_space=" + mix_space + "); "
                             "forecast = sum_i w_i * (P_i + b_i)"},
         )
+    coords = {
+        "init_time": ("init_time", inits),
+        "lead_time": ("lead_time", leads.astype("int32")),
+        "lat": ("lat", ds.lat),
+        "lon": ("lon", ds.lon),
+        "expert": ("expert", list(ds.expert_names)),
+    }
+    if ens_size and save_members:
+        coords["member"] = ("member", np.arange(ens_size, dtype="int32"))
     return xr.Dataset(
         {k: (d, v, a) for k, (d, v, a) in data.items()},
         attrs=attrs,
-        coords={
-            "init_time": ("init_time", inits),
-            "lead_time": ("lead_time", leads.astype("int32")),
-            "lat": ("lat", ds.lat),
-            "lon": ("lon", ds.lon),
-            "expert": ("expert", list(ds.expert_names)),
-        },
+        coords=coords,
     )
 
 
@@ -171,6 +209,20 @@ def main(cfg: DictConfig) -> None:
     logger.info("loaded %s (epoch %s)", ckpt, epoch)
     model.eval()
 
+    # Noise-conditioned gates replay a seeded ensemble; the written
+    # total_precipitation_24hr is then the ENSEMBLE MEAN (downstream tooling
+    # unchanged) plus member quantiles. Noise is seeded per (init, lead) pair,
+    # so outputs are reproducible regardless of batch size or order.
+    noise_dim = getattr(model, "noise_dim", None)
+    ens_size = int(cfg.get("ens_size", 16)) if noise_dim else 0
+    noise_seed = int(cfg.get("noise_seed", 0))
+    save_members = bool(cfg.get("save_members", False)) and bool(ens_size)
+    if noise_dim:
+        logger.info(
+            "ensemble inference: %d members (noise_dim %d, seed %d)",
+            ens_size, noise_dim, noise_seed,
+        )
+
     # The gate emits fields at all 64,800 gridpoints but is supervised only
     # inside the training region, so record that in the store: outside it the
     # weights and especially the BIASES are unconstrained extrapolation
@@ -188,8 +240,21 @@ def main(cfg: DictConfig) -> None:
         ),
         "generator": "examples/weather/ai_rossbypalooza/tools/infer_mowe.py",
     }
+    if ens_size:
+        attrs["ens_size"] = int(ens_size)
+        attrs["noise_seed"] = int(noise_seed)
+        attrs["ensemble_note"] = (
+            "total_precipitation_24hr is the ensemble MEAN over the seeded "
+            "noise-draw members; gate_weights/gate_biases are member means"
+        )
     skel = _skeleton(
-        ds, leads, save_gate=save_gate, mix_space=mix_space, attrs=attrs
+        ds,
+        leads,
+        save_gate=save_gate,
+        mix_space=mix_space,
+        attrs=attrs,
+        ens_size=ens_size,
+        save_members=save_members,
     )
     # Written eagerly rather than with compute=False, which needs dask; the
     # all-NaN chunks compress to almost nothing so the skeleton is cheap.
@@ -209,7 +274,22 @@ def main(cfg: DictConfig) -> None:
             x = batch["expert_inputs"].to(dev)
             mask = batch["expert_mask"].to(dev)
             taus = batch["lead_days"].to(dev)
-            weights, biases = model(x, mask, taus)
+            if ens_size:
+                noise = torch.stack(
+                    [
+                        torch.randn(
+                            ens_size,
+                            int(noise_dim),
+                            generator=torch.Generator().manual_seed(
+                                noise_seed * 1_000_003 + int(pi)
+                            ),
+                        )
+                        for pi in batch["pair_idx"]
+                    ]
+                ).to(dev)
+                weights, biases = model(x, mask, taus, noise)
+            else:
+                weights, biases = model(x, mask, taus)
             expert_precip = x[:, :, 0]
             if mix_space == "physical":
                 expert_precip = denormalize_precip(
@@ -218,15 +298,24 @@ def main(cfg: DictConfig) -> None:
                     std=ds.precip_std,
                     transform=ds.precip_transform,
                 )
-                pred_mm = mix(weights, biases, expert_precip, mask=mask).clamp(min=0.0)
+                pred_full = mix(weights, biases, expert_precip, mask=mask).clamp(min=0.0)
             else:
-                pred_mm = denormalize_precip(
+                pred_full = denormalize_precip(
                     mix(weights, biases, expert_precip, mask=mask),
                     mean=ds.precip_mean,
                     std=ds.precip_std,
                     transform=ds.precip_transform,
                 )
-            pred_mm = pred_mm.float().cpu().numpy()
+            if ens_size:
+                ens_np = pred_full.float().cpu().numpy()  # (B, N, H, W)
+                pred_mm = ens_np.mean(axis=1)
+                quants = np.quantile(ens_np, [0.1, 0.5, 0.9], axis=1)
+                # Gate fields: member means (attrs note this).
+                weights = weights.mean(dim=1)
+                biases = biases.mean(dim=1)
+            else:
+                ens_np = quants = None
+                pred_mm = pred_full.float().cpu().numpy()
             w_np = weights.float().cpu().numpy() if save_gate else None
             b_np = biases.float().cpu().numpy() if save_gate else None
 
@@ -239,12 +328,21 @@ def main(cfg: DictConfig) -> None:
                 if j is None:
                     continue
                 sl = {"init_time": slice(i, i + 1), "lead_time": slice(j, j + 1)}
+                grid = ("init_time", "lead_time", "lat", "lon")
                 piece = {
-                    "total_precipitation_24hr": (
-                        ("init_time", "lead_time", "lat", "lon"),
-                        pred_mm[b][None, None],
-                    )
+                    "total_precipitation_24hr": (grid, pred_mm[b][None, None])
                 }
+                if ens_size:
+                    for qi, tag in enumerate(("q10", "q50", "q90")):
+                        piece[f"total_precipitation_24hr_{tag}"] = (
+                            grid,
+                            quants[qi, b][None, None],
+                        )
+                    if save_members:
+                        piece["total_precipitation_24hr_members"] = (
+                            ("init_time", "lead_time", "member", "lat", "lon"),
+                            ens_np[b][None, None],
+                        )
                 if save_gate:
                     dims = ("init_time", "lead_time", "expert", "lat", "lon")
                     piece["gate_weights"] = (dims, w_np[b][None, None])

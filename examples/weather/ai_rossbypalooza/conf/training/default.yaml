@@ -16,6 +16,22 @@ optimizer:
   betas: [0.9, 0.999]
   weight_decay: 0.15
 
+# Ensemble members per training step (only read when model.params.noise_dim
+# is set; FGN trains with 2 — the fair CRPS estimator is unbiased in N, so
+# more members buy variance reduction, not correctness, at linear cost).
+ens_size: 2
+# Warm start from a checkpoint dir or .mdlus file (e.g. a deterministic
+# checkpoints_best into a noise_dim run: the condition embedder is zero-init
+# so members start identical and grow spread by gradient). Ignored when
+# ./checkpoints already has a resume checkpoint. NOT usable across patch
+# sizes (pos_embed/head shapes change).
+init_from: null
+# Weighted TV penalty on the gate weight/bias maps over the supervised
+# region: smooths the MIXTURE PARAMETERS (coherent expert-selection regimes,
+# no patch-boundary blockiness) without re-blurring the rain the experts
+# carry. 0 disables.
+gate_tv_weight: 0.0
+
 # Stop once the gate stops generalising, and keep the best weights rather
 # than the last (the 384/8 run's final epoch was its most overfit).
 early_stopping:

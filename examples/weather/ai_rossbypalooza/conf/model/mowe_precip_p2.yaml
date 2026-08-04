@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Patch-(2,2) MoWEPrecipGate: 180x360 -> 90x180 = 16 200 tokens (4x the
+# tokens, ~16x the attention FLOPs of patch 4). A comma-free preset so
+# cluster submissions avoid the PBS/Slurm comma-override trap (MOWE.md §4).
+#
+# Checkpoints are NOT transferable across patch sizes: the learnable
+# pos_embed and the detokenizer head change shape (training.init_from will
+# refuse) — always trained from scratch. pos_embed alone adds ~3.1M params
+# at this patch size (the whole 4x4 gate is 3.81M), so overfitting pressure
+# rises: drop_path goes 0.15 -> 0.25; if that is not enough, reduce
+# hidden_size to 160 before abandoning the arm.
+name: mowe_precip
+params:
+  patch_size: [2, 2]        # 180x360 -> 90x180 = 16200 tokens
+  hidden_size: 192
+  depth: 4
+  num_heads: 6              # head dim 32
+  mlp_ratio: 4.0
+  attention_backend: timm   # transformer_engine on H100 if available
+  layernorm_backend: torch
+  noise_dim: null           # deterministic (combine with _ens by override)
+  drop_path: 0.25           # raised vs patch 4: 4x tokens = more capacity
+
+mix_space: physical
