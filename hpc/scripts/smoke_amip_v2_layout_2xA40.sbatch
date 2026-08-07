@@ -47,9 +47,13 @@ python -c "import physicsnemo, pathlib; p = pathlib.Path(physicsnemo.__file__); 
 assert str(p).startswith('$REPO_ROOT'), f'wrong physicsnemo on path: {p}'; \
 print('physicsnemo from', p)"
 
-echo "=== Step 1/2: live translator sweep (v1 contract) ==="
-python -m pytest test/tools/checkpoint_translation/test_amip_si.py \
-    -m slow -v --no-header -rA
+if [[ -z "${SKIP_STEP1:-}" ]]; then
+    echo "=== Step 1/2: live translator sweep (v1 contract) ==="
+    python -m pytest test/tools/checkpoint_translation/test_amip_si.py \
+        -m slow -v --no-header -rA
+else
+    echo "=== Step 1/2 skipped (SKIP_STEP1 set; passed in job 20916803) ==="
+fi
 
 echo
 echo "=== Step 2/2: v2-layout rolling mini-stage (ERDM v2 stats) ==="
