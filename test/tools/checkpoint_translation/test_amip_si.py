@@ -311,14 +311,22 @@ def test_wrapper_kwargs_source_contract_rejects_unknown():
         )
 
 
-def test_wrapper_kwargs_frozen_target_gets_no_layout_but_warns(caplog):
-    import logging
-
+def test_wrapper_kwargs_frozen_target_gets_v1_layout():
+    # Phase 12b correctness fix: frozen-family targets translate with the
+    # upstream-v1 packing contract so their channel-indexed projections
+    # see channels in trained order (the historical fork order never
+    # matched real v1 checkpoints).
     blob = _make_blob("SI_X")
-    with caplog.at_level(logging.WARNING):
-        kwargs = wrapper_kwargs_from_hparams(blob, "AmipDiTWrapper")
-    assert "channel_layout" not in kwargs
-    assert any("FROZEN" in rec.message for rec in caplog.records)
+    kwargs = wrapper_kwargs_from_hparams(blob, "AmipDiTWrapper")
+    assert kwargs["channel_layout"] == "v1"
+
+
+def test_wrapper_kwargs_frozen_target_rejects_v2_contract():
+    blob = _make_blob("SI_X")
+    with pytest.raises(ValueError, match="deleted in amip_v2"):
+        wrapper_kwargs_from_hparams(
+            blob, "AmipDiTWrapper", source_contract="v2"
+        )
 
 
 # ---------------------------------------------------------------------------

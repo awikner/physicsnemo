@@ -217,10 +217,23 @@ class AmipDiTWrapper(_PNeMoModule):
 
     .. note:: **Frozen on the amip-v1 contract (Phase 12).** Upstream
         amip_v2 deleted the single-step families (SI / SI_X / EDM); this
-        wrapper keeps its v1 variable-major upper-air packing and is
-        excluded from every amip_v2 rebaseline change so translated v1
-        checkpoints stay loadable. See
-        ``docs/dev/phase12_implementation_plan.md`` ("dual-contract seam").
+        wrapper receives no amip_v2 (``"v2"``) layout. It does accept a
+        ``channel_layout`` kwarg with two v1-era contracts (a Phase 12b
+        correctness fix):
+
+        * ``"fork"`` (default) — the historical Phase-8 fork packing:
+          state ``[surface | upper_air | diag]``, c_grid
+          ``[constant | varying]``. No upstream checkpoint was trained
+          on this order.
+        * ``"v1"`` — upstream amip v1's real training contract: state
+          ``[surface | diag | upper_air]`` (upper-air variable-major in
+          config level order), c_grid ``[varying | constant]``. **Use
+          this for checkpoints translated from real v1 Lightning ckpts**
+          (``--source-contract v1``) — under ``"fork"`` their
+          channel-indexed projections see permuted channels.
+
+        See ``docs/dev/phase12_implementation_plan.md`` ("dual-contract
+        seam").
 
     Pack / unpack semantics — see the module docstring. The wrapper
     instance is callable with the bare-backbone signature
@@ -256,9 +269,14 @@ class AmipDiTWrapper(_PNeMoModule):
         levels: Sequence[float],
         horizontal_resolution: Sequence[int],
         scalar_dim: int = 2,
+        channel_layout: str = "fork",
         dit_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
+        # Frozen family: only the two v1-era contracts, never "v2".
+        self.channel_layout = _validate_channel_layout(
+            channel_layout, ("fork", "v1")
+        )
         self.surface_variables = list(surface_variables)
         self.upper_air_variables = list(upper_air_variables)
         self.diagnostic_variables = list(diagnostic_variables)
@@ -325,11 +343,21 @@ class AmipDiTWrapper(_PNeMoModule):
         :class:`ClimateZarrDataset` (no batch dim) OR a batched dict from
         the DataLoader. The leading axes (``B`` or empty) are preserved.
         """
+        # Group order is layout-dependent (Phase 12b correctness fix):
+        # "fork" = [surface | upper_air | diag]; "v1" = upstream's
+        # [surface | diag | upper_air]. The upper-air block is
+        # variable-major in config level order under both.
         parts: list[torch.Tensor] = [sample["surface_in"]]
-        if self.num_upper_air_vars > 0:
-            parts.append(_flatten_upper_air(sample["upper_air_in"]))
-        if self.num_diagnostic > 0:
-            parts.append(sample["diagnostic"])
+        if self.channel_layout == "fork":
+            if self.num_upper_air_vars > 0:
+                parts.append(_flatten_upper_air(sample["upper_air_in"]))
+            if self.num_diagnostic > 0:
+                parts.append(sample["diagnostic"])
+        else:  # "v1"
+            if self.num_diagnostic > 0:
+                parts.append(sample["diagnostic"])
+            if self.num_upper_air_vars > 0:
+                parts.append(_flatten_upper_air(sample["upper_air_in"]))
         # Channel axis is the third-from-last for batched samples,
         # second-from-last for unbatched. ``cat(dim=-3)`` works for both
         # because surface_in is always shape ``(*B, C, H, W)``.
@@ -337,21 +365,33 @@ class AmipDiTWrapper(_PNeMoModule):
 
     def unpack_state(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         r"""``x [B, C, H, W] -> {surface_in, upper_air_in, diagnostic}``."""
+        n_ua = self.num_upper_air_vars * self.num_levels
         idx = 0
         out: dict[str, torch.Tensor] = {}
         out["surface_in"] = x.narrow(-3, idx, self.num_surface)
         idx += self.num_surface
-        if self.num_upper_air_vars > 0:
-            ua_flat = x.narrow(
-                -3, idx, self.num_upper_air_vars * self.num_levels
-            )
-            out["upper_air_in"] = _unflatten_upper_air(
-                ua_flat, self.num_upper_air_vars, self.num_levels
-            )
-            idx += self.num_upper_air_vars * self.num_levels
-        if self.num_diagnostic > 0:
-            out["diagnostic"] = x.narrow(-3, idx, self.num_diagnostic)
-            idx += self.num_diagnostic
+        if self.channel_layout == "fork":
+            if self.num_upper_air_vars > 0:
+                out["upper_air_in"] = _unflatten_upper_air(
+                    x.narrow(-3, idx, n_ua),
+                    self.num_upper_air_vars,
+                    self.num_levels,
+                )
+                idx += n_ua
+            if self.num_diagnostic > 0:
+                out["diagnostic"] = x.narrow(-3, idx, self.num_diagnostic)
+                idx += self.num_diagnostic
+        else:  # "v1"
+            if self.num_diagnostic > 0:
+                out["diagnostic"] = x.narrow(-3, idx, self.num_diagnostic)
+                idx += self.num_diagnostic
+            if self.num_upper_air_vars > 0:
+                out["upper_air_in"] = _unflatten_upper_air(
+                    x.narrow(-3, idx, n_ua),
+                    self.num_upper_air_vars,
+                    self.num_levels,
+                )
+                idx += n_ua
         return out
 
     def pack_c_grid(self, sample: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -365,11 +405,19 @@ class AmipDiTWrapper(_PNeMoModule):
         surface_in = sample.get("surface_in")
         batch_shape = surface_in.shape[:-3] if surface_in is not None else ()
         parts: list[torch.Tensor] = []
+        const = None
         if self.num_constant_boundary > 0:
             const = _broadcast_constant(sample["constant_boundary"], batch_shape)
-            parts.append(const)
-        if self.num_varying_boundary > 0:
-            parts.append(sample["varying_boundary"])
+        if self.channel_layout == "fork":
+            if const is not None:
+                parts.append(const)
+            if self.num_varying_boundary > 0:
+                parts.append(sample["varying_boundary"])
+        else:  # "v1" — upstream assemble_forcing(forcing, invariant)
+            if self.num_varying_boundary > 0:
+                parts.append(sample["varying_boundary"])
+            if const is not None:
+                parts.append(const)
         return torch.cat(parts, dim=-3)
 
     def muon_param_groups(
@@ -682,15 +730,15 @@ class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
     .. note:: **Frozen on the amip-v1 contract (Phase 12).** Upstream
         amip_v2 deleted the ERDMUnet backbone (the ERDM *scheduler*
         survives, paired with :class:`RollingDiT` — see
-        ``conf/model/amip_erdm_v2.yaml``). This wrapper keeps its v1
-        variable-major upper-air packing and is excluded from every
-        amip_v2 rebaseline change so translated v1 checkpoints stay
-        loadable. See ``docs/dev/phase12_implementation_plan.md``
-        ("dual-contract seam").
+        ``conf/model/amip_erdm_v2.yaml``). This wrapper never receives
+        the ``"v2"`` layout; its ``channel_layout`` kwarg carries the two
+        v1-era contracts (Phase 12b correctness fix): ``"fork"``
+        (default — historical Phase-8 packing) and ``"v1"`` (upstream
+        v1's real training contract — **use for checkpoints translated
+        from real v1 Lightning ckpts**, ``--source-contract v1``). See
+        ``docs/dev/phase12_implementation_plan.md`` ("dual-contract
+        seam").
     """
-
-    # Frozen on the historical fork packing (see _RollingPackUnpackMixin).
-    channel_layout = "fork"
 
     def __init__(
         self,
@@ -703,9 +751,14 @@ class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         levels: Sequence[float],
         horizontal_resolution: Sequence[int],
         scalar_dim: int = 2,
+        channel_layout: str = "fork",
         erdm_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
+        # Frozen family: only the two v1-era contracts, never "v2".
+        self.channel_layout = _validate_channel_layout(
+            channel_layout, ("fork", "v1")
+        )
         self.surface_variables = list(surface_variables)
         self.upper_air_variables = list(upper_air_variables)
         self.diagnostic_variables = list(diagnostic_variables)

@@ -385,19 +385,22 @@ def _xddc_wrapper_kwargs_from_hparams(blob: dict) -> dict:
     }
 
 
-# Wrapper classes migrated to the amip_v2 channel contract (Phase 12b) —
-# these accept a ``channel_layout`` constructor kwarg, which the translator
-# sets from ``--source-contract`` so the packing order at runtime matches
-# the order the checkpoint's channel-indexed weights were trained on.
-_LAYOUT_AWARE_WRAPPERS = ("RollingDiTWrapper", "XDDCWrapper")
+# All wrapper classes accept a ``channel_layout`` constructor kwarg
+# (Phase 12b), which the translator sets from ``--source-contract`` so the
+# packing order at runtime matches the order the checkpoint's
+# channel-indexed weights were trained on.
+_LAYOUT_AWARE_WRAPPERS = (
+    "AmipDiTWrapper",
+    "ERDMWrapper",
+    "RollingDiTWrapper",
+    "XDDCWrapper",
+)
 
-# Frozen v1-family wrappers (Phase 12 dual-contract seam). These pack in
-# the historical fork order ([surface | upper_air | diag], c_grid
-# [constant | varying]) which does NOT match the order real upstream-v1
-# checkpoints were trained on ([surface | diag | upper_air], c_grid
-# [varying | constant]) — a latent Phase-8e issue discovered during 12b.
-# The translator warns loudly; fixing the frozen wrappers is pending a
-# user decision (see docs/dev/phase12_implementation_plan.md).
+# Frozen v1-family wrappers (Phase 12 dual-contract seam). Their families
+# were deleted in amip_v2, so only the ``v1`` source contract is valid —
+# they accept ``channel_layout`` in {"fork", "v1"} (the "v1" option is the
+# Phase-12b correctness fix: the historical fork packing never matched the
+# order real upstream-v1 checkpoints were trained on).
 _FROZEN_FORK_LAYOUT_WRAPPERS = ("AmipDiTWrapper", "ERDMWrapper")
 
 
@@ -440,19 +443,14 @@ def wrapper_kwargs_from_hparams(
         kwargs["channel_layout"] = source_contract
         return kwargs
 
-    if target_class_name in _FROZEN_FORK_LAYOUT_WRAPPERS:
-        logger.warning(
-            "target wrapper %s is FROZEN on the fork channel layout "
-            "([surface | upper_air | diag], c_grid [constant | varying]), "
-            "which does not match the %s contract this checkpoint was "
-            "trained on ([surface | diag | upper_air], c_grid "
-            "[varying | constant]). The weights will load, but channel-"
-            "indexed input/output projections will see permuted channels "
-            "at runtime. See docs/dev/phase12_implementation_plan.md "
-            "(dual-contract seam) — pending decision on fixing the "
-            "frozen families.",
-            target_class_name,
-            source_contract,
+    if (
+        target_class_name in _FROZEN_FORK_LAYOUT_WRAPPERS
+        and source_contract != "v1"
+    ):
+        raise ValueError(
+            f"target wrapper {target_class_name} belongs to a family that "
+            f"was deleted in amip_v2 — no {source_contract!r}-contract "
+            f"checkpoint of it can exist. Use --source-contract v1."
         )
 
     hp = blob.get("hyper_parameters", None)

@@ -28,6 +28,7 @@ import torch
 from einops import rearrange
 
 from physicsnemo.experimental.models.amip_si import (
+    AmipDiTWrapper,
     ERDMWrapper,
     RollingDiTWrapper,
     XDDCWrapper,
@@ -177,8 +178,94 @@ def test_rolling_fork_layout_is_preserved_bit_identical():
     assert torch.equal(c_grid, ref_c)
 
 
-def test_erdm_wrapper_is_frozen_on_fork_layout():
-    assert ERDMWrapper.channel_layout == "fork"
+def _erdm_wrapper(layout: str = "fork") -> ERDMWrapper:
+    return ERDMWrapper(
+        surface_variables=[f"s{i}" for i in range(_SURFACE)],
+        upper_air_variables=[f"u{i}" for i in range(_UA_VARS)],
+        diagnostic_variables=[f"d{i}" for i in range(_DIAG)],
+        constant_boundary_variables=["lsm", "zsfc"],
+        varying_boundary_variables=["sst", "sic", "toa"],
+        levels=list(_LEVELS),
+        horizontal_resolution=(_H, _W),
+        channel_layout=layout,
+        erdm_kwargs=dict(
+            model_channels=8, channel_mult=(1,), num_res_blocks=1, num_groups=4
+        ),
+    )
+
+
+def test_erdm_wrapper_defaults_to_fork_layout_and_rejects_v2():
+    # Frozen family: default preserves the historical fork packing; the
+    # "v1" option is the Phase-12b correctness fix; "v2" never applies.
+    assert _erdm_wrapper().channel_layout == "fork"
+    with pytest.raises(ValueError, match="channel_layout"):
+        _erdm_wrapper("v2")
+
+
+def test_erdm_wrapper_v1_pack_bitmatches_upstream_v1_assemble():
+    w = _erdm_wrapper("v1")
+    s = _window_sample()
+    packed = w.pack_window_state(s)
+    for t in range(s["surface_in"].shape[1]):
+        ref = upstream_v1_assemble(
+            s["surface_in"][:, t], s["upper_air_in"][:, t], s["diagnostic"][:, t]
+        )
+        assert torch.equal(packed[:, t], ref)
+
+
+def _amip_dit_wrapper(layout: str = "fork") -> AmipDiTWrapper:
+    return AmipDiTWrapper(
+        surface_variables=[f"s{i}" for i in range(_SURFACE)],
+        upper_air_variables=[f"u{i}" for i in range(_UA_VARS)],
+        diagnostic_variables=[f"d{i}" for i in range(_DIAG)],
+        constant_boundary_variables=["lsm", "zsfc"],
+        varying_boundary_variables=["sst", "sic", "toa"],
+        levels=list(_LEVELS),
+        horizontal_resolution=(_H, _W),
+        channel_layout=layout,
+        dit_kwargs=dict(dim=16, num_heads=2, num_blocks=1, patch_size=2),
+    )
+
+
+def test_amip_dit_wrapper_defaults_to_fork_layout_and_rejects_v2():
+    assert _amip_dit_wrapper().channel_layout == "fork"
+    with pytest.raises(ValueError, match="channel_layout"):
+        _amip_dit_wrapper("v2")
+
+
+def test_amip_dit_v1_pack_bitmatches_upstream_v1_assemble():
+    w = _amip_dit_wrapper("v1")
+    s = _single_sample()
+    ref = upstream_v1_assemble(s["surface_in"], s["upper_air_in"], s["diagnostic"])
+    assert torch.equal(w.pack_state(s), ref)
+    out = w.unpack_state(w.pack_state(s))
+    assert torch.equal(out["upper_air_in"], s["upper_air_in"])
+    assert torch.equal(out["diagnostic"], s["diagnostic"])
+
+
+def test_amip_dit_v1_c_grid_matches_upstream_forcing_order():
+    w = _amip_dit_wrapper("v1")
+    torch.manual_seed(2)
+    B = 2
+    s = {
+        "surface_in": torch.randn(B, _SURFACE, _H, _W),
+        "constant_boundary": torch.randn(2, _H, _W),
+        "varying_boundary": torch.randn(B, 3, _H, _W),
+    }
+    const = s["constant_boundary"].expand(B, -1, -1, -1)
+    ref = upstream_assemble_forcing(s["varying_boundary"], const)
+    assert torch.equal(w.pack_c_grid(s), ref)
+
+
+def test_amip_dit_fork_layout_is_preserved_bit_identical():
+    # The frozen pre-12b default: [surface | ua(var-major) | diag],
+    # c_grid [constant | varying].
+    w = _amip_dit_wrapper("fork")
+    s = _single_sample()
+    B = s["surface_in"].shape[0]
+    ua_flat = s["upper_air_in"].reshape(B, _UA_VARS * len(_LEVELS), _H, _W)
+    ref = torch.cat([s["surface_in"], ua_flat, s["diagnostic"]], dim=1)
+    assert torch.equal(w.pack_state(s), ref)
 
 
 # ---------------------------------------------------------------------------

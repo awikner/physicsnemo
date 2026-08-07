@@ -250,19 +250,23 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   translator's ``--source-contract {v1,v2}`` flag simply sets the kwarg,
   so runtime packing always matches the trained channel-indexed weights —
   no weight surgery, and checkpoint provenance is self-describing.
-- **Discovered latent Phase-8e bug (needs user decision).** The fork's
-  Phase-8 wrappers pack ``[surface | upper_air | diag]`` with c_grid
+- **Discovered latent Phase-8e bug — RESOLVED (user decision
+  2026-08-07: fix within the v1 contract).** The fork's Phase-8 wrappers
+  pack ``[surface | upper_air | diag]`` with c_grid
   ``[constant | varying]`` — but real upstream-v1 checkpoints were
   trained on ``[surface | diag | upper_air]`` / ``[varying | constant]``
   (v1 ``assemble_input`` / ``assemble_forcing``), and the translator
-  never permuted. **Translated v1 checkpoints for the SI/SI_X/EDM (AmipDiT)
-  and ERDM-UNet families therefore run with permuted channels at the
-  input/output projections.** RollingDiT-family and x_DDC translations
-  are fixed by ``--source-contract v1``; the frozen ``AmipDiTWrapper`` /
-  ``ERDMWrapper`` now log a loud warning at translation time. Fixing the
-  frozen families would mean giving them the same layout kwarg —
-  pending the user's call (the "keep frozen" decision predates this
-  finding).
+  never permuted. Translated v1 checkpoints for the SI/SI_X/EDM (AmipDiT)
+  and ERDM-UNet families therefore ran with permuted channels at the
+  input/output projections. **Fix:** the frozen ``AmipDiTWrapper`` /
+  ``ERDMWrapper`` also gained the ``channel_layout`` kwarg, restricted
+  to the two v1-era contracts ``{"fork", "v1"}`` (never ``"v2"`` — their
+  families were deleted upstream). Default stays ``"fork"``
+  (bit-identical pre-12b behavior for existing configs/tests); the
+  translator now sets ``channel_layout="v1"`` for every auto-derived
+  target and **raises** if ``--source-contract v2`` is combined with a
+  frozen-family target. All previously-translated ``.mdlus`` files for
+  these families must be re-translated (cluster follow-up below).
 - Mixin (`_RollingPackUnpackMixin`) is layout-aware with class default
   ``"fork"`` → the frozen ``ERDMWrapper`` is bit-identical to pre-12b
   (pinned by test); ``RollingDiTWrapper`` defaults ``"v2"`` with
