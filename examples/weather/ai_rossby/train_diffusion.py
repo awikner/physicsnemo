@@ -148,44 +148,61 @@ def _build_loader(
     *,
     window_size: int,
     rank: int,
+    world_size: int = 1,
 ) -> tuple[DataLoader, bool]:
     """Build the per-stage DataLoader.
 
     Returns ``(loader, window_mode)``. ``raw_ds`` is wrapped in a
-    :class:`SequenceDataset` when ``window_size > 1``. The
+    :class:`SequenceDataset` when ``window_size > 1`` (a window of W
+    frames = ``unroll_steps = W - 1``). The
     :class:`LeadTimePairSampler` is only used in single-step mode —
-    rolling stages stride through the SequenceDataset uniformly.
+    rolling stages stride through the SequenceDataset with a plain
+    :class:`~torch.utils.data.DistributedSampler` under DDP so ranks
+    see disjoint windows.
     """
     window_mode = window_size > 1
     if window_mode:
         from physicsnemo.experimental.datapipes.climate import SequenceDataset
 
-        dataset = SequenceDataset(
-            raw_ds, sequence_length=window_size, lead_time=1
-        )
+        dataset = SequenceDataset(raw_ds, unroll_steps=window_size - 1)
     else:
         dataset = raw_ds
 
-    sampler = (
-        LeadTimePairSampler(
+    if not window_mode:
+        sampler = LeadTimePairSampler(
             dataset_length=len(dataset),
             forecast_lead_times=list(cfg.dataset.forecast_lead_times),
             shuffle=bool(cfg.dataset.shuffle),
             seed=int(cfg.seed) + rank,
         )
-        if not window_mode
-        else None
-    )
+    elif world_size > 1:
+        sampler = torch.utils.data.DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=bool(cfg.dataset.shuffle),
+            seed=int(cfg.seed),
+        )
+    else:
+        sampler = None
 
+    num_workers = int(cfg.dataset.num_workers)
+    worker_kwargs = (
+        {
+            "prefetch_factor": int(cfg.dataset.prefetch_factor),
+            "persistent_workers": bool(cfg.dataset.persistent_workers),
+        }
+        if num_workers > 0
+        else {}
+    )
     loader = DataLoader(
         dataset,
         batch_size=int(cfg.dataset.batch_size),
-        num_workers=int(cfg.dataset.num_workers),
+        num_workers=num_workers,
         sampler=sampler,
         shuffle=(sampler is None and bool(cfg.dataset.shuffle)),
-        prefetch_factor=int(cfg.dataset.prefetch_factor),
-        persistent_workers=bool(cfg.dataset.persistent_workers),
         pin_memory=bool(cfg.dataset.pin_memory),
+        **worker_kwargs,
     )
     return loader, window_mode
 
@@ -330,19 +347,31 @@ def _pack_single_step(model: nn.Module, sample: dict) -> tuple:
 
 
 def _pack_window(model: nn.Module, window: dict) -> tuple:
-    """ERDM / RFM: pack (y, c_grid, c_scalar) from a (B, W, …) window sample."""
+    """ERDM / RFM: pack (y, c_grid, c_scalar) from a (B, W, …) window sample.
+
+    :class:`SequenceDataset` emits the per-frame fields stacked under
+    ``{key}_seq`` names (plus an unstacked ``constant_boundary``); the
+    constant boundary arrives batched as ``(B, C, H, W)`` and is expanded
+    across the window axis here so the wrapper's ``pack_window_c_grid``
+    sees ``(B, W, C, H, W)`` streams throughout.
+    """
     inner = model.module if hasattr(model, "module") else model
+    surface_seq = window["surface_in_seq"]
+    W = surface_seq.shape[1]
+    const = window["constant_boundary"]
+    if const.dim() == 4:  # (B, C, H, W) -> (B, W, C, H, W)
+        const = const.unsqueeze(1).expand(-1, W, -1, -1, -1)
     y = inner.pack_window_state({
-        "surface_in": window["surface_in"],
-        "upper_air_in": window["upper_air_in"],
-        "diagnostic": window.get("diagnostic"),
+        "surface_in": surface_seq,
+        "upper_air_in": window["upper_air_in_seq"],
+        "diagnostic": window.get("diagnostic_seq"),
     })
     c_grid = inner.pack_window_c_grid({
-        "surface_in": window["surface_in"],
-        "constant_boundary": window["constant_boundary"],
-        "varying_boundary": window["varying_boundary"],
+        "surface_in": surface_seq,
+        "constant_boundary": const,
+        "varying_boundary": window["varying_boundary_seq"],
     })
-    c_scalar = window["calendar"]
+    c_scalar = window["calendar_seq"]
     return y, c_grid, c_scalar
 
 
@@ -508,7 +537,11 @@ def main(cfg: DictConfig) -> None:
         if loader is None or stage_window_size != window_size:
             window_size = stage_window_size
             loader, window_mode = _build_loader(
-                cfg, raw_ds, window_size=window_size, rank=dist.rank
+                cfg,
+                raw_ds,
+                window_size=window_size,
+                rank=dist.rank,
+                world_size=dist.world_size,
             )
 
         steps_per_epoch = max(1, len(loader))

@@ -35,6 +35,10 @@ _SEQ_KEYS = (
     "upper_air_pressure_in",
     "varying_boundary",
     "diagnostic",
+    # Per-frame calendar vector (present when the base dataset runs with
+    # ``emit_calendar=True``). Rolling-window diffusion (ERDM/RFM) needs
+    # the (W, scalar_dim) stack as ``c_scalar`` — Phase 12b.
+    "calendar",
 )
 
 
