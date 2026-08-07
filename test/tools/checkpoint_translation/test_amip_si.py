@@ -591,6 +591,13 @@ def test_live_translation_round_trips(ckpt_path, tmp_path, request):
     loaded = physicsnemo.Module.from_checkpoint(str(out_path))
     loaded.eval()
 
+    # Phase 12b correctness fix: auto-derived targets carry the upstream
+    # v1 packing contract, and it must survive the .mdlus roundtrip.
+    assert loaded.channel_layout == "v1", (
+        f"{ckpt_path.parent.name}: expected channel_layout='v1', got "
+        f"{loaded.channel_layout!r}"
+    )
+
     # Two-resolution forward: x_noised / cond at backbone working res,
     # c_grid at data res (upstream amip's legacy layout).
     B = 1
@@ -649,6 +656,13 @@ def test_live_translation_round_trips_xddc(ckpt_path, tmp_path):
     model.save(str(out_path))
     loaded = physicsnemo.Module.from_checkpoint(str(out_path))
     loaded.eval()
+
+    # Phase 12b: v1-sourced x_DDC translations carry the v1 upper-air
+    # layout (variable-major) through the .mdlus roundtrip.
+    assert loaded.channel_layout == "v1", (
+        f"{ckpt_path.parent.name}: expected channel_layout='v1', got "
+        f"{loaded.channel_layout!r}"
+    )
 
     B = 1
     nlat, nlon = loaded.horizontal_resolution
