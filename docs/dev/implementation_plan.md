@@ -1263,3 +1263,24 @@ Stampede3 scratch** (both volatile, independent purge clocks; Delta raw is the
 durable fallback). PLASIM-plev (79–104) converts on **Derecho** from a complete
 per-year `.h5` source with the existing converter — no enrichment needed.
 **Planned.**
+
+## 10. Phase 12 — amip_v2 rebaseline → see `phase12_implementation_plan.md`
+
+The collaborator replaced the amip repo with
+[anthonyzhou-1/amip_v2](https://github.com/anthonyzhou-1/amip_v2) — a staged
+cleanup (only ERDM + x_DDC + Combined survive; loaders merged; non-windowed
+paths removed) plus new work (v2 channel-packing contract, level-index and
+double-downsample bug fixes, budget input projection, MoE output head,
+forcing cross-attention, SST forcing suite, ocean-state prediction,
+pre-coarsened store). Phase 12 brings the fork's AMIP port to parity with
+v2 @ `e0b7b60`. **Decisions locked 2026-08-07:** v2 authoritative for what
+it retains; the fork's SI/SI_X/EDM/RFM ports are **kept frozen on the v1
+contract** (dual-contract seam); ERDM/x_DDC/Combined adopt v2's
+level-major channel order (translator permutation shim for v1 ckpts);
+pre-coarsened 45×90 **Zarr** (no memmap port); full feature parity. Baseline
+`e0b7b60` user-confirmed; no v2-trained checkpoints exist yet (12b's v1→v2
+permutation shim is the live-validated translation path); the daily-avg
+dataset needs conversion first (12c). Eight sub-phases 12a–12h, ~12–13
+developer days. **12a complete** (2026-08-07: both bug audits clean —
+neither v1 bug present in the fork; two new regression tests; `erdm_v2`
+configs; freeze markers; 260 CPU tests green); 12b+ planned.
