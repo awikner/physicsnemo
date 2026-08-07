@@ -127,6 +127,26 @@ before.
 
 ### W2 — Root-cause isolation matrix (Delta, one sbatch, ~1 GPU-hour)
 
+> **W2 discovery (2026-08-07, before running the matrix):**
+> `train_diffusion.py` called `_maybe_init_wandb` **only on rank 0**
+> (`if dist.rank == 0:` around the init) — precisely the asymmetric
+> configuration the every-rank strategy exists to prevent, and the
+> configuration the July diagnosis identified as the deadlock trigger.
+> `train.py` calls it unconditionally on every rank. This is now the
+> **primary hypothesis**: it explains why the July validation
+> (`train.py`, every-rank, A100) passed while the diffusion path hangs,
+> at the SAME wandb version. **The version-drift cell is dropped**:
+> wandb was already 0.27.0 in `1a1b843b`'s lockfile — no drift
+> occurred. The matrix below is revised accordingly: every cell runs
+> the every-rank call-site fix; the pre-fix rank-0-only baseline is not
+> re-run (documented failing twice, jobs 20916803/20918380).
+>
+> Revised cells (`hpc/scripts/isolate_wandb_ddp_hang_2xA40.sbatch`):
+> M1a/b/c = every-rank fix + wandb on, three repeats (primary);
+> M2 = + stats monitor off; M3 = + console off;
+> M4 = `wandb.init_after_ddp=true`; M5 = `wandb.nonzero_rank_mode=disabled`;
+> M6 = `train.py` control on A40.
+
 One `hpc/scripts/isolate_wandb_ddp_hang_2xA40.sbatch` running a
 sequence of ≤3-min 2×A40 micro-trainings (tiny RollingDiT, 5 capped
 iterations each, `wandb.allow_multigpu=true` so the guard doesn't mask
