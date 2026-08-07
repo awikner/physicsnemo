@@ -232,10 +232,36 @@ Delta hides ~224 ms of its 479 ms all-reduce behind backward; Polaris' entire 22
 hide, leaving the step compute-bound. **Not yet validated by running the actual model on
 Polaris.**
 
+## Running SFNO-E3SM (4 nodes × 4 GPUs = 16 GPUs, global batch 16)
+
+`dataset.batch_size` is **per rank**, so `=1` across 16 ranks gives a global batch of 16.
+
+```bash
+# test: 60 iterations, no validation/wandb, prints s/batch  (debug-scaling, 30 min)
+AI_ROSSBY_DATA=<zarr-root> qsub -v MODE=test,AI_ROSSBY_DATA \
+    hpc/scripts/polaris_train_sfno_e3sm.pbs
+
+# full: preemptable is the ONLY queue that takes 4 nodes for >1 h
+AI_ROSSBY_DATA=<zarr-root> qsub -q preemptable -l walltime=48:00:00 \
+    -v MODE=full,AI_ROSSBY_DATA hpc/scripts/polaris_train_sfno_e3sm.pbs
+```
+
+Defaults to `model=sfno_e3sm_512` (`embed_dim=512`, `checkpointing=2`,
+1,182,099,456 params); pass `-v MODEL=sfno_e3sm` for the 256 variant.
+
+**`prod` cannot run this job** — it has a 10-node minimum. `preemptable` jobs can be
+killed at any time, so `full` mode sets `checkpoint_save_interval=1`.
+
+`polaris_rank_env.sh` maps PALS' `PMI_*` onto the `RANK`/`WORLD_SIZE`/`LOCAL_RANK` that
+physicsnemo's `DistributedManager` expects — it recognises generic-env, SLURM and OpenMPI,
+but **not** PALS, and without the shim `initialize_env()` raises on `int(None)`.
+
 ## Reproduction scripts
 
 | Script | Purpose |
 |---|---|
+| `hpc/scripts/polaris_train_sfno_e3sm.pbs` | SFNO-E3SM training, test + full modes |
+| `hpc/scripts/polaris_rank_env.sh` | PALS `PMI_*` → torchrun-style rank env shim |
 | `hpc/scripts/allreduce_probe.py` | Launcher-agnostic (PMI + SLURM) all-reduce benchmark |
 | `hpc/scripts/polaris_topo_probe.pbs` | Node/fabric inventory + 1/2/4-node bandwidth curve |
 | `hpc/scripts/polaris_nccl_cause_ab.pbs` | The `--cpu-bind` isolation (job `7368993`) |
@@ -246,9 +272,13 @@ Polaris.**
 ## Not yet done
 
 - **No physicsnemo checkout / venv on Polaris.** Needs a uv venv per `hpc/install.md`, and
-  a home for it that isn't the full `/eagle`.
+  a home for it that isn't the full `/eagle`. The conda module's torch is 2.8.0, below
+  physicsnemo's `>=2.10` pin.
 - **No E3SM/ERA5 Zarr staged here** — blocked on `/eagle` capacity.
-- **SFNO-E3SM has never actually been trained on Polaris**; the table above is projection.
+- **SFNO-E3SM has never actually been trained on Polaris.** `polaris_train_sfno_e3sm.pbs`
+  mirrors the validated Delta invocation and its NCCL env / `--cpu-bind` are measured, but
+  the script itself has not been executed here — expect to shake out venv and data paths
+  on the first `MODE=test` run. The throughput table above is projection.
 - Whether `ss11=False` nodes (224 of 560) differ in bandwidth is **untested** — all
   measurements landed in group `g1`/`x3204`.
 

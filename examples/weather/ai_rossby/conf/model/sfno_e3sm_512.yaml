@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SfnoPlasim model config — E3SM SFNO at embed_dim 512.
+#
+# Identical to conf/model/sfno_e3sm.yaml except for two values:
+#     embed_dim     256 -> 512
+#     checkpointing   0 -> 2
+#
+# Parameter count (counted directly, not estimated):
+#     embed_dim 256    303,870,976 params   1.13 GiB fp32
+#     embed_dim 512  1,182,099,456 params   4.40 GiB fp32   (3.89x)
+#
+# WHY checkpointing=2 IS NOT OPTIONAL HERE.
+# At embed_dim 512 in full fp32 this model OOMs a 40 GB A100 with
+# checkpointing=0 *even at 1 sample per GPU* — 38.16 GiB allocated of the
+# 39.49 GiB usable, all ranks (Delta job 20914814). The fixed state alone is
+# ~17.6 GiB before a single activation: 4.40 weights + 4.40 grads + 8.80 AdamW
+# moments, plus DDP's gradient bucket buffers on top.
+#
+# checkpointing=2 (recompute the MLP only) fits with headroom — 35.6 GB/GPU
+# peak — and is what the tuned embed_dim-256 recipe uses as well. Measured
+# cost on 4x A100 40GB, fp32, 1 sample/GPU: 0.5246 s/batch, 99-100% GPU util.
+# Do not lower it without re-verifying memory on the target GPU; on an 80 GB
+# card (not one we have) checkpointing=0 may fit and would be faster.
+#
+# Benchmarked with hpc/scripts/bench_sfno_e3sm_512_ddp.sbatch (Delta) and
+# documented for Polaris in hpc/polaris.md.
+
+name: SfnoPlasim
+module: physicsnemo.experimental.models.sfno_plasim
+
+# Variable groups — must match the ai-rossby E3SM Zarr store's attrs
+# (tools/data/e3sm/pangu_h5_to_zarr.py PANGU_E3SM_CHANNELS). Land variables
+# (SOILWATER_10CM, TSOI_10CM) are NOT written by the per-year converter (soil
+# vars only appear in the climatology store) so they're absent here — the
+# reference config's land_variables have no analogue in this Zarr schema.
+surface_variables: [TREFHT, U10, PSL]
+upper_air_variables: [T, U, V, RELHUM, Z3]
+constant_boundary_variables: [TOPO, PCT_GLACIER, PCT_NATVEG, PFTDATA_MASK]
+varying_boundary_variables: [SST, ICE, sol_in]
+diagnostic_variables: [PRECT]
+
+# E3SM hybrid-pressure levels (hPa) — full 18-level source coverage per the
+# ai-rossby archive convention (tools/data/e3sm/pangu_h5_to_zarr.py).
+levels: [4.714998332947841, 10.655023096474308, 19.235455601758737,
+  28.79458853709195, 50.11779996521295, 69.59908688413749, 96.46377266572703,
+  145.04282239200347, 200.99889546355382, 256.72368590525895,
+  302.21364012188303, 385.999023919911, 492.46857402252755,
+  608.6437744215842, 713.7046383204334, 849.6612491105952,
+  925.5197481473349, 998.4964394917621]
+horizontal_resolution: [180, 360]
+
+# SFNO-specific kwargs. Same block as sfno_e3sm.yaml apart from embed_dim and
+# checkpointing (see header). num_blocks=16 divides embed_dim=512 evenly (32).
+spectral_transform: sht
+filter_type: linear
+operator_type: dhconv
+scale_factor: 1
+embed_dim: 512
+num_layers: 12
+use_mlp: True
+mlp_ratio: 2.0
+activation_function: gelu
+encoder_layers: 1
+pos_embed: True
+drop_rate: 0.0
+drop_path_rate: 0.0
+num_blocks: 16
+sparsity_threshold: 0.0
+normalization_layer: instance_norm
+hard_thresholding_fraction: 1.0
+use_complex_kernels: True
+big_skip: True
+rank: 1.0
+factorization: null
+separable: False
+complex_network: True
+complex_activation: real
+spectral_layers: 3
+checkpointing: 2
+data_grid: equiangular
