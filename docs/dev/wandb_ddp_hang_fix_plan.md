@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # wandb × DDP NCCL-watchdog hang — fix plan
 
-Status: **W1 complete (2026-08-07); W2–W4 planned** · Created:
+Status: **W1–W2 complete (2026-08-07, root cause confirmed); W3–W4 pending** · Created:
 2026-08-07 (during Phase 12b cluster validation) · Owner: TBD
 
 ## Symptom
@@ -175,6 +175,31 @@ Expectation to confirm or kill: cells 1–3 target the GIL-in-CUDA-API
 mechanism directly; cell 3 is the strongest candidate for a durable
 fix because it removes the init-time race categorically regardless of
 which thread family is guilty.
+
+**W2 findings** *(2026-08-07, Delta job 20921753, 2×A40, wandb 0.27.0,
+torch 2.10.0)*:
+
+| Cell | Configuration | Result |
+|---|---|---|
+| (pre-fix baseline) | rank-0-only init + wandb on | **FAIL ×2** (jobs 20916803/20918380 — watchdog hang at DDP init; not re-run) |
+| M1a / M1b / M1c | **every-rank call-site fix** + wandb on (offline) | **PASS ×3** (200 s / 65 s / 64 s; M1a includes first-run warmup) |
+| M2 | every-rank + GPU/system-stats monitor off | PASS (64 s) |
+| M3 | every-rank + console capture off | PASS (65 s) |
+| M4 | `wandb.init_after_ddp=true` | PASS (63 s) |
+| M5 | `wandb.nonzero_rank_mode=disabled` | PASS (66 s) |
+| M6 | `train.py` control + wandb on | machinery PASS — wandb init + DDP wrap + first `train_step` all reached; the cell then errored on an unrelated model/dataset level-count mismatch (13 vs 10) in the cell's config pairing, 43 s, no hang |
+
+No NCCL flight-recorder dumps were produced (no hangs anywhere).
+
+**Verdict: root cause CONFIRMED = the rank-0-only `_maybe_init_wandb`
+call in `train_diffusion.py`.** With the every-rank call-site fix
+(landed in commit `19f36128`), wandb-on DDP passes 3/3 on the exact
+hang-repro config, and every sub-variant (stats off / console off /
+init-after-DDP / thread-free non-zero ranks) also passes — none of
+them is needed for the fix; the knobs remain available as belt-and-
+suspenders options. The July validation-vs-12b-hang discrepancy is
+fully explained: `train.py` always had the every-rank call,
+`train_diffusion.py` never did.
 
 ### W3 — Durable fix + re-enable — ~half day + validation runs
 
