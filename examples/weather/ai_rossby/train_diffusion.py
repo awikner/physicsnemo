@@ -431,11 +431,25 @@ def main(cfg: DictConfig) -> None:
     dist = DistributedManager()
     logger = PythonLogger("amip_diffusion_train")
 
-    if dist.rank == 0:
-        # Create the wandb run first, then bind it to LaunchLogger so all
-        # training + validation log_epoch / log_minibatch dicts route to
-        # wandb. _maybe_init_wandb returns False (and LaunchLogger stays
-        # console-only) if wandb is disabled or the package is missing.
+    # Create the wandb run first, then bind it to LaunchLogger so all
+    # training + validation log_epoch / log_minibatch dicts route to
+    # wandb. _maybe_init_wandb returns False (and LaunchLogger stays
+    # console-only) if wandb is disabled or the package is missing.
+    #
+    # Called on EVERY rank — _maybe_init_wandb's contract (thread-jitter
+    # symmetry under DDP; rank 0 alone drives LaunchLogger's wandb
+    # backend). Pre-Phase-12b this call was gated on ``dist.rank == 0``,
+    # which is precisely the asymmetric configuration the every-rank
+    # strategy exists to prevent — the W2 primary suspect for the
+    # DDP-init NCCL watchdog hang (docs/dev/wandb_ddp_hang_fix_plan.md).
+    #
+    # ``wandb.init_after_ddp=true`` (W2 cell M4) defers the init until
+    # after the DDP wrap so the first NCCL collective completes before
+    # any wandb background thread exists.
+    _wandb_after_ddp = bool(
+        cfg.wandb.get("init_after_ddp", False)
+    ) if cfg.get("wandb", None) is not None else False
+    if not _wandb_after_ddp:
         wandb_active = _maybe_init_wandb(cfg, dist=dist)
         LaunchLogger.initialize(use_wandb=wandb_active)
 
@@ -466,6 +480,11 @@ def main(cfg: DictConfig) -> None:
             find_unused_parameters=dist.find_unused_parameters,
             gradient_as_bucket_view=True,
         )
+    if _wandb_after_ddp:
+        # W2 cell M4 ordering experiment: the DDP wrap (and its first
+        # NCCL collective) completed above with no wandb threads alive.
+        wandb_active = _maybe_init_wandb(cfg, dist=dist)
+        LaunchLogger.initialize(use_wandb=wandb_active)
     inner_model = model.module if hasattr(model, "module") else model
 
     optimizer = make_optimizer(

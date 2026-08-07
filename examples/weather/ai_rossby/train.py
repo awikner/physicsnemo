@@ -303,10 +303,15 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
         return False
 
     # Called on ALL ranks (see docstring). Only rank 0 syncs to the server
-    # (configured mode); other ranks go offline so there is exactly ONE online
-    # run while their background threads still provide the DDP timing symmetry.
+    # (configured mode); other ranks default to offline so there is exactly ONE
+    # online run while their background threads still provide the DDP timing
+    # symmetry. ``wandb.nonzero_rank_mode: disabled`` (W2 cell M5) makes
+    # non-zero ranks thread-free instead — deliberately re-testing whether
+    # full thread symmetry is actually required or merely rank 0 must not
+    # stall its own collectives.
     configured_mode = str(wb.get("mode", "offline"))
-    rank_mode = configured_mode if dist.rank == 0 else "offline"
+    nonzero_rank_mode = str(wb.get("nonzero_rank_mode", "offline"))
+    rank_mode = configured_mode if dist.rank == 0 else nonzero_rank_mode
     # entity: a null/empty config value must become Python ``None`` (use the
     # account's default entity). NOT ``str(...)`` — OmegaConf null -> the literal
     # string "None", which wandb's server rejects online with

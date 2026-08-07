@@ -71,8 +71,12 @@ wandb:
   project: ai-rossby
   entity: null                    # wandb team/username; null = your default entity
   name: ${run_name}
-  mode: offline                   # offline | online | disabled (rank 0 only; others offline)
+  mode: offline                   # offline | online | disabled (rank 0 only; others nonzero_rank_mode)
   init_timeout: 300               # seconds for wandb.init; raise if rank 0 times out at launch
+  # --- W2 isolation-matrix knobs (wandb_ddp_hang_fix_plan.md) — both only
+  # matter when allow_multigpu=true lifts the DDP guard:
+  nonzero_rank_mode: offline      # offline (thread symmetry) | disabled (non-zero ranks thread-free)
+  init_after_ddp: False           # true = init wandb only after the DDP wrap's first NCCL collective
 
 # --- Bench-time per-batch TSV emission (optional) --------------------------
 # When non-null and rank 0, every training-step's loss components are

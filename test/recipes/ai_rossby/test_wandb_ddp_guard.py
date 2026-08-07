@@ -106,6 +106,35 @@ def test_enabled_false_short_circuits_before_guard():
     )
 
 
+def test_nonzero_rank_mode_default_offline(monkeypatch):
+    calls: list = []
+    _patch_initialize(monkeypatch, calls)
+    out = train._maybe_init_wandb(
+        _cfg(allow_multigpu=True, mode="online"),
+        dist=_StubDist(rank=1, world_size=2),
+    )
+    assert out is False  # non-zero ranks never drive LaunchLogger
+    assert calls[0]["mode"] == "offline"
+
+
+def test_nonzero_rank_mode_disabled_passthrough(monkeypatch):
+    # W2 cell M5: non-zero ranks thread-free.
+    calls: list = []
+    _patch_initialize(monkeypatch, calls)
+    train._maybe_init_wandb(
+        _cfg(allow_multigpu=True, mode="online", nonzero_rank_mode="disabled"),
+        dist=_StubDist(rank=1, world_size=2),
+    )
+    assert calls[0]["mode"] == "disabled"
+    # Rank 0 keeps the configured mode regardless of the knob.
+    calls.clear()
+    train._maybe_init_wandb(
+        _cfg(allow_multigpu=True, mode="online", nonzero_rank_mode="disabled"),
+        dist=_StubDist(rank=0, world_size=2),
+    )
+    assert calls[0]["mode"] == "online"
+
+
 def test_missing_allow_multigpu_key_defaults_to_guarded():
     # Older configs without the new key must stay safe (guard active).
     cfg = OmegaConf.create(
