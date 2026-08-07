@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # wandb × DDP NCCL-watchdog hang — fix plan
 
-Status: **planned** · Created: 2026-08-07 (during Phase 12b cluster
-validation) · Owner: TBD
+Status: **W1 complete (2026-08-07); W2–W4 planned** · Created:
+2026-08-07 (during Phase 12b cluster validation) · Owner: TBD
 
 ## Symptom
 
@@ -109,6 +109,18 @@ Restore `1a1b843b`'s behavior inside `_maybe_init_wandb` (shared by
    share these recipes/venv): announce the guard + escape hatch before
    landing, since anyone relying on multi-GPU wandb dashboards loses
    them until W3.
+
+**W1 delivered** *(2026-08-07, branch ``ai-rossby-amip-v2``)*: guard in
+``train.py:_maybe_init_wandb`` (rank-0 warning, silent on other ranks;
+missing ``allow_multigpu`` key defaults to guarded), ``wandb.allow_multigpu:
+False`` in ``conf/config.yaml`` with rewritten multi-GPU comment, 6 CPU
+unit tests (``test/recipes/ai_rossby/test_wandb_ddp_guard.py`` — guard
+on/off per world_size, escape hatch, rank silence, enabled=False
+short-circuit, missing-key default), smoke sbatch's ``wandb.enabled=false``
+override removed (guard covers it), ``sfno-ddp-requirements.md`` §2 +
+CLAUDE.md gotcha updated. 232 recipe/amip tests green. **Item 7
+(palooza heads-up) is on the user** — the guard lands with this branch's
+merge, not before.
 
 ### W2 — Root-cause isolation matrix (Delta, one sbatch, ~1 GPU-hour)
 

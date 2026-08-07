@@ -55,17 +55,19 @@ log_every_n_steps: 1
 # installed the trainer logs a warning and falls back to console logging.
 # Set enabled=False to disable entirely.
 #
-# Multi-GPU: wandb is initialized on EVERY rank (only rank 0 logs metrics).
-# Running wandb on all ranks makes its background-thread GIL/CUDA jitter
-# symmetric, which keeps DDP's NCCL collectives in lockstep — initializing it
-# on rank 0 alone desyncs the ranks and deadlocks training. To avoid one run
-# per GPU, only rank 0 uses `mode` below; other ranks are forced to `offline`
-# (local, not synced) so the UI shows exactly ONE run. Training + validation
-# metrics are aggregated across all GPUs to rank 0 before logging (per-step
-# minibatch + epoch train reduced in-band; val_loss all-reduced), so that one
-# run reflects every GPU. See _maybe_init_wandb / _ddp_mean_scalars in train.py.
+# Multi-GPU: wandb is AUTO-DISABLED when world_size > 1 (metrics go to
+# console + the bench TSV instead). wandb's background threads (service IPC /
+# console capture / GPU-stats monitor) can hold the GIL inside CUDA calls and
+# stall NCCL — observed hanging DDP init's first collective until the NCCL
+# watchdog kills the rank (Delta 2xA40, Phase 12b), even with the
+# init-on-every-rank symmetry strategy. `allow_multigpu: true` overrides the
+# guard at your own risk (the every-rank machinery below then applies: only
+# rank 0 uses `mode`; other ranks are forced offline so the UI shows exactly
+# ONE run, and metrics are rank-0-aggregated). Diagnosis + re-enable plan:
+# docs/dev/wandb_ddp_hang_fix_plan.md.
 wandb:
   enabled: True
+  allow_multigpu: False           # DDP guard — see comment above before flipping
   project: ai-rossby
   entity: null                    # wandb team/username; null = your default entity
   name: ${run_name}

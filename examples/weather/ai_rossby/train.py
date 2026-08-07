@@ -265,9 +265,32 @@ def _maybe_init_wandb(cfg: DictConfig, *, dist) -> bool:
     IMPORTANT: this must run **before** ``LaunchLogger.initialize`` — the
     logger binds the wandb backend at initialize time and only when a run
     already exists.
+
+    .. warning:: **Auto-disabled under DDP** (``world_size > 1``) unless
+        ``cfg.wandb.allow_multigpu=true``. wandb's background threads
+        (service IPC / console capture / GPU-stats monitor) can hold the
+        GIL inside CUDA calls and stall NCCL progress — observed hanging
+        ``DistributedDataParallel.__init__``'s very first collective
+        until the NCCL watchdog SIGABRTs the rank (Delta 2×A40, Phase
+        12b jobs 20918380/20916803), *despite* the every-rank
+        thread-jitter symmetry this helper provides. The symmetry
+        argument only addresses mid-epoch desync; an init-time
+        collective blocks on whichever rank's threads stall it. This
+        restores the guard from commit ``1a1b843b``. Full diagnosis +
+        re-enable plan: ``docs/dev/wandb_ddp_hang_fix_plan.md``.
     """
     wb = cfg.get("wandb", None)
     if wb is None or not bool(wb.get("enabled", False)):
+        return False
+    if dist.world_size > 1 and not bool(wb.get("allow_multigpu", False)):
+        if dist.rank == 0:
+            PythonLogger("train").warning(
+                f"wandb auto-disabled under DDP (world_size={dist.world_size}): "
+                "wandb background threads can stall NCCL and hang DDP init "
+                "(NCCL-watchdog SIGABRT). Metrics go to console + bench TSV. "
+                "Set wandb.allow_multigpu=true to override at your own risk — "
+                "see docs/dev/wandb_ddp_hang_fix_plan.md."
+            )
         return False
     try:
         from physicsnemo.utils.logging.wandb import initialize_wandb

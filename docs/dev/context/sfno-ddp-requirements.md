@@ -21,14 +21,25 @@ requirements:
    `uv.lock` is at torch 2.10.0. The old floating `>=2.10.0` pin silently drifted
    to 2.11/2.12 on `uv sync` and broke the working 4×A100 SFNO-PlaSim benchmark.
 
-2. **wandb must be initialized on EVERY rank (log from rank 0 only).** wandb's
+2. **wandb is AUTO-DISABLED under DDP (`world_size > 1`).**
+   > **UPDATE 2026-08-07 (Phase 12b):** the every-rank strategy below is NOT
+   > sufficient. wandb's background threads hung `DDP.__init__`'s *first* NCCL
+   > collective (watchdog "another thread holding the GIL inside a CUDA api" →
+   > SIGABRT; peer rank reports a spurious `int overflow`) on Delta 2×A40 with
+   > wandb initialized on every rank — reproducibly, and resolved by disabling
+   > wandb (jobs 20918380 vs 20920825). The `1a1b843b` auto-disable guard is
+   > restored in `_maybe_init_wandb` with a `wandb.allow_multigpu` escape hatch.
+   > Multi-GPU runs log to console + bench TSV. Diagnosis + re-enable plan:
+   > [`docs/dev/wandb_ddp_hang_fix_plan.md`](../wandb_ddp_hang_fix_plan.md).
+
+   *Historical rationale for the (insufficient) every-rank strategy:* wandb's
    background threads (service IPC / console capture / GPU monitor) grab the GIL
    inside CUDA calls; running wandb on rank 0 alone makes that jitter asymmetric
-   and desyncs DDP's NCCL collectives → deadlock. Initializing wandb on ALL ranks
-   makes the jitter symmetric → DDP stays in lockstep (this is what the
-   PanguWeather reference trainer does). `_maybe_init_wandb` calls
-   `initialize_wandb` on all ranks and returns `rank==0`. (An earlier commit that
-   auto-DISABLED wandb under DDP is superseded; wandb works multi-GPU now.)
+   and desyncs DDP's NCCL collectives mid-epoch → deadlock. Initializing wandb on
+   ALL ranks makes the jitter symmetric (this is what the PanguWeather reference
+   trainer does) — but an *init-time* collective blocks on whichever rank's
+   threads stall it, symmetric or not. The every-rank machinery still applies
+   when `allow_multigpu=true` overrides the guard.
 
 3. **The recipe's optional extras must be installed or `uv sync` prunes them.**
    `uv sync --extra cu12 --group dev` alone REMOVES torch-harmonics/tensorly
