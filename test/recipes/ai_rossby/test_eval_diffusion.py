@@ -210,6 +210,31 @@ def test_qbo_validator_rejects_unknown_level():
         )
 
 
+def test_qbo_validator_resolves_level_values_to_channel_indices():
+    # Phase 12a.1 (amip_v2 bug-parity audit): upstream amip v1 selected its
+    # headline plot levels by hardcoded *position* into the 26-level list,
+    # which was off by one slot (z500 was actually z600, u250 was u300,
+    # t850 was t875) — fixed upstream in amip_v2 by resolving indices from
+    # the level values. Pin that our selection is by value: request levels
+    # out of storage order and feed a field whose level slots each carry
+    # their own pressure value, then assert the band mean returns exactly
+    # the requested pressures in the requested order.
+    v = QBOValidator(
+        _StubDataset(),
+        qbo_levels=(50.0, 10.0),  # reversed vs. storage order [10, 30, 50]
+        **_make_kwargs(horizon=6),
+    )
+    assert v.level_indices == [2, 0]
+
+    field = torch.zeros(2, len(_UPPER_VARS), len(_LEVELS), _H, _W)
+    for li, lvl in enumerate(_LEVELS):
+        field[:, :, li] = lvl
+    band = v._band_mean(field)
+    assert band.shape == (2, 2)
+    expected = torch.tensor([[50.0, 10.0], [50.0, 10.0]])
+    assert torch.allclose(band, expected)
+
+
 def test_qbo_validator_rejects_unknown_u_variable():
     with pytest.raises(ValueError, match="u_variable_name"):
         QBOValidator(

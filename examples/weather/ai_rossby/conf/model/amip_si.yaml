@@ -7,6 +7,11 @@
 # Channel groups come from the dataset's Zarr attrs at runtime; the
 # values here echo the AMIP default for documentation + so build_model
 # can size the wrapper without round-tripping through the dataset.
+#
+# FROZEN on the amip-v1 contract (Phase 12): upstream amip_v2 deleted this
+# family, so this config receives no amip_v2 rebaseline changes. Kept so
+# translated v1 checkpoints stay runnable. See
+# docs/dev/phase12_implementation_plan.md ("dual-contract seam").
 
 name: AmipDiTWrapper
 module: physicsnemo.experimental.models.amip_si

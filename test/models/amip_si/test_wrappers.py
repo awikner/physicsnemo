@@ -237,6 +237,33 @@ def test_rolling_dit_wrapper_with_rfm_scheduler():
     assert torch.isfinite(loss)
 
 
+def test_rolling_dit_wrapper_preserves_input_resolution():
+    # Phase 12a.2 (amip_v2 bug-parity audit): upstream amip v1's fast-store
+    # path bilinearly downsampled an already-coarse state a second time
+    # (fixed in amip_v2's merged data loader). Our recipe performs NO state
+    # resampling anywhere — resolution changes happen in the data store
+    # alone (Phase 12c pre-coarsened Zarr). Pin the two halves of that
+    # invariant on the supported (ERDM/RollingDiT) family:
+    #   1. wrapper forward output spatial dims == input spatial dims, and
+    #   2. the packed c_grid stream is on the same grid as the state
+    #      (the c_grid_downsample=1 alignment the wrapper defaults to).
+    torch.manual_seed(0)
+    w = RollingDiTWrapper(
+        **_kwargs(),
+        rolling_dit_kwargs=dict(dim=32, num_heads=4, num_blocks=1),
+    ).eval()
+    W = 3
+    sample = _window_sample(batch_size=1, W=W)
+    z = w.pack_window_state(sample)
+    c_grid = w.pack_window_c_grid(sample)
+    c_scalar = sample["calendar"]
+    assert c_grid.shape[-2:] == z.shape[-2:]  # forcings on the state grid
+    t = torch.rand(1, W)
+    with torch.no_grad():
+        out = w(z, t, c_grid=c_grid, c_scalar=c_scalar)
+    assert out.shape == z.shape  # no hidden resample inside model/wrapper
+
+
 # ---------------------------------------------------------------------------
 # ERDMWrapper — rolling window, UNet backbone
 # ---------------------------------------------------------------------------
@@ -471,6 +498,8 @@ def test_hydra_diffusion_configs_instantiate():
         ("amip_si_x", "si_x", "DynamicInterpolant"),
         ("amip_rfm", "rfm", "RFMScheduler"),
         ("amip_erdm", "erdm", "ERDMScheduler"),
+        # Phase 12a.3: amip_v2 rebaseline (RollingDiT forecaster, sigma_data=1.0)
+        ("amip_erdm_v2", "erdm_v2", "ERDMScheduler"),
         ("amip_x_ddc", "x_ddc", "DataDependentInterpolant"),
     ]
     for model_name, loss_name, expected_sched in pairs:

@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ERDM training loss — amip_v2 rebaseline (Phase 12a.3).
+#
+# Scheduler statistics mirror upstream amip_v2 ``configs/ERDM_co2.yaml``
+# @ ``e0b7b60``. Deltas vs. the v1-era ``loss/erdm.yaml``:
+#   * ``sigma_data: 1.0``  — matches unit-variance z-scored data (v1 kept
+#     the EDM default 0.5; upstream changelog flags 1.0 as the fix).
+#   * ``S_churn: 1.0`` / ``S_noise: 1.5`` — stochastic churn on (EDM
+#     Alg. 2); upstream's main dial against under-dispersed ensembles.
+#   * ``S_tmax: 1000`` — churn every window frame (upstream note: use
+#     S_tmin ~0.5 / S_tmax ~100 to restrict churn to the middle slots).
+#   * ``alpha: 0.0`` — temporally independent noise (upstream found AR(1)
+#     correlation did not help long-term predictions).
+#
+# ``window_size`` (W) must match the dataset's window stacking — see
+# the matching training config for the SequenceDataset wrap.
+
+_target_: physicsnemo.experimental.diffusion.ERDMScheduler
+window_size: 6
+num_steps: 2
+sigma_min: 0.002
+sigma_max: 500.0
+rho: -10.0
+sigma_data: 1.0
+P_mean: 2.0
+P_std: 1.2
+solver: heun
+S_churn: 1.0
+S_tmin: 0.0
+S_tmax: 1000.0
+S_noise: 1.5
+noise: gaussian
+l_max: 90
+noise_scale_path: null
+alpha: 0.0

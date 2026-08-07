@@ -5,6 +5,12 @@
 #
 # Vendored from the amip repo @ commit 497827e
 # (modules/diffusion/x_interpolant.py) for Phase 8a.
+#
+# FROZEN on the amip-v1 contract (Phase 12): upstream amip_v2 deleted this
+# family, so it receives no amip_v2 rebaseline changes (v2 level-major
+# channel packing, new projections, etc.). Kept so translated v1
+# checkpoints stay loadable. See docs/dev/phase12_implementation_plan.md
+# ("dual-contract seam").
 
 import logging
 

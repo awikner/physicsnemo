@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP ERDM forecaster — amip_v2 rebaseline (Phase 12a.3).
+#
+# Mirrors upstream amip_v2 ``configs/ERDM_co2.yaml`` @ ``e0b7b60``:
+# :class:`RollingDiTWrapper` (v2's forecaster backbone — upstream deleted
+# the ERDMUnet variant that ``model/amip_erdm.yaml`` wraps) at the
+# upstream size (dim 1024, 20 blocks, 16/8 heads) with the daily-avg
+# ERA5 variable set (6 surface / 5 upper-air x 26 levels / 15 diagnostic
+# = 151 state channels) on the 45x90 coarse forecaster grid.
+#
+# Pairs with the ``amip_dailyavg_coarse`` dataset from Phase 12c — the
+# daily-avg archive is NOT converted yet, so this config is not runnable
+# against real data until 12c lands. It instantiates cleanly (covered by
+# ``test_hydra_diffusion_configs_instantiate``) and pins the rebaselined
+# hyperparameters; pair it with ``loss=erdm_v2``.
+#
+# Not yet represented (upstream keys that need code, not config):
+#   * CO2 in the scalar slot (upstream: scalar_dim 3, c_grid_dim 5 with
+#     CO2 popped out of the grid by ``forcing_from_raw``) — Phase 12d.
+#     Until then CO2 rides in c_grid: scalar_dim 2, c_grid_dim 6.
+#   * ``input_embed`` (budget mode), ``output_head`` (mix mode),
+#     ``global_cond``, ``c_grid_cross_layers`` — Phase 12e.
+#   * Full-res c_grid with ``c_grid_downsample: 4`` (upstream keeps the
+#     boundary maps at 1 degree and downsamples them internally; whether
+#     our coarse store also carries coarse boundaries is a 12c decision).
+#     Until then both streams share the state grid: c_grid_downsample 1.
+
+name: RollingDiTWrapper
+module: physicsnemo.experimental.models.amip_si
+
+surface_variables:
+  - skin_temperature
+  - surface_pressure
+  - 2m_temperature
+  - 2m_specific_humidity
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - geopotential
+  - specific_humidity
+diagnostic_variables:
+  - USWRFtoa_24h
+  - ULWRFtoa_24h
+  - USWRFsfc_24h
+  - ULWRFsfc_24h
+  - DSWRFsfc_24h
+  - DLWRFsfc_24h
+  - LHTFLsfc_24h
+  - SHTFLsfc_24h
+  - PRATEsfc_24h
+  - hcc_24h
+  - lcc_24h
+  - mcc_24h
+  - mn2t_24h
+  - mx2t_24h
+  - mxtpr_24h
+constant_boundary_variables:
+  - geopotential_at_surface
+  - land_sea_mask
+varying_boundary_variables:
+  - global_mean_co2
+  - DSWRFtoa_24h_lead
+  - sea_surface_temperature_monthly_interp
+  - sea_ice_cover_monthly_interp
+
+levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
+         500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
+# The v2 forecaster's coarse grid (180x360 pre-coarsened x4, Phase 12c).
+horizontal_resolution: [45, 90]
+scalar_dim: 2
+
+rolling_dit_kwargs:
+  dim: 1024
+  num_heads: 16
+  temporal_num_heads: 8
+  num_blocks: 20
+  c_grid_embed_dim: 32
+  c_scalar_embed_dim: 16
+  c_grid_downsample: 1
+  dropout: 0.0

@@ -161,6 +161,13 @@ def _muon_groups(
 class AmipDiTWrapper(_PNeMoModule):
     r"""Single-step diffusion wrapper around :class:`AmipDiT`.
 
+    .. note:: **Frozen on the amip-v1 contract (Phase 12).** Upstream
+        amip_v2 deleted the single-step families (SI / SI_X / EDM); this
+        wrapper keeps its v1 variable-major upper-air packing and is
+        excluded from every amip_v2 rebaseline change so translated v1
+        checkpoints stay loadable. See
+        ``docs/dev/phase12_implementation_plan.md`` ("dual-contract seam").
+
     Pack / unpack semantics — see the module docstring. The wrapper
     instance is callable with the bare-backbone signature
     ``forward(x_noised, cond, t, c_grid, c_scalar)``, so
@@ -532,7 +539,17 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
 
 
 class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
-    r"""Rolling-window diffusion wrapper around :class:`ERDM` (UNet variant)."""
+    r"""Rolling-window diffusion wrapper around :class:`ERDM` (UNet variant).
+
+    .. note:: **Frozen on the amip-v1 contract (Phase 12).** Upstream
+        amip_v2 deleted the ERDMUnet backbone (the ERDM *scheduler*
+        survives, paired with :class:`RollingDiT` — see
+        ``conf/model/amip_erdm_v2.yaml``). This wrapper keeps its v1
+        variable-major upper-air packing and is excluded from every
+        amip_v2 rebaseline change so translated v1 checkpoints stay
+        loadable. See ``docs/dev/phase12_implementation_plan.md``
+        ("dual-contract seam").
+    """
 
     def __init__(
         self,

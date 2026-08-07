@@ -4,6 +4,11 @@
 #
 # AMIP ERDM — :class:`ERDMWrapper` around the ADM-style :class:`ERDM` UNet
 # with causal temporal attention.
+#
+# FROZEN on the amip-v1 contract (Phase 12): upstream amip_v2 deleted this
+# family, so this config receives no amip_v2 rebaseline changes. Kept so
+# translated v1 checkpoints stay runnable. See
+# docs/dev/phase12_implementation_plan.md ("dual-contract seam").
 
 name: ERDMWrapper
 module: physicsnemo.experimental.models.amip_si

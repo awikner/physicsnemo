@@ -6,6 +6,10 @@
 #
 # ``window_size`` (W) must match the dataset's window stacking — see
 # the matching training config for the SequenceDataset wrap.
+#
+# SUPERSEDED by loss/erdm_v2.yaml (Phase 12a.3): the ERDM scheduler itself
+# survives in amip_v2, but these are the v1-era statistics (sigma_data 0.5,
+# no churn, alpha 1.0). Kept for reproducing v1-checkpoint-era runs.
 
 _target_: physicsnemo.experimental.diffusion.ERDMScheduler
 window_size: 6
