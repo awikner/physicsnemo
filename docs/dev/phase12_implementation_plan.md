@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a complete (2026-08-07); 12b+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12b complete (2026-08-07; 12b cluster steps pending); 12c+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -237,6 +237,57 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
    the v1-layout model fed permuted inputs).
 
 **Effort**: ~1.5 days.
+
+**12b delivered** *(2026-08-07; code complete, cluster steps pending)*:
+
+- **Design deviation — layout kwarg instead of weight permutation.** The
+  migrated wrappers gained a ``channel_layout`` constructor kwarg that
+  travels with the ``.mdlus`` args: ``"v2"`` (default; upstream amip_v2:
+  ``[surface | diag | upper_air]`` with the upper-air block level-major,
+  1000 hPa first; c_grid ``[varying | constant]``), ``"v1"`` (upstream
+  v1: same group order, upper-air variable-major), and ``"fork"``
+  (RollingDiTWrapper only — the historical Phase-8 order). The
+  translator's ``--source-contract {v1,v2}`` flag simply sets the kwarg,
+  so runtime packing always matches the trained channel-indexed weights —
+  no weight surgery, and checkpoint provenance is self-describing.
+- **Discovered latent Phase-8e bug (needs user decision).** The fork's
+  Phase-8 wrappers pack ``[surface | upper_air | diag]`` with c_grid
+  ``[constant | varying]`` — but real upstream-v1 checkpoints were
+  trained on ``[surface | diag | upper_air]`` / ``[varying | constant]``
+  (v1 ``assemble_input`` / ``assemble_forcing``), and the translator
+  never permuted. **Translated v1 checkpoints for the SI/SI_X/EDM (AmipDiT)
+  and ERDM-UNet families therefore run with permuted channels at the
+  input/output projections.** RollingDiT-family and x_DDC translations
+  are fixed by ``--source-contract v1``; the frozen ``AmipDiTWrapper`` /
+  ``ERDMWrapper`` now log a loud warning at translation time. Fixing the
+  frozen families would mean giving them the same layout kwarg —
+  pending the user's call (the "keep frozen" decision predates this
+  finding).
+- Mixin (`_RollingPackUnpackMixin`) is layout-aware with class default
+  ``"fork"`` → the frozen ``ERDMWrapper`` is bit-identical to pre-12b
+  (pinned by test); ``RollingDiTWrapper`` defaults ``"v2"`` with
+  ``conf/model/amip_rfm.yaml`` pinning ``channel_layout: fork`` (frozen
+  behavior preserved) and ``amip_erdm_v2.yaml`` / ``amip_x_ddc.yaml``
+  declaring ``v2`` explicitly. ``XDDCWrapper`` accepts ``{"v1","v2"}``
+  (its group order always matched upstream). ``CombinedModule`` needed
+  no changes — it converts via ``unpack → dict → pack``, so it inherits
+  layout correctness from its sub-wrappers.
+- ``state_layout()`` on the rolling mixin + ``XDDCWrapper`` (upstream
+  ``common/utils.py:state_layout`` mirror; ``nocean=0`` until 12f).
+- **Tests** (18 new; 278 total green):
+  ``test/models/amip_si/test_channel_layouts.py`` — bit-parity of v1/v2
+  packs against vendored upstream ``assemble_input`` references,
+  fork-layout bit-identity, c_grid ``[varying | constant]`` parity,
+  pack/unpack round-trips for every layout, ``.mdlus`` roundtrip
+  preserving ``channel_layout``, invalid-layout rejection, and the
+  fixed v1↔v2 channel permutation property the translator relies on;
+  plus 3 translator tests (default v1, explicit v2, frozen-target
+  warning + no kwarg).
+- **Cluster-bound follow-ups** (need Delta/Midway access): re-translate
+  the existing v1 Lightning ckpts with ``--source-contract v1`` and
+  live-validate forward equivalence; Delta A40 smoke of a v2-layout
+  mini-epoch (12a/12b changed no GPU kernels — pack order only — so the
+  existing smoke set covers wiring, but the contract asks for one run).
 
 ### 12c — Daily-avg conversion + pre-coarsened 45×90 Zarr store
 

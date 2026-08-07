@@ -385,8 +385,28 @@ def _xddc_wrapper_kwargs_from_hparams(blob: dict) -> dict:
     }
 
 
+# Wrapper classes migrated to the amip_v2 channel contract (Phase 12b) —
+# these accept a ``channel_layout`` constructor kwarg, which the translator
+# sets from ``--source-contract`` so the packing order at runtime matches
+# the order the checkpoint's channel-indexed weights were trained on.
+_LAYOUT_AWARE_WRAPPERS = ("RollingDiTWrapper", "XDDCWrapper")
+
+# Frozen v1-family wrappers (Phase 12 dual-contract seam). These pack in
+# the historical fork order ([surface | upper_air | diag], c_grid
+# [constant | varying]) which does NOT match the order real upstream-v1
+# checkpoints were trained on ([surface | diag | upper_air], c_grid
+# [varying | constant]) — a latent Phase-8e issue discovered during 12b.
+# The translator warns loudly; fixing the frozen wrappers is pending a
+# user decision (see docs/dev/phase12_implementation_plan.md).
+_FROZEN_FORK_LAYOUT_WRAPPERS = ("AmipDiTWrapper", "ERDMWrapper")
+
+
 def wrapper_kwargs_from_hparams(
-    blob: dict, target_class_name: str, *, source_model_name: Optional[str] = None
+    blob: dict,
+    target_class_name: str,
+    *,
+    source_model_name: Optional[str] = None,
+    source_contract: str = "v1",
 ) -> dict:
     """Extract wrapper constructor kwargs from a Lightning hparams blob.
 
@@ -410,8 +430,30 @@ def wrapper_kwargs_from_hparams(
     to :func:`_xddc_wrapper_kwargs_from_hparams` instead of the generic
     logic below.
     """
+    if source_contract not in ("v1", "v2"):
+        raise ValueError(
+            f"source_contract={source_contract!r}; expected 'v1' or 'v2'"
+        )
+
     if target_class_name == "XDDCWrapper":
-        return _xddc_wrapper_kwargs_from_hparams(blob)
+        kwargs = _xddc_wrapper_kwargs_from_hparams(blob)
+        kwargs["channel_layout"] = source_contract
+        return kwargs
+
+    if target_class_name in _FROZEN_FORK_LAYOUT_WRAPPERS:
+        logger.warning(
+            "target wrapper %s is FROZEN on the fork channel layout "
+            "([surface | upper_air | diag], c_grid [constant | varying]), "
+            "which does not match the %s contract this checkpoint was "
+            "trained on ([surface | diag | upper_air], c_grid "
+            "[varying | constant]). The weights will load, but channel-"
+            "indexed input/output projections will see permuted channels "
+            "at runtime. See docs/dev/phase12_implementation_plan.md "
+            "(dual-contract seam) — pending decision on fixing the "
+            "frozen families.",
+            target_class_name,
+            source_contract,
+        )
 
     hp = blob.get("hyper_parameters", None)
     if hp is None:
@@ -506,7 +548,7 @@ def wrapper_kwargs_from_hparams(
     # resolution, which matches what callers should be feeding for
     # c_grid (the boundary stream) in the legacy two-resolution layout.
     backbone_kwargs_name = _WRAPPER_BACKBONE_KWARGS_KEY[target_class_name]
-    return {
+    kwargs = {
         "surface_variables": list(data.get("surface_variables", [])),
         "upper_air_variables": list(data.get("upper_air_variables", [])),
         "diagnostic_variables": diagnostic_variables,
@@ -517,6 +559,11 @@ def wrapper_kwargs_from_hparams(
         "scalar_dim": int(backbone_cfg.pop("scalar_dim", 2)),
         backbone_kwargs_name: backbone_cfg,
     }
+    if target_class_name in _LAYOUT_AWARE_WRAPPERS:
+        # Pin the packing contract the checkpoint was trained on — it
+        # travels with the .mdlus args so inference packs identically.
+        kwargs["channel_layout"] = source_contract
+    return kwargs
 
 
 def _filter_unknown_backbone_kwargs(
@@ -557,6 +604,7 @@ def build_target_wrapper(
     blob: Optional[dict] = None,
     target_class: Optional[str] = None,
     source_model_name: Optional[str] = None,
+    source_contract: str = "v1",
 ):
     """Instantiate a fresh wrapper.
 
@@ -611,7 +659,10 @@ def build_target_wrapper(
             f"{sorted(classes)}"
         )
     kwargs = wrapper_kwargs_from_hparams(
-        blob, target_class, source_model_name=source_model_name
+        blob,
+        target_class,
+        source_model_name=source_model_name,
+        source_contract=source_contract,
     )
     # Filter any backbone kwargs the vendored class doesn't accept (e.g.
     # late-May ``unpatch: vanilla`` knobs in SI_V_new). We need to know
@@ -707,6 +758,22 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--source-contract",
+        type=str,
+        default="v1",
+        choices=("v1", "v2"),
+        help=(
+            "Channel contract the checkpoint was trained on (Phase 12b). "
+            "'v1' (default) = upstream amip v1: upper-air variable-major in "
+            "config level order. 'v2' = upstream amip_v2: upper-air "
+            "level-major, 1000 hPa first. Sets the target wrapper's "
+            "channel_layout so runtime packing matches the trained "
+            "channel-indexed weights. Only meaningful for layout-aware "
+            "targets (RollingDiTWrapper, XDDCWrapper); frozen v1-family "
+            "wrappers trigger a layout-mismatch warning instead."
+        ),
+    )
+    p.add_argument(
         "--prefer-live",
         action="store_true",
         help=(
@@ -770,10 +837,24 @@ def main(argv: Optional[list] = None) -> int:
             blob=blob,
             target_class=args.target_class,
             source_model_name=src_model_name,
+            source_contract=args.source_contract,
         )
         config_source = "ckpt hyper_parameters (auto-derived)"
     tgt_class_name = type(model).__name__
     logger.info("target wrapper class=%s (from %s)", tgt_class_name, config_source)
+    if (
+        tgt_class_name in _LAYOUT_AWARE_WRAPPERS
+        and getattr(model, "channel_layout", None) != args.source_contract
+    ):
+        logger.warning(
+            "target wrapper channel_layout=%r does not match "
+            "--source-contract=%r — the checkpoint's channel-indexed "
+            "weights will see permuted channels at runtime. If the wrapper "
+            "came from a YAML, set channel_layout: %s there.",
+            getattr(model, "channel_layout", None),
+            args.source_contract,
+            args.source_contract,
+        )
     if not args.no_cross_check:
         cross_check_compatibility(src_model_name, tgt_class_name)
 

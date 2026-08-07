@@ -75,6 +75,9 @@ levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
 # The v2 forecaster's coarse grid (180x360 pre-coarsened x4, Phase 12c).
 horizontal_resolution: [45, 90]
 scalar_dim: 2
+# Phase 12b: amip_v2 packing — state [surface | diag | upper_air] with the
+# upper-air block level-major (1000 hPa first); c_grid [varying | constant].
+channel_layout: v2
 
 rolling_dit_kwargs:
   dim: 1024

@@ -117,6 +117,60 @@ def _unflatten_upper_air(
 
 
 # ---------------------------------------------------------------------------
+# Channel layouts (Phase 12b) — see docs/dev/phase12_implementation_plan.md.
+#
+# ``"fork"``  the Phase-8 fork order: state ``[surface | upper_air | diag]``
+#             with the upper-air block variable-major in config level order,
+#             c_grid ``[constant | varying]``. No upstream checkpoint was
+#             trained on this order — it exists for fork-trained artifacts
+#             and the frozen v1-family wrappers.
+# ``"v1"``    upstream amip v1 (``common/utils.py @ 497827e``): state
+#             ``[surface | diagnostic | upper_air]`` with the upper-air
+#             block variable-major in config level order, c_grid
+#             ``[varying | constant]`` (``assemble_forcing(forcing,
+#             invariant)``). Real v1-trained checkpoints expect this.
+# ``"v2"``    upstream amip_v2 (@ ``e0b7b60``): same group order as v1 but
+#             the upper-air block is LEVEL-MAJOR with the level axis
+#             flipped so 1000 hPa leads::
+#
+#                 rearrange(ua.flip(level_axis), "... c l h w -> ... (l c) h w")
+# ---------------------------------------------------------------------------
+
+_CHANNEL_LAYOUTS = ("fork", "v1", "v2")
+
+
+def _flatten_upper_air_v2(upper_air: torch.Tensor) -> torch.Tensor:
+    """amip_v2 upper-air pack: level-major, level axis flipped.
+
+    ``(*B, C_u, L, H, W) -> (*B, L * C_u, H, W)`` — bit-parity with
+    upstream ``assemble_input``'s
+    ``rearrange(multilevel.flip(2), "b c l h w -> b (l c) h w")``.
+    """
+    leading = upper_air.shape[:-4]
+    Cu, L, H, Wd = upper_air.shape[-4:]
+    flipped = upper_air.flip(-3)
+    return flipped.transpose(-4, -3).reshape(*leading, L * Cu, H, Wd)
+
+
+def _unflatten_upper_air_v2(
+    flat: torch.Tensor, num_vars: int, num_levels: int
+) -> torch.Tensor:
+    """Inverse of :func:`_flatten_upper_air_v2` (back to config level order)."""
+    leading = flat.shape[:-3]
+    _, H, Wd = flat.shape[-3:]
+    stacked = flat.reshape(*leading, num_levels, num_vars, H, Wd)
+    return stacked.transpose(-4, -3).flip(-3)
+
+
+def _validate_channel_layout(layout: str, allowed: tuple[str, ...]) -> str:
+    if layout not in allowed:
+        raise ValueError(
+            f"channel_layout={layout!r} not supported; expected one of {allowed}"
+        )
+    return layout
+
+
+# ---------------------------------------------------------------------------
 # Muon param-group helper (shared) — see F1 in phase8f_completion_plan.md.
 # ---------------------------------------------------------------------------
 
@@ -371,7 +425,46 @@ class AmipDiTWrapper(_PNeMoModule):
 
 
 class _RollingPackUnpackMixin:
-    """Shared pack/unpack for rolling backbones."""
+    """Shared pack/unpack for rolling backbones.
+
+    Layout-aware (Phase 12b): the ``channel_layout`` attribute selects
+    the packing contract (see ``_CHANNEL_LAYOUTS``). The class default
+    is ``"fork"`` — the historical Phase-8 order — so the frozen
+    :class:`ERDMWrapper` is bit-identical to its pre-12b behavior;
+    :class:`RollingDiTWrapper` exposes it as a constructor kwarg
+    defaulting to ``"v2"``.
+    """
+
+    channel_layout: str = "fork"
+
+    def state_layout(self) -> dict[str, int]:
+        r"""Block sizes of the packed channel axis (upstream ``state_layout``).
+
+        Mirrors amip_v2 ``common/utils.py:state_layout`` so a
+        contract-aware projection (Phase 12e) can address the blocks.
+        ``nocean`` is fixed at 0 until Phase 12f (ocean-state prediction).
+        """
+        return {
+            "nsurface": self.num_surface,
+            "ndiagnostic": self.num_diagnostic,
+            "nlevels": self.num_levels,
+            "n_upper_air": self.num_upper_air_vars,
+            "nocean": 0,
+        }
+
+    def _flatten_ua(self, upper_air: torch.Tensor) -> torch.Tensor:
+        if self.channel_layout == "v2":
+            return _flatten_upper_air_v2(upper_air)
+        return _flatten_upper_air(upper_air)
+
+    def _unflatten_ua(self, flat: torch.Tensor) -> torch.Tensor:
+        if self.channel_layout == "v2":
+            return _unflatten_upper_air_v2(
+                flat, self.num_upper_air_vars, self.num_levels
+            )
+        return _unflatten_upper_air(
+            flat, self.num_upper_air_vars, self.num_levels
+        )
 
     def pack_window_state(
         self, window_sample: dict[str, torch.Tensor]
@@ -384,54 +477,95 @@ class _RollingPackUnpackMixin:
         :class:`SequenceDataset` helper in
         :mod:`physicsnemo.experimental.datapipes.climate.sequence` produces
         this layout from per-frame samples.
+
+        Group order is layout-dependent: ``[surface | upper_air | diag]``
+        for ``"fork"``, ``[surface | diag | upper_air]`` for ``"v1"`` /
+        ``"v2"`` (upstream ``assemble_input``).
         """
         parts: list[torch.Tensor] = [window_sample["surface_in"]]
-        if self.num_upper_air_vars > 0:
-            parts.append(_flatten_upper_air(window_sample["upper_air_in"]))
-        if self.num_diagnostic > 0:
-            parts.append(window_sample["diagnostic"])
+        if self.channel_layout == "fork":
+            if self.num_upper_air_vars > 0:
+                parts.append(self._flatten_ua(window_sample["upper_air_in"]))
+            if self.num_diagnostic > 0:
+                parts.append(window_sample["diagnostic"])
+        else:  # "v1" / "v2" — upstream group order
+            if self.num_diagnostic > 0:
+                parts.append(window_sample["diagnostic"])
+            if self.num_upper_air_vars > 0:
+                parts.append(self._flatten_ua(window_sample["upper_air_in"]))
         return torch.cat(parts, dim=-3)
 
     def unpack_window_state(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         r"""``x [B, W, C, H, W] -> {surface_in, upper_air_in, diagnostic}``."""
+        n_ua = self.num_upper_air_vars * self.num_levels
         idx = 0
         out: dict[str, torch.Tensor] = {}
         out["surface_in"] = x.narrow(-3, idx, self.num_surface)
         idx += self.num_surface
-        if self.num_upper_air_vars > 0:
-            ua_flat = x.narrow(
-                -3, idx, self.num_upper_air_vars * self.num_levels
-            )
-            out["upper_air_in"] = _unflatten_upper_air(
-                ua_flat, self.num_upper_air_vars, self.num_levels
-            )
-            idx += self.num_upper_air_vars * self.num_levels
-        if self.num_diagnostic > 0:
-            out["diagnostic"] = x.narrow(-3, idx, self.num_diagnostic)
-            idx += self.num_diagnostic
+        if self.channel_layout == "fork":
+            if self.num_upper_air_vars > 0:
+                out["upper_air_in"] = self._unflatten_ua(x.narrow(-3, idx, n_ua))
+                idx += n_ua
+            if self.num_diagnostic > 0:
+                out["diagnostic"] = x.narrow(-3, idx, self.num_diagnostic)
+                idx += self.num_diagnostic
+        else:  # "v1" / "v2"
+            if self.num_diagnostic > 0:
+                out["diagnostic"] = x.narrow(-3, idx, self.num_diagnostic)
+                idx += self.num_diagnostic
+            if self.num_upper_air_vars > 0:
+                out["upper_air_in"] = self._unflatten_ua(x.narrow(-3, idx, n_ua))
+                idx += n_ua
         return out
 
     def pack_window_c_grid(
         self, window_sample: dict[str, torch.Tensor]
     ) -> torch.Tensor:
-        r"""``window_sample -> c_grid [B, W, C_g, H, W]``."""
+        r"""``window_sample -> c_grid [B, W, C_g, H, W]``.
+
+        Order is layout-dependent: ``[constant | varying]`` for
+        ``"fork"``; ``[varying | constant]`` for ``"v1"`` / ``"v2"``
+        (upstream ``assemble_forcing(forcing, invariant)``).
+        """
         if self.c_grid_dim == 0:
             return None
         surface_in = window_sample.get("surface_in")
         batch_shape = surface_in.shape[:-3] if surface_in is not None else ()
         parts: list[torch.Tensor] = []
+        const = None
         if self.num_constant_boundary > 0:
             const = _broadcast_constant(
                 window_sample["constant_boundary"], batch_shape
             )
-            parts.append(const)
-        if self.num_varying_boundary > 0:
-            parts.append(window_sample["varying_boundary"])
+        if self.channel_layout == "fork":
+            if const is not None:
+                parts.append(const)
+            if self.num_varying_boundary > 0:
+                parts.append(window_sample["varying_boundary"])
+        else:  # "v1" / "v2" — forcing (varying) first, invariant (constant) last
+            if self.num_varying_boundary > 0:
+                parts.append(window_sample["varying_boundary"])
+            if const is not None:
+                parts.append(const)
         return torch.cat(parts, dim=-3)
 
 
 class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
     r"""Rolling-window diffusion wrapper around :class:`RollingDiT`.
+
+    .. note:: **Channel layout (Phase 12b).** ``channel_layout`` selects
+        the packing contract and travels with the ``.mdlus`` args:
+
+        * ``"v2"`` (default) — upstream amip_v2: state ``[surface | diag |
+          upper_air]`` with the upper-air block level-major, 1000 hPa
+          first; c_grid ``[varying | constant]``.
+        * ``"v1"`` — upstream amip v1: same group order, upper-air
+          variable-major in config level order. Use for checkpoints
+          translated from real v1 Lightning ckpts
+          (``--source-contract v1``).
+        * ``"fork"`` — the Phase-8 fork order (``[surface | upper_air |
+          diag]``, c_grid ``[constant | varying]``). Pinned by the frozen
+          ``conf/model/amip_rfm.yaml``; no upstream checkpoint matches it.
 
     Same channel-group bookkeeping as :class:`AmipDiTWrapper` but the pack
     operates on ``(B, W, ...)`` window samples (drive via
@@ -449,9 +583,13 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         levels: Sequence[float],
         horizontal_resolution: Sequence[int],
         scalar_dim: int = 2,
+        channel_layout: str = "v2",
         rolling_dit_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
+        self.channel_layout = _validate_channel_layout(
+            channel_layout, _CHANNEL_LAYOUTS
+        )
         self.surface_variables = list(surface_variables)
         self.upper_air_variables = list(upper_air_variables)
         self.diagnostic_variables = list(diagnostic_variables)
@@ -550,6 +688,9 @@ class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         loadable. See ``docs/dev/phase12_implementation_plan.md``
         ("dual-contract seam").
     """
+
+    # Frozen on the historical fork packing (see _RollingPackUnpackMixin).
+    channel_layout = "fork"
 
     def __init__(
         self,
@@ -686,6 +827,13 @@ class XDDCWrapper(_PNeMoModule):
     ``(surface, upper_air, diagnostic)`` order. Getting this order
     right matters for loading real x_DDC checkpoint weights correctly.
 
+    .. note:: **Channel layout (Phase 12b).** ``channel_layout`` selects
+        the upper-air block layout inside that group order and travels
+        with the ``.mdlus`` args: ``"v2"`` (default) = level-major,
+        1000 hPa first (upstream amip_v2); ``"v1"`` = variable-major in
+        config level order (real v1 x_DDC checkpoints —
+        ``--source-contract v1`` at translation time).
+
     Parameters
     ----------
     surface_variables, upper_air_variables, diagnostic_variables : list[str]
@@ -714,9 +862,17 @@ class XDDCWrapper(_PNeMoModule):
         levels: Sequence[float],
         horizontal_resolution: Sequence[int],
         downsample_factor: int = 4,
+        channel_layout: str = "v2",
         unet_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
+        # x_DDC's group order always matched upstream ([surface | diag |
+        # upper_air]), so only the upper-air block layout varies: "v1" =
+        # variable-major config order, "v2" = level-major 1000-hPa-first.
+        # There is no "fork" layout here.
+        self.channel_layout = _validate_channel_layout(
+            channel_layout, ("v1", "v2")
+        )
         self.surface_variables = list(surface_variables)
         self.upper_air_variables = list(upper_air_variables)
         self.diagnostic_variables = list(diagnostic_variables)
@@ -756,17 +912,37 @@ class XDDCWrapper(_PNeMoModule):
     # (surface, upper_air, diagnostic) order the other wrappers use.
     # ------------------------------------------------------------------ #
 
+    def state_layout(self) -> dict[str, int]:
+        r"""Block sizes of the packed channel axis (upstream ``state_layout``)."""
+        return {
+            "nsurface": self.num_surface,
+            "ndiagnostic": self.num_diagnostic,
+            "nlevels": self.num_levels,
+            "n_upper_air": self.num_upper_air_vars,
+            "nocean": 0,
+        }
+
     def pack_state(self, sample: dict[str, torch.Tensor]) -> torch.Tensor:
         r"""``sample -> x [B, C, H, W]`` (concat surface + diagnostic + upper_air)."""
+        flatten_ua = (
+            _flatten_upper_air_v2
+            if self.channel_layout == "v2"
+            else _flatten_upper_air
+        )
         parts: list[torch.Tensor] = [sample["surface_in"]]
         if self.num_diagnostic > 0:
             parts.append(sample["diagnostic"])
         if self.num_upper_air_vars > 0:
-            parts.append(_flatten_upper_air(sample["upper_air_in"]))
+            parts.append(flatten_ua(sample["upper_air_in"]))
         return torch.cat(parts, dim=-3)
 
     def unpack_state(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         r"""``x [B, C, H, W] -> {surface_in, diagnostic, upper_air_in}``."""
+        unflatten_ua = (
+            _unflatten_upper_air_v2
+            if self.channel_layout == "v2"
+            else _unflatten_upper_air
+        )
         idx = 0
         out: dict[str, torch.Tensor] = {}
         out["surface_in"] = x.narrow(-3, idx, self.num_surface)
@@ -778,7 +954,7 @@ class XDDCWrapper(_PNeMoModule):
             ua_flat = x.narrow(
                 -3, idx, self.num_upper_air_vars * self.num_levels
             )
-            out["upper_air_in"] = _unflatten_upper_air(
+            out["upper_air_in"] = unflatten_ua(
                 ua_flat, self.num_upper_air_vars, self.num_levels
             )
             idx += self.num_upper_air_vars * self.num_levels

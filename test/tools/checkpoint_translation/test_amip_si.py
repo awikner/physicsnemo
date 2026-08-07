@@ -288,6 +288,40 @@ def test_wrapper_kwargs_from_hparams_rolling_uses_rolling_dit_kwargs():
 
 
 # ---------------------------------------------------------------------------
+# Phase 12b: --source-contract -> channel_layout plumbing.
+# ---------------------------------------------------------------------------
+
+
+def test_wrapper_kwargs_source_contract_sets_channel_layout():
+    blob = _make_blob("RFM")
+    # Default is v1 — every real checkpoint today is v1-trained.
+    kwargs = wrapper_kwargs_from_hparams(blob, "RollingDiTWrapper")
+    assert kwargs["channel_layout"] == "v1"
+    kwargs = wrapper_kwargs_from_hparams(
+        blob, "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kwargs["channel_layout"] == "v2"
+
+
+def test_wrapper_kwargs_source_contract_rejects_unknown():
+    blob = _make_blob("RFM")
+    with pytest.raises(ValueError, match="source_contract"):
+        wrapper_kwargs_from_hparams(
+            blob, "RollingDiTWrapper", source_contract="fork"
+        )
+
+
+def test_wrapper_kwargs_frozen_target_gets_no_layout_but_warns(caplog):
+    import logging
+
+    blob = _make_blob("SI_X")
+    with caplog.at_level(logging.WARNING):
+        kwargs = wrapper_kwargs_from_hparams(blob, "AmipDiTWrapper")
+    assert "channel_layout" not in kwargs
+    assert any("FROZEN" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # F2: wCO2 name-aware varying_boundary_variables trim heuristic.
 # ---------------------------------------------------------------------------
 
