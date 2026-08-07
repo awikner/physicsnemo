@@ -118,9 +118,12 @@ unit tests (``test/recipes/ai_rossby/test_wandb_ddp_guard.py`` — guard
 on/off per world_size, escape hatch, rank silence, enabled=False
 short-circuit, missing-key default), smoke sbatch's ``wandb.enabled=false``
 override removed (guard covers it), ``sfno-ddp-requirements.md`` §2 +
-CLAUDE.md gotcha updated. 232 recipe/amip tests green. **Item 7
-(palooza heads-up) is on the user** — the guard lands with this branch's
-merge, not before.
+CLAUDE.md gotcha updated. 232 recipe/amip tests green.
+**Live-validated on the exact hang-repro config** (Delta job 20921623,
+2×A40, no manual wandb override): guard warning logged, DDP init
+cleared in ~14 s, smoke passed end-to-end. **Item 7 (palooza heads-up)
+is on the user** — the guard lands with this branch's merge, not
+before.
 
 ### W2 — Root-cause isolation matrix (Delta, one sbatch, ~1 GPU-hour)
 
