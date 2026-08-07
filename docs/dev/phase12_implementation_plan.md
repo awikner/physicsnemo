@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12b complete (2026-08-07; 12b cluster steps pending); 12c+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12b complete incl. cluster validation (2026-08-07); 12c+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -287,11 +287,42 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   fixed v1↔v2 channel permutation property the translator relies on;
   plus 3 translator tests (default v1, explicit v2, frozen-target
   warning + no kwarg).
-- **Cluster-bound follow-ups** (need Delta/Midway access): re-translate
-  the existing v1 Lightning ckpts with ``--source-contract v1`` and
-  live-validate forward equivalence; Delta A40 smoke of a v2-layout
-  mini-epoch (12a/12b changed no GPU kernels — pack order only — so the
-  existing smoke set covers wiring, but the contract asks for one run).
+- **Cluster follow-ups — DELIVERED** *(2026-08-07, Delta jobs
+  20916803 → 20920825, worktree
+  ``/work/nvme/bdiu/awikner/physicsnemo-amip-v2``)*:
+  * **Live re-translation sweep (job 20916803): 10 PASSED + 1
+    documented XFAIL** (``SI_V_new``, pre-497827e ScalarEmbedder) over
+    every real v1 Lightning ckpt at
+    ``/work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs/`` —
+    translate → ``.mdlus`` → reload → finite forward, with
+    ``channel_layout="v1"`` provenance asserted through the roundtrip.
+    (No stale persisted ``.mdlus`` artifacts existed to regenerate; the
+    sweep is the re-translation validation.)
+  * **v2-layout GPU smoke (job 20920825): PASSED** —
+    ``RollingDiTWrapper(channel_layout=v2)`` + ``loss=erdm_v2``
+    (sigma_data 1.0, churn on) rolling W=3 stage on the real 1981 AMIP
+    Zarr, 2×A40 DDP, 20 capped iterations, finite losses, checkpoint
+    saved, 8.1 GB peak. An uncapped probe (job 20919698) ran 200+
+    batches with finite fluctuating losses before being cancelled.
+  * **Four latent bugs found & fixed by the smoke campaign** (the
+    rolling-window branch of ``train_diffusion.py`` had *never*
+    executed): (1) ``SequenceDataset`` constructed with kwargs it
+    doesn't accept; (2) ``_pack_window`` read bare keys where the
+    dataset emits ``{key}_seq`` stacks, and ``calendar`` was missing
+    from ``_SEQ_KEYS`` entirely; (3) no DDP sampler in window mode
+    (every rank saw identical batches) — now a ``DistributedSampler``;
+    (4) ``training.stages[*].max_iterations`` silently ignored by the
+    diffusion trainer. Plus an infra recurrence: **wandb under DDP
+    still hangs the NCCL watchdog** on the diffusion path (the
+    regression-2 signature from commit ``1a1b843b``; the later
+    every-rank strategy from ``fad7c0bb`` did not prevent it — rank 0
+    SIGABRT after 480 s, peer rank reports ``value cannot be converted
+    to type int without overflow``). The smoke runs
+    ``wandb.enabled=false``; **flag for the ai-rossbypalooza team**:
+    any multi-GPU diffusion run should disable wandb or revisit the
+    auto-disable guard.
+  * Delta venv note: ``muon`` had been pruned from the shared venv by a
+    ``uv sync`` (the documented gotcha) — reinstalled.
 
 ### 12c — Daily-avg conversion + pre-coarsened 45×90 Zarr store
 
