@@ -77,8 +77,14 @@ cd examples/weather/ai_rossby
 #                                   (RollingDiT is unpatched: 64800
 #                                   tokens/frame at 180x360)
 # - tiny backbone + capped iterations -> fits 2xA40, finishes in minutes
+# - wandb.enabled=false          -> jobs 20916803/20918380 hit the NCCL-
+#                                   watchdog GIL hang from wandb's background
+#                                   threads under DDP (the regression-2
+#                                   signature from commit 1a1b843b); the
+#                                   smoke needs console logging only
 torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_rfm \
+    wandb.enabled=false \
     model.channel_layout=v2 \
     loss=erdm_v2 \
     loss.window_size=3 \
