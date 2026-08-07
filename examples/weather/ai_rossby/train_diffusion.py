@@ -590,8 +590,21 @@ def main(cfg: DictConfig) -> None:
             f"sched={type(scheduler_loss).__name__}"
         )
 
+        # Per-stage iteration cap (mirrors train.py's handling — this key
+        # was silently ignored by the diffusion trainer before Phase 12b;
+        # found when the v2-layout smoke ran a full 729-batch epoch past
+        # its 20-iteration override).
+        max_iterations = stage.get("max_iterations", float("inf"))
+        max_iterations = (
+            int(max_iterations) if max_iterations != float("inf") else None
+        )
+        stage_iter = 0
+
         for _ in range(stage_epochs):
             for batch_idx, sample in enumerate(loader):
+                if max_iterations is not None and stage_iter >= max_iterations:
+                    break
+                stage_iter += 1
                 losses = _train_step(
                     model=model,
                     scheduler_loss=scheduler_loss,
