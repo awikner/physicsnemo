@@ -124,7 +124,7 @@ datasets:
 
   amip_dailyavg:                               # daily-avg ERA5 archive amip_v2 trains on (Phase 12c)
     subdir: amip_dailyavg
-    target_years: "1978-2024"
+    target_years: "1978-2022"                   # 2023-2024 raw lack global_mean_co2 (probed 2026-08-08) — same gap as amip
     note: "6h-cadence daily-avg/daily-window fields (*_24h diagnostics,
       *_monthly_interp SST/ice), 180x360, 26 hPa levels. Role lists = the
       amip_v2 ERDM_co2 151-channel contract; archive superset preserved via
@@ -134,11 +134,13 @@ datasets:
     raw_source:                                 # per-timestep {year}_{idx:04d}.h5, /input group
       cluster: derecho                          # RETIRING — convert while reachable
       path: /glade/derecho/scratch/awikner/ERA5/h5_dailyavg
-    copies: []                                  # conversion pending (12c.12)
+    stage_dest: amip_dailyavg                   # raw lands at <raw_root>/amip_dailyavg for conversion
+    copies:
+      - {cluster: derecho, years: "1981"}       # 12c.12 pipeline-validation year (jobs 7046240/7046750)
 
   amip_dailyavg_coarse:                        # 45x90 pre-coarsened forecaster store (Phase 12c)
     subdir: amip_dailyavg_coarse
-    target_years: "1978-2024"
+    target_years: "1978-2022"
     note: "amip_dailyavg bilinearly coarsened x4 by tools/data/amip/coarsen_zarr.py
       (F.interpolate align_corners=False — the amip_v2 fast-store / x_DDC blur
       operator). Boundaries NaN-filled (SST 270, ice 0) then coarsened; for
