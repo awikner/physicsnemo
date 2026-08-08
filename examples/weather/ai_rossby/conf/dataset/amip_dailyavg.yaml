@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP daily-avg full-resolution (180x360) dataset — Phase 12c.9.
+#
+# The archive amip_v2 trains on: 6h-cadence daily-avg / daily-window fields
+# (*_24h diagnostics, *_monthly_interp SST/ice), 26 hPa levels, role lists =
+# the upstream ERDM_co2 151-channel contract (see
+# tools/data/amip/configs/amip_dailyavg.yaml). This full-res store serves
+# x_DDC downscaler training and as the full-res boundary source
+# (boundary_zarr_path) for upstream-parity forecaster runs; the forecaster
+# itself trains on dataset=amip_dailyavg_coarse.
+#
+# Single-year default (swap the year or use the multi-year datapipe for
+# real runs). Conversion: hpc/scripts/convert_amip_dailyavg_derecho.pbs.
+
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/glade/derecho/scratch/awikner/physicsnemo-zarr}/amip_dailyavg/1981.zarr
+val_zarr_path: null
+
+# Vendored from amip_v2 norm_stats/ (tools/data/amip/norm_stats/) and staged
+# next to the stores by the conversion job. Already in ClimateNormalizer
+# layout — per-variable scalars + 26-entry level vectors.
+mean_path: ${oc.env:AI_ROSSBY_DATA,/glade/derecho/scratch/awikner/physicsnemo-zarr}/amip_dailyavg/normalize_mean_dailyavg.nc
+std_path: ${oc.env:AI_ROSSBY_DATA,/glade/derecho/scratch/awikner/physicsnemo-zarr}/amip_dailyavg/normalize_std_dailyavg.nc
+delta_std_path: null
+
+# Forcings come from the prognostic store — no substitution.
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+# The v2 forecaster steps 24 h over the 6 h-spaced store -> lead 4 steps.
+# (Kept [1] here for parity with the other single-step dataset configs;
+# training configs override per stage.)
+forecast_lead_times: [1]
+num_samples_per_epoch: null
+batch_size: 1
+num_workers: 4
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+# SST/ice monthly-interp carry NaN over land; upstream mask_fill values.
+nan_fill_default: 0.0
+nan_fill_values:
+  sea_surface_temperature_monthly_interp: 270.0
+  sea_ice_cover_monthly_interp: 0.0
+shuffle: True
+
+# Constant boundaries (land_sea_mask / geopotential_at_surface) are used
+# as-is — matches the ERA5/PLASIM/AMIP convention.
+normalize_constant_boundary: False
+# Upstream z-scores everything through one stats file, diagnostics included.
+normalize_diagnostic: True

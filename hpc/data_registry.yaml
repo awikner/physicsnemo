@@ -122,6 +122,33 @@ datasets:
       - {cluster: stampede3, years: "1978-2022"}   # converted 2026-07-10 (45 stores)
       - {cluster: derecho, years: "1978-2022"}     # master; replicated + verified 2026-07-16
 
+  amip_dailyavg:                               # daily-avg ERA5 archive amip_v2 trains on (Phase 12c)
+    subdir: amip_dailyavg
+    target_years: "1978-2024"
+    note: "6h-cadence daily-avg/daily-window fields (*_24h diagnostics,
+      *_monthly_interp SST/ice), 180x360, 26 hPa levels. Role lists = the
+      amip_v2 ERDM_co2 151-channel contract; archive superset preserved via
+      extra_variables (tools/data/amip/configs/amip_dailyavg.yaml). Norm stats:
+      amip_v2 repo norm_stats/normalize_{mean,std}_dailyavg.nc — already in
+      ClimateNormalizer layout, stage next to the stores."
+    raw_source:                                 # per-timestep {year}_{idx:04d}.h5, /input group
+      cluster: derecho                          # RETIRING — convert while reachable
+      path: /glade/derecho/scratch/awikner/ERA5/h5_dailyavg
+    copies: []                                  # conversion pending (12c.12)
+
+  amip_dailyavg_coarse:                        # 45x90 pre-coarsened forecaster store (Phase 12c)
+    subdir: amip_dailyavg_coarse
+    target_years: "1978-2024"
+    note: "amip_dailyavg bilinearly coarsened x4 by tools/data/amip/coarsen_zarr.py
+      (F.interpolate align_corners=False — the amip_v2 fast-store / x_DDC blur
+      operator). Boundaries NaN-filled (SST 270, ice 0) then coarsened; for
+      upstream-parity full-res boundaries point boundary_zarr_path at the
+      amip_dailyavg store."
+    raw_source:
+      cluster: derecho                          # derived from amip_dailyavg
+      path: derived://amip_dailyavg
+    copies: []                                  # coarsening pending (12c.12)
+
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg
     target_years: "2000-2025"                   # 2000 partial (from 06-01), 2025 partial (to 04-30)

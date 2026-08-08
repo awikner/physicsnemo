@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP daily-avg PRE-COARSENED (45x90) dataset — Phase 12c.10. The
+# forecaster-training store: amip_dailyavg bilinearly downsampled x4 by
+# tools/data/amip/coarsen_zarr.py using the exact amip_v2 fast-store /
+# x_DDC blur operator (F.interpolate bilinear, align_corners=False).
+#
+# Boundaries in this store are NaN-filled (SST 270 K, ice 0) then coarsened
+# — self-contained for c_grid_downsample=1 runs (both streams on the
+# 45x90 grid). For upstream-parity runs (full-res c_grid with the model's
+# internal stride-4 conv, c_grid_downsample=4), point boundary_zarr_path at
+# the matching amip_dailyavg full-res store instead.
+#
+# Pairs with model=amip_erdm_v2 + loss=erdm_v2. Coarsening job:
+# hpc/scripts/coarsen_amip_dailyavg_derecho.pbs.
+
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/glade/derecho/scratch/awikner/physicsnemo-zarr}/amip_dailyavg_coarse/1981.zarr
+val_zarr_path: null
+
+# Per-channel scalar stats are resolution-independent — same files as the
+# full-res dataset (staged in both store roots).
+mean_path: ${oc.env:AI_ROSSBY_DATA,/glade/derecho/scratch/awikner/physicsnemo-zarr}/amip_dailyavg_coarse/normalize_mean_dailyavg.nc
+std_path: ${oc.env:AI_ROSSBY_DATA,/glade/derecho/scratch/awikner/physicsnemo-zarr}/amip_dailyavg_coarse/normalize_std_dailyavg.nc
+delta_std_path: null
+
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+forecast_lead_times: [1]
+num_samples_per_epoch: null
+batch_size: 1
+num_workers: 4
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+# Boundaries were NaN-filled BEFORE coarsening — no NaN should survive in
+# this store; keep the map anyway so a boundary_zarr_path override to the
+# full-res store stays correct.
+nan_fill_default: 0.0
+nan_fill_values:
+  sea_surface_temperature_monthly_interp: 270.0
+  sea_ice_cover_monthly_interp: 0.0
+shuffle: True
+
+normalize_constant_boundary: False
+normalize_diagnostic: True

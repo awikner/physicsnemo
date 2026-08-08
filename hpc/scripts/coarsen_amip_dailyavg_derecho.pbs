@@ -1,0 +1,64 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Coarsen the amip_dailyavg per-year Zarr stores to the 45x90 forecaster
+# grid (Phase 12c.10) with tools/data/amip/coarsen_zarr.py — the amip_v2
+# fast-store bilinear operator. Runs after (or interleaved with)
+# convert_amip_dailyavg_derecho.pbs; skip-if-exists per year.
+#
+# Submit:  qsub hpc/scripts/coarsen_amip_dailyavg_derecho.pbs
+# 1-year test:
+#   qsub -q develop -l walltime=00:30:00 -v YEARS_LO=1981,YEARS_HI=1981 \
+#     hpc/scripts/coarsen_amip_dailyavg_derecho.pbs
+
+#PBS -A UCHI0014
+#PBS -q main
+#PBS -l select=1:ncpus=32:mpiprocs=1:ompthreads=32
+#PBS -l walltime=08:00:00
+#PBS -N pn-coarsen-amipda
+#PBS -j oe
+
+set -euo pipefail
+REPO=${REPO:-/glade/work/awikner/physicsnemo-amip-v2}
+cd "$REPO"
+source /glade/work/awikner/physicsnemo/.venv/bin/activate
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+
+YEARS_LO=${YEARS_LO:-1978}
+YEARS_HI=${YEARS_HI:-2024}
+IN_ROOT=${IN_ROOT:-/glade/derecho/scratch/awikner/physicsnemo-zarr/amip_dailyavg}
+OUT_ROOT=${OUT_ROOT:-/glade/derecho/scratch/awikner/physicsnemo-zarr/amip_dailyavg_coarse}
+mkdir -p "$OUT_ROOT"
+
+# Norm stats apply unchanged on the coarse grid (per-channel scalars);
+# stage them here too so both stores are self-contained.
+cp -n tools/data/amip/norm_stats/normalize_mean_dailyavg.nc "$OUT_ROOT/" || true
+cp -n tools/data/amip/norm_stats/normalize_std_dailyavg.nc "$OUT_ROOT/" || true
+
+echo "[$(date)] amip_dailyavg coarsening ${YEARS_LO}-${YEARS_HI} on $(hostname)"
+n_ok=0; n_skip=0; n_fail=0
+for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
+    IN_PATH="$IN_ROOT/${YEAR}.zarr"
+    OUT_PATH="$OUT_ROOT/${YEAR}.zarr"
+    if [ ! -d "$IN_PATH" ]; then
+        echo "[$(date)] skip $YEAR (no full-res store yet)"; n_skip=$((n_skip+1)); continue
+    fi
+    if [ -d "$OUT_PATH" ]; then
+        echo "[$(date)] skip $YEAR (exists)"; n_skip=$((n_skip+1)); continue
+    fi
+    echo "[$(date)] coarsening year $YEAR ..."
+    if python tools/data/amip/coarsen_zarr.py \
+            --input "$IN_PATH" \
+            --output "$OUT_PATH" \
+            --factor 4 \
+            --time-block 64; then
+        n_ok=$((n_ok+1))
+    else
+        echo "[$(date)] YEAR $YEAR FAILED"; n_fail=$((n_fail+1)); rm -rf "$OUT_PATH"
+    fi
+done
+echo "[$(date)] done: ok=$n_ok skip=$n_skip fail=$n_fail"
+[ "$n_fail" -eq 0 ]
