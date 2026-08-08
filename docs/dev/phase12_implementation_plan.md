@@ -354,6 +354,48 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
 
 **Effort**: ~2 days + conversion jobs.
 
+**12c.9–11 delivered** *(2026-08-07; conversion runs in progress)*:
+
+- **Channel config** [`tools/data/amip/configs/amip_dailyavg.yaml`](../../tools/data/amip/configs/amip_dailyavg.yaml)
+  — role lists = the upstream `ERDM_co2` 151-channel contract
+  (`specific_humidity`, 6 surface vars, `*_monthly_interp` SST/ice,
+  CO₂+`DSWRFtoa_24h_lead` varying); the archive superset (soil, snow,
+  dewpoint, SST/ice climatology + plain variants, `specific_total_water`,
+  `vertical_velocity`) preserved via `extra_variables`. Verified against
+  the live archive (68,676 files on Derecho, 225 keys/file) and the
+  vendored stats. **No converter code change needed** — same
+  `{year}_{idx:04d}.h5` + `/input` convention.
+- **Norm stats**: `normalize_{mean,std}_dailyavg.nc` vendored verbatim
+  from amip_v2@`e0b7b60` into `tools/data/amip/norm_stats/` (27 KB each,
+  already in `ClimateNormalizer` layout — the plan's "convert the stats"
+  step turned out to be a no-op).
+- **Coarsen tool** [`tools/data/amip/coarsen_zarr.py`](../../tools/data/amip/coarsen_zarr.py)
+  — the exact amip_v2 blur operator (`F.interpolate` bilinear,
+  `align_corners=False`); state NaN-free (hard fail), boundaries
+  NaN-filled (SST 270 K / ice 0) then coarsened (store self-contained
+  for `c_grid_downsample=1`; `boundary_zarr_path` → full-res store for
+  upstream-parity runs); extras skipped by default; coarse lat/lon =
+  block means; provenance attrs; time rides the batch axis so output is
+  independent of `--time-block`. 7 CPU tests incl. bit-parity vs a
+  literal transcription of upstream `bilinear.py`.
+- Registry entries (`amip_dailyavg`, `amip_dailyavg_coarse`), dataset
+  configs (`conf/dataset/amip_dailyavg{,_coarse}.yaml` — coarse pairs
+  with `model=amip_erdm_v2` + `loss=erdm_v2`,
+  `normalize_diagnostic: True` per upstream), Derecho PBS scripts
+  (per-year skip-if-exists loops).
+- **12c.12 in progress**: 1981 test conversion + coarsening submitted on
+  Derecho (jobs 7045083/7045084, dependency-chained; worktree
+  `/glade/work/awikner/physicsnemo-amip-v2`). **Full-run blocker
+  discovered**: Derecho scratch sits at 25.58 M of the ~26.2 M inode
+  cap — the full-res 47-year Zarr (~3.4 M chunk files at time-chunk 1)
+  cannot live there. Coarse store (~200 k files, time-block-64 chunks)
+  fits anywhere. Routing options (interacts with the parked
+  derecho-retire item): (a) per-year convert→ship→delete rotation via
+  `replicate_tar.sh`, (b) Globus the ~3.9 TB raw archive to Stampede3
+  ($SCRATCH has no inode cap — the Phase 11 conversion pattern) and
+  convert there, (c) larger time-chunks (degrades random-access reads).
+  Decision pending with the user.
+
 ### 12d — Loader-semantics parity (`forcing_from_raw` equivalent)
 
 13. Centralize boundary→input assembly in one place on our side (extend
