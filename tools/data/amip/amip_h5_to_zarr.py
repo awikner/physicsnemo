@@ -203,6 +203,16 @@ def _level_key(group: h5py._hl.group.Group, prefix: str, level: float) -> str:
     )
 
 
+def _level_key_or_none(
+    group: h5py._hl.group.Group, prefix: str, level: float
+) -> str | None:
+    """Presence probe for extras: :func:`_level_key` without the hard error."""
+    try:
+        return _level_key(group, prefix, level)
+    except KeyError:
+        return None
+
+
 def _decode_time(time_dataset_value, calendar: str) -> cftime.datetime:
     """Decode the ``input/time`` scalar dataset's contents into a cftime
     datetime. AMIP stores it as ``YYYY-MM-DDTHH:MM:SS.nnnnnnnnn`` (nanosecond-
@@ -341,6 +351,34 @@ def convert(
         "Found %d files in %s for year %d, sample range %s",
         len(files), input_dir, year, sample_range,
     )
+
+    # Extras are best-effort archive preservation (NOT role-listed) — some
+    # years genuinely lack some of them (e.g. the daily-avg 1986 files carry
+    # no *_climatology datasets while every neighboring year does). Probe
+    # the year's first file and drop absent extras with a warning instead
+    # of hard-failing the year. Role-listed variables keep the hard error:
+    # a missing one of those is a broken archive, not a preservation gap.
+    if extra_surface_vars or extra_pressure_upper_vars:
+        with h5py.File(files[0], "r") as _f:
+            _grp = _f["input"]
+            missing_sfc = [v for v in extra_surface_vars if v not in _grp]
+            missing_ua = [
+                v
+                for v in extra_pressure_upper_vars
+                if _level_key_or_none(_grp, v, pressure_levels[0]) is None
+            ]
+        if missing_sfc or missing_ua:
+            logger.warning(
+                "year %d: dropping extra_variables absent from %s: %s "
+                "(extras are best-effort; role-listed vars still hard-fail)",
+                year, files[0].name, missing_sfc + missing_ua,
+            )
+            extra_surface_vars = [
+                v for v in extra_surface_vars if v not in missing_sfc
+            ]
+            extra_pressure_upper_vars = [
+                v for v in extra_pressure_upper_vars if v not in missing_ua
+            ]
 
     # --- Streaming write strategy ---------------------------------------
     # 1. Read just timestamps from every file (cheap — ~1000× faster than
