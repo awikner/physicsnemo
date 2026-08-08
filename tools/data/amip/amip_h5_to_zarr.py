@@ -353,31 +353,41 @@ def convert(
     )
 
     # Extras are best-effort archive preservation (NOT role-listed) — some
-    # years genuinely lack some of them (e.g. the daily-avg 1986 files carry
-    # no *_climatology datasets while every neighboring year does). Probe
-    # the year's first file and drop absent extras with a warning instead
-    # of hard-failing the year. Role-listed variables keep the hard error:
-    # a missing one of those is a broken archive, not a preservation gap.
+    # years genuinely lack some of them, and presence can change MID-YEAR
+    # (the daily-avg 1986 files carry *_climatology only for files
+    # 0000-0003, then never again). An extra is therefore kept only if it
+    # is present in EVERY file of the year: scan them all (cheap key
+    # checks, ~1 min for 1460 files) and drop the rest with a warning.
+    # Role-listed variables keep the per-file hard error: a missing one of
+    # those is a broken archive, not a preservation gap.
     if extra_surface_vars or extra_pressure_upper_vars:
-        with h5py.File(files[0], "r") as _f:
-            _grp = _f["input"]
-            missing_sfc = [v for v in extra_surface_vars if v not in _grp]
-            missing_ua = [
-                v
-                for v in extra_pressure_upper_vars
-                if _level_key_or_none(_grp, v, pressure_levels[0]) is None
-            ]
-        if missing_sfc or missing_ua:
+        dropped: dict[str, str] = {}  # var -> first file missing it
+        keep_sfc = set(extra_surface_vars)
+        keep_ua = set(extra_pressure_upper_vars)
+        for fp in files:
+            if not (keep_sfc or keep_ua):
+                break
+            with h5py.File(fp, "r") as _f:
+                _grp = _f["input"]
+                for v in list(keep_sfc):
+                    if v not in _grp:
+                        dropped[v] = fp.name
+                        keep_sfc.discard(v)
+                for v in list(keep_ua):
+                    if _level_key_or_none(_grp, v, pressure_levels[0]) is None:
+                        dropped[v] = fp.name
+                        keep_ua.discard(v)
+        if dropped:
             logger.warning(
-                "year %d: dropping extra_variables absent from %s: %s "
-                "(extras are best-effort; role-listed vars still hard-fail)",
-                year, files[0].name, missing_sfc + missing_ua,
+                "year %d: dropping extra_variables not present in every "
+                "file (extras are best-effort; role-listed vars still "
+                "hard-fail): %s",
+                year,
+                {v: f"first missing in {f}" for v, f in sorted(dropped.items())},
             )
-            extra_surface_vars = [
-                v for v in extra_surface_vars if v not in missing_sfc
-            ]
+            extra_surface_vars = [v for v in extra_surface_vars if v in keep_sfc]
             extra_pressure_upper_vars = [
-                v for v in extra_pressure_upper_vars if v not in missing_ua
+                v for v in extra_pressure_upper_vars if v in keep_ua
             ]
 
     # --- Streaming write strategy ---------------------------------------

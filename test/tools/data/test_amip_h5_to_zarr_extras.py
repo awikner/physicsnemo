@@ -30,8 +30,18 @@ _H, _W = 8, 16
 _LEVELS = [500.0, 850.0]
 
 
-def _write_year(dirpath: Path, year: int, n_files: int, *, with_extras: bool):
+def _write_year(
+    dirpath: Path,
+    year: int,
+    n_files: int,
+    *,
+    with_extras: bool,
+    extras_until: int | None = None,
+):
+    """``extras_until=k`` writes extras only for the first ``k`` files —
+    the 1986 mid-year-vanishing pattern."""
     for idx in range(n_files):
+        extras_here = with_extras and (extras_until is None or idx < extras_until)
         with h5py.File(dirpath / f"{year}_{idx:04d}.h5", "w") as f:
             g = f.create_group("input")
             g["time"] = np.bytes_(f"{year}-01-{idx + 1:02d}T00:00:00.000000000")
@@ -39,7 +49,7 @@ def _write_year(dirpath: Path, year: int, n_files: int, *, with_extras: bool):
                 g[v] = np.random.rand(_H, _W).astype("float32")
             for lev in _LEVELS:
                 g[f"temperature_{lev}"] = np.random.rand(_H, _W).astype("float32")
-            if with_extras:
+            if extras_here:
                 g["snow_depth"] = np.random.rand(_H, _W).astype("float32")
                 for lev in _LEVELS:
                     g[f"vertical_velocity_{lev}"] = np.random.rand(_H, _W).astype(
@@ -108,6 +118,32 @@ def test_present_extras_still_written(tmp_path):
     assert "snow_depth" in ds.data_vars
     assert "vertical_velocity" in ds.data_vars
     assert ds.attrs["extra_surface_variables"] == ["snow_depth"]
+
+
+def test_extras_vanishing_mid_year_are_dropped(tmp_path, caplog):
+    # The real 1986 failure mode: extras present in files 0000-0003, gone
+    # from 0004 on. First-file probing missed it (job 3384825) — the scan
+    # must cover every file.
+    import logging
+
+    src = tmp_path / "h5"
+    src.mkdir()
+    _write_year(src, 1986, 6, with_extras=True, extras_until=4)
+    out = tmp_path / "1986.zarr"
+    with caplog.at_level(logging.WARNING):
+        convert(
+            _config(),
+            input_dir=src,
+            year=1986,
+            sample_range=None,
+            output=out,
+            time_chunk=1,
+        )
+    assert any("not present in every" in r.message for r in caplog.records)
+    ds = xr.open_zarr(out)
+    assert "snow_depth" not in ds.data_vars
+    assert "vertical_velocity" not in ds.data_vars
+    assert ds.sizes["time"] == 6  # the year itself converts fully
 
 
 def test_missing_role_listed_var_still_hard_fails(tmp_path):
