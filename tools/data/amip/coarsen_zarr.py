@@ -105,7 +105,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--time-block",
         type=int,
         default=64,
-        help="Time steps processed (read -> interpolate -> write) per block.",
+        help="Time steps processed (read -> interpolate -> write) per block. "
+        "Must be a multiple of --time-chunk (region writes stay chunk-aligned).",
+    )
+    p.add_argument(
+        "--time-chunk",
+        type=int,
+        default=8,
+        help="Zarr chunk length along time. 8 aligns with the ERDM W+1 "
+        "rolling-window read (W=6) so a window read touches ~one chunk per "
+        "variable; the 12c benchmark showed 64-step chunks force a 64x "
+        "over-read per random sample, erasing the coarse store's I/O win.",
     )
     p.add_argument(
         "--include-extras",
@@ -186,11 +196,17 @@ def coarsen_store(
     *,
     factor: int = 4,
     time_block: int = 64,
+    time_chunk: int = 8,
     include_extras: bool = False,
     mask_fill: dict[str, float] | None = None,
 ) -> xr.Dataset:
     """Coarsen one per-year store; returns the (lazily-opened) output."""
     mask_fill = DEFAULT_MASK_FILL if mask_fill is None else dict(mask_fill)
+    if time_block % time_chunk:
+        raise ValueError(
+            f"time_block={time_block} must be a multiple of "
+            f"time_chunk={time_chunk} so region writes stay chunk-aligned"
+        )
 
     src = xr.open_zarr(
         input_path,
@@ -224,7 +240,7 @@ def coarsen_store(
         coords["pressure_level"] = src["pressure_level"]
 
     n_time = src.sizes.get("time", 0)
-    time_chunk = min(time_block, max(1, n_time))
+    time_chunk = min(time_chunk, max(1, n_time))
     const_names = [v for v in todo if "time" not in src[v].dims]
     timed_names = [v for v in todo if "time" in src[v].dims]
 
@@ -287,6 +303,7 @@ def coarsen_store(
         ),
         "coarsen_mask_fill": json.dumps(mask_fill),
         "coarsen_included_extras": bool(include_extras),
+        "coarsen_time_chunk": int(time_chunk),
         "coarsen_boundary_note": (
             "boundary channels are NaN-filled (coarsen_mask_fill) then "
             "coarsened; for upstream-parity full-res boundaries use "
@@ -331,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output,
         factor=args.factor,
         time_block=args.time_block,
+        time_chunk=args.time_chunk,
         include_extras=args.include_extras,
         mask_fill=mask_fill,
     )

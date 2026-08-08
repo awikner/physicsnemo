@@ -161,10 +161,32 @@ def test_coarsen_store_state_boundary_and_coords(tmp_path):
 def test_coarsen_store_small_time_blocks_match_single_pass(tmp_path):
     src_path = tmp_path / "src.zarr"
     _make_store(src_path)
-    a = coarsen_store(src_path, tmp_path / "a.zarr", factor=_FACTOR, time_block=2)
-    b = coarsen_store(src_path, tmp_path / "b.zarr", factor=_FACTOR, time_block=64)
+    a = coarsen_store(
+        src_path, tmp_path / "a.zarr", factor=_FACTOR, time_block=2, time_chunk=2
+    )
+    b = coarsen_store(
+        src_path, tmp_path / "b.zarr", factor=_FACTOR, time_block=64, time_chunk=2
+    )
     for name in a.data_vars:
         assert np.array_equal(a[name].values, b[name].values), name
+
+
+def test_coarsen_store_time_chunking(tmp_path):
+    # 12c benchmark finding: chunk length must serve random window reads,
+    # not the processing block size (64-step chunks caused a 64x over-read
+    # per sample). Pin: output chunks == time_chunk, and time_block must be
+    # a chunk multiple so region writes stay chunk-aligned.
+    src_path = tmp_path / "src.zarr"
+    _make_store(src_path)
+    out = coarsen_store(
+        src_path, tmp_path / "out.zarr", factor=_FACTOR, time_block=4, time_chunk=2
+    )
+    assert out["t2m"].encoding["chunks"][0] == 2
+    assert out.attrs["coarsen_time_chunk"] == 2
+    with pytest.raises(ValueError, match="multiple"):
+        coarsen_store(
+            src_path, tmp_path / "bad.zarr", factor=_FACTOR, time_block=3, time_chunk=2
+        )
 
 
 def test_coarsen_store_include_extras(tmp_path):
