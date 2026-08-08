@@ -50,14 +50,18 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
         echo "[$(date)] skip $YEAR (exists)"; n_skip=$((n_skip+1)); continue
     fi
     echo "[$(date)] coarsening year $YEAR ..."
+    # Atomic tmp -> rename (walltime-kill safety, see convert script).
+    OUT_TMP="$OUT_ROOT/${YEAR}.zarr.partial"
+    rm -rf "$OUT_TMP"
     if python tools/data/amip/coarsen_zarr.py \
             --input "$IN_PATH" \
-            --output "$OUT_PATH" \
+            --output "$OUT_TMP" \
             --factor 4 \
             --time-block 64; then
+        mv "$OUT_TMP" "$OUT_PATH"
         n_ok=$((n_ok+1))
     else
-        echo "[$(date)] YEAR $YEAR FAILED"; n_fail=$((n_fail+1)); rm -rf "$OUT_PATH"
+        echo "[$(date)] YEAR $YEAR FAILED"; n_fail=$((n_fail+1)); rm -rf "$OUT_TMP"
     fi
 done
 echo "[$(date)] done: ok=$n_ok skip=$n_skip fail=$n_fail"

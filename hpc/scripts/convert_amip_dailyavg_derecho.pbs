@@ -52,16 +52,22 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
         echo "[$(date)] skip $YEAR (exists)"; n_skip=$((n_skip+1)); continue
     fi
     echo "[$(date)] converting amip_dailyavg year $YEAR ..."
+    # Write to a .partial dir and atomic-rename on success — a walltime
+    # kill mid-year must not leave a store the skip-if-exists check
+    # mistakes for complete (bit job 7045083).
+    OUT_TMP="$OUT_ROOT/${YEAR}.zarr.partial"
+    rm -rf "$OUT_TMP"
     if python tools/data/amip/amip_h5_to_zarr.py \
             --config tools/data/amip/configs/amip_dailyavg.yaml \
             --config-key AMIP \
             --input-dir "$H5_DIR" \
             --year "$YEAR" \
-            --output "$OUT_PATH" \
+            --output "$OUT_TMP" \
             --time-chunk 1; then
+        mv "$OUT_TMP" "$OUT_PATH"
         n_ok=$((n_ok+1))
     else
-        echo "[$(date)] YEAR $YEAR FAILED"; n_fail=$((n_fail+1))
+        echo "[$(date)] YEAR $YEAR FAILED"; n_fail=$((n_fail+1)); rm -rf "$OUT_TMP"
     fi
 done
 echo "[$(date)] done: ok=$n_ok skip=$n_skip fail=$n_fail"
