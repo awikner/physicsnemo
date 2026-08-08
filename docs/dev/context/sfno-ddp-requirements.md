@@ -21,25 +21,26 @@ requirements:
    `uv.lock` is at torch 2.10.0. The old floating `>=2.10.0` pin silently drifted
    to 2.11/2.12 on `uv sync` and broke the working 4×A100 SFNO-PlaSim benchmark.
 
-2. **wandb is AUTO-DISABLED under DDP (`world_size > 1`).**
-   > **UPDATE 2026-08-07 (Phase 12b):** the every-rank strategy below is NOT
-   > sufficient. wandb's background threads hung `DDP.__init__`'s *first* NCCL
-   > collective (watchdog "another thread holding the GIL inside a CUDA api" →
-   > SIGABRT; peer rank reports a spurious `int overflow`) on Delta 2×A40 with
-   > wandb initialized on every rank — reproducibly, and resolved by disabling
-   > wandb (jobs 20918380 vs 20920825). The `1a1b843b` auto-disable guard is
-   > restored in `_maybe_init_wandb` with a `wandb.allow_multigpu` escape hatch.
-   > Multi-GPU runs log to console + bench TSV. Diagnosis + re-enable plan:
-   > [`docs/dev/wandb_ddp_hang_fix_plan.md`](../wandb_ddp_hang_fix_plan.md).
+2. **wandb must be initialized on EVERY rank — and every recipe must actually
+   do it.** wandb's background threads (service IPC / console capture / GPU
+   monitor) grab the GIL inside CUDA calls; running wandb on rank 0 alone makes
+   that jitter asymmetric and stalls that rank's NCCL progress → deadlock (at
+   DDP *init* or mid-epoch). Initializing wandb on ALL ranks makes the jitter
+   symmetric (this is what the PanguWeather reference trainer does).
+   `_maybe_init_wandb` calls `initialize_wandb` on all ranks and returns
+   `rank==0`.
 
-   *Historical rationale for the (insufficient) every-rank strategy:* wandb's
-   background threads (service IPC / console capture / GPU monitor) grab the GIL
-   inside CUDA calls; running wandb on rank 0 alone makes that jitter asymmetric
-   and desyncs DDP's NCCL collectives mid-epoch → deadlock. Initializing wandb on
-   ALL ranks makes the jitter symmetric (this is what the PanguWeather reference
-   trainer does) — but an *init-time* collective blocks on whichever rank's
-   threads stall it, symmetric or not. The every-rank machinery still applies
-   when `allow_multigpu=true` overrides the guard.
+   > **2026-08-07 (Phase 12b / wandb_ddp_hang_fix_plan.md):** the hang
+   > resurfaced because `train_diffusion.py` called `_maybe_init_wandb` **on
+   > rank 0 only** — the exact asymmetric configuration this requirement
+   > forbids (`train.py` was always compliant, hence the July validation).
+   > With the call-site fixed, wandb-on DDP passed 3/3 short runs + a 93-min
+   > full-epoch run (Delta 2×A40, jobs 20921753 / 20921857). A safety guard
+   > remains: `wandb.allow_multigpu: false` auto-disables wandb under DDP
+   > (console + bench TSV only) if the hang ever resurfaces; default is
+   > `true`. **Any NEW recipe must call `_maybe_init_wandb` unconditionally
+   > on every rank, never inside an `if rank == 0:` block.** Full history:
+   > [`docs/dev/wandb_ddp_hang_fix_plan.md`](../wandb_ddp_hang_fix_plan.md).
 
 3. **The recipe's optional extras must be installed or `uv sync` prunes them.**
    `uv sync --extra cu12 --group dev` alone REMOVES torch-harmonics/tensorly

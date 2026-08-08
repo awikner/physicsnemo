@@ -51,12 +51,13 @@ Globus → untar; ~5× faster than per-file Globus for these tiny-chunk stores).
   scope, methods, and who owns what.
 
 ## Gotchas that will bite you (details in `docs/dev/context/`)
-- **Multi-GPU (DDP):** `torch < 2.11` (2.11/2.12 break DDP); **wandb is
-  auto-disabled under DDP** — its background threads can hang DDP init's first
-  NCCL collective even when initialized on every rank (`wandb.allow_multigpu=true`
-  overrides at your own risk; see `docs/dev/wandb_ddp_hang_fix_plan.md`);
-  `uv sync` must include `--extra sfno-extras --extra utils-extras --extra
-  datapipes-extras` or it silently prunes SFNO/zarr deps.
+- **Multi-GPU (DDP):** `torch < 2.11` (2.11/2.12 break DDP); init wandb on
+  *every* rank — **never inside `if rank == 0:`** (a rank-0-only init hangs
+  DDP's first NCCL collective; root-caused + fixed 2026-08-07, see
+  `docs/dev/wandb_ddp_hang_fix_plan.md`; `wandb.allow_multigpu=false` re-arms
+  an auto-disable guard if it resurfaces); `uv sync` must include
+  `--extra sfno-extras --extra utils-extras --extra datapipes-extras` or it
+  silently prunes SFNO/zarr deps.
 - **DeltaAI (GH200):** the inherited conda `wandb` is broken — install wandb into
   `.venv-deltaai`; `torchrun` isn't on the venv PATH.
 - **Globus high-assurance sessions time out** — refresh with `globus session

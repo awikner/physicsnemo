@@ -136,8 +136,22 @@ def test_nonzero_rank_mode_disabled_passthrough(monkeypatch):
 
 
 def test_missing_allow_multigpu_key_defaults_to_guarded():
-    # Older configs without the new key must stay safe (guard active).
+    # Configs without the key must stay safe (guard active) — the W3
+    # default flip lives in conf/config.yaml, not in the code fallback.
     cfg = OmegaConf.create(
         {"run_name": "t", "wandb": {"enabled": True, "mode": "offline"}}
     )
     assert train._maybe_init_wandb(cfg, dist=_StubDist(world_size=4)) is False
+
+
+def test_repo_config_default_allows_multigpu():
+    # W3 decision pin (2026-08-07): after the every-rank call-site fix was
+    # validated (3/3 short + 93-min full-epoch wandb-on runs), the shipped
+    # config default is allow_multigpu=true. Flipping it back should be a
+    # deliberate act — this test makes it show up in review.
+    from hydra import compose, initialize_config_dir
+
+    cfg_dir = str((_AI_ROSSBY_DIR / "conf").resolve())
+    with initialize_config_dir(config_dir=cfg_dir, version_base="1.2"):
+        cfg = compose(config_name="config")
+    assert bool(cfg.wandb.allow_multigpu) is True

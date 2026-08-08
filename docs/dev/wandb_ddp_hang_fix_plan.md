@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # wandb × DDP NCCL-watchdog hang — fix plan
 
-Status: **W1–W2 complete (2026-08-07, root cause confirmed); W3–W4 pending** · Created:
+Status: **COMPLETE (W1–W4, 2026-08-07) — root cause fixed, multi-GPU wandb re-enabled** · Created:
 2026-08-07 (during Phase 12b cluster validation) · Owner: TBD
 
 ## Symptom
@@ -222,6 +222,24 @@ settings fixes over version pins):
    remains console+TSV, and we file the flight-recorder evidence
    upstream (wandb + pytorch issue trackers) — the dumps from W2 are
    exactly what both projects ask for.
+
+**W3 delivered** *(2026-08-07)*: the durable fix is the every-rank
+call-site in `train_diffusion.py` (landed with W2, commit `19f36128`)
+— no settings changes needed. Re-enable gate met in full:
+
+- 3/3 wandb-on passes on the hang-repro config (W2 cells M1a/b/c);
+- **93-minute full-epoch 2×A40 run with wandb ON: PASSED** (Delta job
+  20921857, non-interactive `gpuA40x4`, 729 batches, both ranks'
+  offline runs created, checkpoint saved, flight-recorder dir empty —
+  zero hangs). This covers the mid-epoch desync regime the short cells
+  cannot see.
+
+`wandb.allow_multigpu` default flipped to `true` in `conf/config.yaml`
+— multi-GPU wandb dashboards are restored. The guard code remains as
+an opt-out (`allow_multigpu: false` re-arms it); the code-level
+fallback for configs *missing* the key stays conservative (guarded).
+Validation sbatch kept at
+`hpc/scripts/validate_wandb_multigpu_2xA40.sbatch` for reruns.
 
 ### W4 — Regression guards + docs — ~1 h
 

@@ -55,19 +55,18 @@ log_every_n_steps: 1
 # installed the trainer logs a warning and falls back to console logging.
 # Set enabled=False to disable entirely.
 #
-# Multi-GPU: wandb is AUTO-DISABLED when world_size > 1 (metrics go to
-# console + the bench TSV instead). wandb's background threads (service IPC /
-# console capture / GPU-stats monitor) can hold the GIL inside CUDA calls and
-# stall NCCL — observed hanging DDP init's first collective until the NCCL
-# watchdog kills the rank (Delta 2xA40, Phase 12b), even with the
-# init-on-every-rank symmetry strategy. `allow_multigpu: true` overrides the
-# guard at your own risk (the every-rank machinery below then applies: only
-# rank 0 uses `mode`; other ranks are forced offline so the UI shows exactly
-# ONE run, and metrics are rank-0-aggregated). Diagnosis + re-enable plan:
-# docs/dev/wandb_ddp_hang_fix_plan.md.
+# Multi-GPU: wandb runs on EVERY rank (rank 0 drives LaunchLogger; other
+# ranks open throwaway local runs for thread-jitter symmetry — only ONE run
+# appears in the UI). The 2026-08-07 DDP-init NCCL hang was root-caused to
+# train_diffusion.py initializing wandb on rank 0 ONLY (the asymmetric
+# configuration the every-rank strategy exists to prevent); with the
+# call-site fixed, wandb-on DDP passed 3/3 short runs + a 93-min full-epoch
+# validation (Delta jobs 20921753 / 20921857). `allow_multigpu: false`
+# re-arms the W1 auto-disable guard (console + bench TSV only) if the hang
+# ever resurfaces. History + evidence: docs/dev/wandb_ddp_hang_fix_plan.md.
 wandb:
   enabled: True
-  allow_multigpu: False           # DDP guard — see comment above before flipping
+  allow_multigpu: True            # false re-arms the DDP auto-disable guard
   project: ai-rossby
   entity: null                    # wandb team/username; null = your default entity
   name: ${run_name}

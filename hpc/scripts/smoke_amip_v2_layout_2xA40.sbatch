@@ -77,9 +77,10 @@ cd examples/weather/ai_rossby
 #                                   (RollingDiT is unpatched: 64800
 #                                   tokens/frame at 180x360)
 # - tiny backbone + capped iterations -> fits 2xA40, finishes in minutes
-# - wandb: no override needed — the W1 auto-disable guard turns wandb off
-#   under DDP (world_size>1) since jobs 20916803/20918380 hit the NCCL-
-#   watchdog GIL hang from wandb's background threads during DDP init.
+# - wandb: default-on (every-rank, offline). The 20916803/20918380 NCCL
+#   hang was the rank-0-only wandb init in train_diffusion.py, fixed in W2
+#   and validated wandb-on (jobs 20921753/20921857). Add
+#   wandb.allow_multigpu=false to re-arm the auto-disable guard.
 #   See docs/dev/wandb_ddp_hang_fix_plan.md.
 torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_rfm \
