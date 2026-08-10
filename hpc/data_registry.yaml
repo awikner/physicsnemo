@@ -135,8 +135,11 @@ datasets:
       cluster: derecho                          # RETIRING — convert while reachable
       path: /glade/derecho/scratch/awikner/ERA5/h5_dailyavg
     stage_dest: amip_dailyavg                   # raw lands at <raw_root>/amip_dailyavg for conversion
+    # Raw archive rescued Derecho -> Stampede3 2026-08-08 (Globus 895c2181,
+    # 68,676 files checksum-verified) — Derecho retirement insurance.
     copies:
       - {cluster: derecho, years: "1981"}       # 12c.12 pipeline-validation year (jobs 7046240/7046750)
+      - {cluster: stampede3, years: "1978-2022"}   # converted 2026-08-08/09 (jobs 3383725/3383726/3384854; 1986 extras-gap handled)
 
   amip_dailyavg_coarse:                        # 45x90 pre-coarsened forecaster store (Phase 12c)
     subdir: amip_dailyavg_coarse
@@ -149,7 +152,8 @@ datasets:
     raw_source:
       cluster: derecho                          # derived from amip_dailyavg
       path: derived://amip_dailyavg
-    copies: []                                  # coarsening pending (12c.12)
+    copies:
+      - {cluster: stampede3, years: "1978-2022"}   # coarsened 2026-08-08/09 (3.0 GB/yr, time-chunk 8)
 
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg
