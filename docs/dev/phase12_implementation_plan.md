@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12b complete incl. cluster validation (2026-08-07); 12c+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12c complete (2026-08-10); 12d+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion

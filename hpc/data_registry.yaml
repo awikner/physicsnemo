@@ -159,8 +159,7 @@ datasets:
       path: derived://amip_dailyavg
     copies:
       - {cluster: stampede3, years: "1978-2022"}   # coarsened 2026-08-08/09 (3.0 GB/yr, time-chunk 8)
-      # polaris copy: tar-shipment in progress 2026-08-10 (user decision:
-      # Polaris/eagle instead of Delta) — add {cluster: polaris, ...} on unpack+verify.
+      - {cluster: polaris, years: "1978-2022"}     # tar-shipped + unpacked + verified 2026-08-10 (Globus a55b29b5; norm stats staged)
 
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg
