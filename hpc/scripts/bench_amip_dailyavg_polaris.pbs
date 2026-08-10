@@ -1,0 +1,43 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Phase 12c.12 follow-up benchmarks on ALCF Polaris (the filesystem the
+# ERDM forecaster will actually train from): the three gaps the Derecho
+# numbers left open —
+#   1. multi-worker DataLoader scaling (0/2/4/8 workers),
+#   2. the rolling-window read pattern (SequenceDataset W+1 = 7 frames,
+#      what the coarse store's --time-chunk 8 was sized for),
+#   3. eagle-Lustre numbers vs the recorded Derecho ones.
+# Coarse store only — the full-res store lives on Stampede3.
+#
+# Submit:  qsub hpc/scripts/bench_amip_dailyavg_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=00:45:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-bench-amipdac
+
+set -euo pipefail
+REPO=/eagle/lighthouse-uchicago/members/awikner/physicsnemo
+cd "$REPO"
+
+COARSE=${COARSE:-/eagle/lighthouse-uchicago/physicsnemo-zarr/amip_dailyavg_coarse/1981.zarr}
+BENCH=benchmarks/physicsnemo/experimental/datapipes/climate/bench_amip_dailyavg_coarse.py
+
+echo "== single-frame samples, worker sweep =="
+.venv/bin/python "$BENCH" --coarse "$COARSE" --n-samples 100 \
+    --workers-sweep 0,2,4,8
+
+echo
+echo "== windowed W+1=7 reads (ERDM training pattern), worker sweep =="
+.venv/bin/python "$BENCH" --coarse "$COARSE" --n-samples 100 \
+    --windowed 7 --workers-sweep 0,2,4,8
+
+echo
+echo "=== polaris bench done ==="
