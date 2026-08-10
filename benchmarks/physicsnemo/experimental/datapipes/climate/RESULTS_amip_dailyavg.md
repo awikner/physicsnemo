@@ -27,3 +27,40 @@ Reproduce: `bench_amip_dailyavg_coarse.py` (job 7046751, 2026-08-07).
   dim-1024 W=6 training step consumes).
 - Store sizes (1981): full-res 55 GB (~72k files), coarse 3.0 GB
   (~6k files at chunk 8).
+
+## Polaris/eagle follow-up (Phase 12c.12 gaps — job 7409438, 2026-08-10)
+
+Coarse store on its training filesystem
+(`/eagle/lighthouse-uchicago/physicsnemo-zarr/amip_dailyavg_coarse`),
+Polaris debug node, 100 samples per cell.
+Reproduce: `hpc/scripts/bench_amip_dailyavg_polaris.pbs`.
+
+**Single-frame samples, DataLoader worker sweep:**
+
+| workers | samples/s | ms/sample |
+|---|---|---|
+| 0 | 18.07 | 55.3 |
+| 2 | 37.06 | 27.0 |
+| 4 | 94.04 | 10.6 |
+| 8 | **145.98** | 6.9 |
+
+**Windowed W+1=7 reads (`SequenceDataset` — the ERDM training pattern):**
+
+| workers | windows/s | ms/window | frame-reads/s |
+|---|---|---|---|
+| 0 | 4.23 | 236.6 | 30 |
+| 2 | 7.69 | 130.0 | 54 |
+| 4 | 14.69 | 68.1 | 103 |
+| 8 | **25.14** | 39.8 | 176 |
+
+- **Worker scaling is near-linear to 8** (8.1× single-frame, 5.9×
+  windowed) — the "4–8 workers ≈ 60–120 samples/s" extrapolation from
+  the Derecho run was conservative; eagle delivers 146.
+- **Chunk-8 alignment validated on the real pattern**: a 7-frame window
+  costs 236.6 ms single-threaded vs 7 × 55.3 = 387 ms if frames were
+  independent reads — ~1.6× from consecutive frames sharing chunks.
+- **Training headroom**: a dim-1024 W=6 ERDM step consumes ~4 windows/s
+  per rank; 4 workers/rank (16/node across 4 ranks, ALCF's useful-worker
+  ceiling) supplies ~14.7 windows/s per rank — ~3.7× the need. The
+  loader is not the bottleneck at production scale.
+- eagle single-threaded beats Derecho Lustre (18.07 vs 14.65 samples/s).
