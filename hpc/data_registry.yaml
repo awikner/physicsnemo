@@ -161,6 +161,25 @@ datasets:
       - {cluster: stampede3, years: "1978-2022"}   # coarsened 2026-08-08/09 (3.0 GB/yr, time-chunk 8)
       - {cluster: polaris, years: "1978-2022"}     # tar-shipped + unpacked + verified 2026-08-10 (Globus a55b29b5; norm stats staged)
 
+  amip_dailyavg_boundary:                      # native-res (1 deg) forcings — upstream pairing (Phase 12d option b)
+    subdir: amip_dailyavg_boundary
+    target_years: "1978-2022"
+    note: "The 6 boundary variables (4 varying + 2 constant) of amip_dailyavg at
+      native 180x360, extracted by tools/data/amip/extract_boundary_store.py.
+      Pair with amip_dailyavg_coarse as boundary_zarr_path + the model's
+      c_grid_downsample=4 — upstream amip_v2's layout (coarse state, native
+      forcings reduced by the stride-4 conv). NaN is PRESERVED on purpose so the
+      runtime masked-Gaussian coast fade (smooth_nan_boundaries) runs where
+      upstream's does. Only 20 GB for all 45 years: these are smooth 2D fields
+      and blosc compresses them well (a ~130x saving vs moving the 2.6 TB
+      full-res archive to get the same training input)."
+    raw_source:
+      cluster: stampede3                        # derived from amip_dailyavg
+      path: derived://amip_dailyavg
+    copies:
+      - {cluster: stampede3, years: "1978-2022"}   # extracted 2026-08-11 (job 3395216)
+      - {cluster: polaris, years: "1978-2022"}     # tar-shipped 2026-08-11 (Globus 7ecfdcb3, 20 GB)
+
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg
     target_years: "2000-2025"                   # 2000 partial (from 06-01), 2025 partial (to 04-30)
