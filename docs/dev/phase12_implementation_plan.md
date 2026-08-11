@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12d complete (2026-08-10); 12e+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12e complete (2026-08-11); 12f+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -532,6 +532,64 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
     Muon param-group split still covers every new parameter exactly once.
 
 **Effort**: ~2 days.
+
+**12e delivered** *(2026-08-11)*:
+
+- **Vendored layers** (`layers/input_embed.py`, `layers/output_head.py`),
+  module/parameter names preserved so upstream-trained checkpoints translate
+  1:1: `RollingDiTInputEmbed` (budget mode + `SourceNorm`,
+  `BoundaryEncoder` conv1/conv2 with spherical padding + exact pooled
+  mean/std, `ScalarForcingEmbedder` with the reserved `d_co2` affine head,
+  `ColumnStateEncoder`) and `RollingDiTOutputHead` (σ-gated mixture over
+  `num_experts` readouts + `ColumnDecoder`), both carrying the `nocean`
+  plumbing 12f needs (inert at `nocean=0`).
+- **`RollingDiT` extended** with `input_embed=` / `output_head=` /
+  `global_cond=` / `c_grid_cross_layers=` / `c_grid_cross_heads=` /
+  `window_size=` / `state_layout=`, plus
+  `CausalForcingCrossAttentionBlock` (temporal causal cross-attention from
+  the hidden state to the in-window forcing stream, zero-init gate).
+  `state_layout` is **derived by the wrapper** from its variable lists, never
+  restated in a config.
+- **Legacy is bit-identical, proven not assumed.** A reference was generated
+  from the pre-12e commit in a temp worktree and committed as
+  `test/models/amip_si/data/rolling_dit_legacy_v1.pt`: default kwargs
+  reproduce the same 48 state-dict keys, the same 244,260 parameters, and a
+  **bit-for-bit equal** forward. Budget/mix modes leave the replaced
+  submodules unbuilt (no dead weights in the state dict).
+- **Muon grouping fixed** — a latent bug this feature would have hit: the
+  wrapper's `muon_param_groups` listed only the legacy modules, so under
+  12e the new `input_embed` / `output_head` / `forcing_blocks` parameters
+  would have been **silently dropped from the optimizer**. Now mirrors
+  upstream: cross-attention Linears → Muon, but its 2-D `temporal_pos` /
+  `query_pos` position tables → AdamW. Tested: every backbone parameter in
+  exactly one group, for all five feature combinations.
+- **Benchmarks ported** with measured results in
+  `benchmarks/.../amip_si/RESULTS_projections.md`. They confirm upstream's
+  motivation quantitatively: the legacy fixed-`Linear` head is
+  representationally bottlenecked on the σ-dependent EDM target (weighted
+  MSE 787 → 455 for a σ-conditioned gain, → 134 with the column decoder),
+  and raising `d_boundary` from ¼ to ⅜ of `dim` lifts boundary influence
+  from 0.61 to 1.07 relative to the state.
+- **Config**: `conf/model/amip_erdm_v2.yaml` now mirrors upstream
+  `ERDM_co2.yaml`'s model block exactly (budget 640+256+128, `d_co2` 48,
+  column state encoder, conv2 boundary encoder + pooled stats + static bias,
+  `global_cond`, 4 cross-attention layers, mix head K=2) — **561.6M
+  parameters**, matching upstream's ~500M forecaster target.
+- **Tests**: 63 new CPU cases (`test_rolling_dit_features.py`) — legacy
+  bit-identity, a 36-way `{embed} × {head} × {global_cond} × {cross}`
+  forward sweep, budget slice bookkeeping, cross-attention identity-at-init
+  **and causality over the window** (perturbing a later frame's forcing
+  leaves earlier outputs bit-unchanged while the last frame does respond),
+  global-cond column semantics, head zero-at-init + gating, column layout
+  validation, and the Muon coverage checks. **1224 tests green.**
+
+> **Note on small widths** (real, not a test artifact):
+> `state_encoder='column'` needs `d_state >= 24` and a `scalar_dim >= 3`
+> budget needs `d_calendar > 8`, because each sub-block has an 8-channel
+> floor. Upstream's `dim=1024` clears both by far; tiny unit-test models must
+> pass explicit budgets. Kept upstream's rounding math rather than
+> special-casing, since changing it would change parameter shapes and break
+> checkpoint compatibility.
 
 ### 12f — ERDM scheduler parity: ocean channels + warm start
 

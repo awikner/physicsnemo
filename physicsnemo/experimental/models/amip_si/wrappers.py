@@ -723,6 +723,11 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         # Default to no spatial downsampling — recipes that want a smaller
         # latent grid can override with c_grid_downsample > 1.
         rolling_dit_kwargs.setdefault("c_grid_downsample", 1)
+        # Phase 12e: the contract-aware projections (``state_encoder: column``,
+        # ``decoder: column``) need the state block sizes. DERIVE them from the
+        # wrapper's own variable lists rather than have a config restate them —
+        # the upstream ``state_layout`` lesson, so the two can never drift.
+        rolling_dit_kwargs.setdefault("state_layout", self.state_layout())
         self.backbone = RollingDiT(**rolling_dit_kwargs)
 
     def forward(self, z, t, c_grid=None, c_scalar=None):
@@ -739,28 +744,56 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         r"""Split :class:`RollingDiT` parameters into Muon vs. aux-AdamW groups.
 
         Mirrors upstream amip's ``get_rolling_dit_muon_param_groups()``.
-        The ``>=2D`` weight matrices of the per-frame spatial blocks and
-        the causal-temporal blocks go to Muon; the rest (block
-        biases/norms plus *all* parameters of the patch embed, time
-        embedder, unpatchify head, and the optional c_grid / scalar
-        embedders) go to aux AdamW.
+
+        **Muon**: the ``>=2D`` weight matrices of the hidden transformer
+        blocks — per-frame spatial, causal-temporal, and (Phase 12e) the
+        causal forcing cross-attention blocks.
+
+        **aux AdamW**: all biases / 1-D params from those blocks; the
+        forcing blocks' learned positional tables (``temporal_pos`` /
+        ``query_pos``, which are 2-D but position tables rather than
+        matmul weights, so Muon's orthogonalisation is inappropriate); and
+        *all* parameters of the input projection (legacy patch-embed +
+        c_grid/scalar embedders, or the Phase-12e
+        :class:`RollingDiTInputEmbed` that replaces them), the time
+        embedder, and whichever output head is built.
+
+        Every parameter of the backbone lands in exactly one group — see
+        ``test_rolling_dit_features.py``, which asserts that for the
+        all-features-on configuration.
         """
         block_params = list(self.backbone.spatial_blocks.parameters()) + list(
             self.backbone.temporal_blocks.parameters()
         )
+
+        # Forcing cross-attention: Linear weights to Muon, but keep the
+        # (window_size, dim) positional tables on AdamW.
+        forcing_pos = []
+        for name, p in self.backbone.forcing_blocks.named_parameters():
+            if name.endswith("temporal_pos") or name.endswith("query_pos"):
+                forcing_pos.append(p)
+            else:
+                block_params.append(p)
+
         hidden_weights = [p for p in block_params if p.ndim >= 2]
         hidden_gains_biases = [p for p in block_params if p.ndim < 2]
+        hidden_gains_biases += forcing_pos
 
+        # The whole input/output projection is AdamW territory regardless of
+        # which variant was built; ``None`` entries are the modes that did not
+        # build that submodule.
         nonhidden_modules = [
             self.backbone.patch_embed_main,
             self.backbone.t_embedder,
             self.backbone.unpatchify_layer,
+            getattr(self.backbone, "input_embed", None),
+            getattr(self.backbone, "output_head", None),
+            self.backbone.c_grid_embed,
+            self.backbone.scalar_embedder,
         ]
-        if self.backbone.c_grid_embed is not None:
-            nonhidden_modules.append(self.backbone.c_grid_embed)
-        if self.backbone.scalar_embedder is not None:
-            nonhidden_modules.append(self.backbone.scalar_embedder)
-        nonhidden_params = [p for m in nonhidden_modules for p in m.parameters()]
+        nonhidden_params = [
+            p for m in nonhidden_modules if m is not None for p in m.parameters()
+        ]
 
         return _muon_groups(
             hidden_weights,

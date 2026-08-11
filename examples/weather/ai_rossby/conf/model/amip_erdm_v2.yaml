@@ -16,9 +16,11 @@
 # 1978-2022) + ``loss=erdm_v2``. Coarse 45x90 state, 1-degree forcings
 # reduced by this model's stride-4 conv — upstream ERDM_co2.yaml's layout.
 #
-# Not yet represented (upstream keys that need code, not config):
-#   * ``input_embed`` (budget mode), ``output_head`` (mix mode),
-#     ``global_cond``, ``c_grid_cross_layers`` — Phase 12e.
+# Phase 12e landed the full upstream feature set below (budget input
+# projection, mixture output head, forcing cross-attention, global
+# conditioning), so this config now mirrors upstream ERDM_co2.yaml's model
+# block. ``state_layout`` is NOT listed: the wrapper derives the state block
+# sizes from its own variable lists.
 
 name: RollingDiTWrapper
 module: physicsnemo.experimental.models.amip_si
@@ -84,8 +86,51 @@ rolling_dit_kwargs:
   num_heads: 16
   temporal_num_heads: 8
   num_blocks: 20
+  # W: sizes the forcing cross-attention's temporal tables. MUST equal
+  # loss.window_size (erdm_v2.yaml) — the scheduler and the model both need it.
+  window_size: 6
+  # Legacy-projection widths; unused under input_embed.mode=budget below, kept
+  # so switching back to legacy needs no other edit.
   c_grid_embed_dim: 32
   c_scalar_embed_dim: 16
+
+  # Phase 12e: temporal causal cross-attention from the hidden state to the
+  # in-window forcing stream, on the last N blocks. Upstream calls this the
+  # repo's actual attend-to-the-forcings mechanism (as opposed to the forcings
+  # merely contributing input channels). Zero-init gate => no-op at init.
+  c_grid_cross_layers: 4
+  c_grid_cross_heads: 8
+
+  # Phase 12e: budgeted input projection. Each source gets an explicitly
+  # sized, RMS-normalised, disjoint slice of dim, so "how loud are the
+  # forcings" is a number here rather than an accident of channel counts
+  # (d_state = dim - d_boundary - d_calendar = 640).
+  input_embed:
+    mode: budget
+    d_boundary: 256
+    d_calendar: 128
+    d_co2: 48            # reserved inside d_calendar, not competing with harmonics
+    co2_linear: True     # affine, so scenario CO2 outside the fit range extrapolates
+    state_encoder: column   # contract-aware: level-shared upper-air encoder
+    d_level: 16
+    boundary_encoder: conv2      # strided conv -> GELU -> 3x3 spherical
+    boundary_pool_stats: True    # exact cell mean AND std of the raw forcings
+    boundary_static_bias: True   # learned geographic field (RoPE is relative)
+    source_norm: True
+
+  # Phase 12e: route day-of-year + the trend scalar into the AdaLN vector so
+  # they modulate every block, not just add input channels.
+  global_cond: True
+
+  # Phase 12e: sigma-conditioned mixture readout. The EDM target is a sigma-
+  # and channel-dependent blend of a signal and a noise readout, which one
+  # fixed Linear cannot represent; K=2 matches that two-regime structure.
+  # (Measured: benchmarks/.../amip_si/RESULTS_projections.md.)
+  output_head:
+    mode: mix
+    num_experts: 2
+    decoder: flat        # flat | column (column mirrors the input encoder)
+    d_level: 16
   # Phase 12d option (b): forcings arrive at 1 degree (dataset
   # boundary_zarr_path -> amip_dailyavg_boundary) and this strided conv
   # reduces them to the 45x90 token grid — upstream ERDM_co2.yaml's layout.
