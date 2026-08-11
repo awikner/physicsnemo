@@ -26,6 +26,7 @@ live in :mod:`.samplers` and (later) :mod:`.transforms`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -51,6 +52,16 @@ try:
     zarr.config.set({"async.concurrency": 100})
 except Exception:  # pragma: no cover — defensive; older zarr layouts
     pass
+
+logger = logging.getLogger(__name__)
+
+
+async def _group_has_all(group, names) -> bool:
+    """Whether an async zarr group holds every one of ``names``."""
+    for n in names:
+        if await group.get(n) is None:
+            return False
+    return True
 
 
 @dataclass
@@ -314,10 +325,6 @@ class ClimateZarrDataset(Dataset):
         ):
             self._async_arrays[v] = _zarr_sync(self._async_group.get(v))
 
-        # Constant boundaries don't vary over time — read once at init so the
-        # per-sample async batch doesn't include them.
-        self._constants_tensor = self._eager_load_constants()
-
         # Boundary-substitution: open the separate boundary Zarr group(s) and
         # cache async-array handles for the varying-boundary variables only.
         # Per-sample varying-boundary reads then route through these handles.
@@ -328,6 +335,13 @@ class ClimateZarrDataset(Dataset):
             self._open_boundary_store("non_leap", self._non_leap_boundary_zarr_path)
         elif self._boundary_zarr_path:
             self._open_boundary_store("single", self._boundary_zarr_path)
+
+        # Constant boundaries don't vary over time — read once at init so the
+        # per-sample async batch doesn't include them. MUST come after the
+        # boundary stores are opened: when one is configured the constants are
+        # sourced from it, so the whole c_grid stays on one grid.
+        self._constants_tensor = self._eager_load_constants()
+
         # Cache the prognostic time coord for boundary-time-index lookup
         # and for calendar emission. Needed when actually using a separate
         # boundary store OR when ``emit_calendar=True`` (Phase 8c — diffusion
@@ -437,13 +451,43 @@ class ClimateZarrDataset(Dataset):
     # Sample assembly — async-batched zarr reads (see __init__ note for why).
     # ------------------------------------------------------------------ #
     def _eager_load_constants(self) -> Optional[torch.Tensor]:
-        """Read constant boundary fields once at init (they don't vary in time)."""
+        """Read constant boundary fields once at init (they don't vary in time).
+
+        Sourced from the **boundary store** when one is configured, so the
+        whole ``c_grid`` stream (constants + varying) comes from one place and
+        therefore one grid. Without this, a boundary store at a different
+        resolution than the prognostic store — upstream amip_v2's layout:
+        coarse state, native-resolution forcings reduced by the model's
+        stride-4 conv — makes the wrapper's ``pack_c_grid`` concat fail on
+        mismatched ``(H, W)``. Falls back to the prognostic store when the
+        boundary store doesn't carry the constants (older boundary stores
+        hold only the varying fields).
+        """
         names = self.layout.constant_boundary_variables
         if not names:
             return None
 
+        const_group = self._async_group
+        if self._boundary_async_groups:
+            # Any key works: every boundary store shares one grid + constants.
+            candidate = next(iter(self._boundary_async_groups.values()))
+            if _zarr_sync(_group_has_all(candidate, names)):
+                const_group = candidate
+                logger.info(
+                    "constant boundaries sourced from the boundary store "
+                    "(keeps the whole c_grid on one grid)"
+                )
+            else:
+                logger.warning(
+                    "boundary store lacks constant boundaries %s — reading them "
+                    "from the prognostic store. If the two stores are on "
+                    "different grids, c_grid packing will fail; add the "
+                    "constants to the boundary store.",
+                    names,
+                )
+
         async def _read_one(n: str):
-            arr = await self._async_group.get(n)
+            arr = await const_group.get(n)
             return await arr.getitem(slice(None))
 
         async def _batch():

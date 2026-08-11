@@ -12,19 +12,13 @@
 # ERA5 variable set (6 surface / 5 upper-air x 26 levels / 15 diagnostic
 # = 151 state channels) on the 45x90 coarse forecaster grid.
 #
-# Pairs with the ``amip_dailyavg_coarse`` dataset from Phase 12c — the
-# daily-avg archive is NOT converted yet, so this config is not runnable
-# against real data until 12c lands. It instantiates cleanly (covered by
-# ``test_hydra_diffusion_configs_instantiate``) and pins the rebaselined
-# hyperparameters; pair it with ``loss=erdm_v2``.
+# Pairs with ``dataset=amip_dailyavg_coarse`` (Phase 12c, converted
+# 1978-2022) + ``loss=erdm_v2``. Coarse 45x90 state, 1-degree forcings
+# reduced by this model's stride-4 conv — upstream ERDM_co2.yaml's layout.
 #
 # Not yet represented (upstream keys that need code, not config):
 #   * ``input_embed`` (budget mode), ``output_head`` (mix mode),
 #     ``global_cond``, ``c_grid_cross_layers`` — Phase 12e.
-#   * Full-res c_grid with ``c_grid_downsample: 4`` (upstream keeps the
-#     boundary maps at 1 degree and downsamples them internally; whether
-#     our coarse store also carries coarse boundaries is a 12c decision).
-#     Until then both streams share the state grid: c_grid_downsample 1.
 
 name: RollingDiTWrapper
 module: physicsnemo.experimental.models.amip_si
@@ -92,5 +86,8 @@ rolling_dit_kwargs:
   num_blocks: 20
   c_grid_embed_dim: 32
   c_scalar_embed_dim: 16
-  c_grid_downsample: 1
+  # Phase 12d option (b): forcings arrive at 1 degree (dataset
+  # boundary_zarr_path -> amip_dailyavg_boundary) and this strided conv
+  # reduces them to the 45x90 token grid — upstream ERDM_co2.yaml's layout.
+  c_grid_downsample: 4
   dropout: 0.0

@@ -139,3 +139,139 @@ def test_full_chain_produces_the_routed_contract(tmp_path):
     assert sample["calendar"].shape == (3,)
     assert float(sample["calendar"][2]) == 380.0
     assert asm.c_grid_dim == 2  # lsm + sst
+
+
+def _write_boundary_store(path: Path, *, factor: int = 4) -> None:
+    """Full-resolution boundary-only store: the upstream layout (coarse state,
+    native-resolution forcings reduced by the model's stride-4 conv)."""
+    base = cftime.DatetimeGregorian(2000, 1, 1)
+    times = [base + timedelta(hours=6 * i) for i in range(_N_TIME)]
+    rng = np.random.default_rng(1)
+    H, W = _H * factor, _W * factor
+    lsm = rng.standard_normal((H, W)).astype("float32")
+    lsm[0, 0] = np.nan
+    xr.Dataset(
+        {
+            "lsm": (("lat", "lon"), lsm),
+            "global_mean_co2": (
+                ("time", "lat", "lon"),
+                np.full((_N_TIME, H, W), 380.0, dtype="float32"),
+            ),
+            "sst": (
+                ("time", "lat", "lon"),
+                rng.standard_normal((_N_TIME, H, W)).astype("float32"),
+            ),
+        },
+        coords={
+            "time": ("time", times),
+            "lat": ("lat", np.linspace(89.5, -89.5, H, dtype="float32")),
+            "lon": ("lon", np.linspace(0, 360 * (W - 1) / W, W, dtype="float32")),
+        },
+        attrs={"calendar": "standard", "data_timedelta_hours": 6},
+    ).to_zarr(path, mode="w", consolidated=True, zarr_format=3)
+
+
+def test_mixed_resolution_c_grid_packs(tmp_path):
+    """Phase 12d option (b): coarse state + native-resolution boundaries.
+
+    Previously impossible — constants loaded from the PROGNOSTIC store while
+    varying boundaries came from the boundary store, so the wrapper's
+    ``pack_c_grid`` concat raised on the (45x90 vs 180x360) mismatch. The
+    dataset now sources constants from the boundary store when one is
+    configured, keeping the whole c_grid on one grid.
+    """
+    from physicsnemo.experimental.models.amip_si import RollingDiTWrapper
+
+    state_path, bnd_path = tmp_path / "state.zarr", tmp_path / "bnd.zarr"
+    _write_store(state_path)          # coarse state grid (_H x _W)
+    _write_boundary_store(bnd_path)   # 4x finer boundaries
+
+    ds = ClimateZarrDataset(
+        state_path, boundary_zarr_path=bnd_path, emit_calendar=True
+    )
+    sample = ds[(0, 1)]
+    # Constants now follow the boundaries' grid, not the state's.
+    assert sample["constant_boundary"].shape[-2:] == (_H * 4, _W * 4)
+    assert sample["varying_boundary"].shape[-2:] == (_H * 4, _W * 4)
+    assert sample["surface_in"].shape[-2:] == (_H, _W)
+
+    w = RollingDiTWrapper(
+        surface_variables=["t2m"],
+        upper_air_variables=["ta"],
+        diagnostic_variables=[],
+        constant_boundary_variables=["lsm"],
+        varying_boundary_variables=["global_mean_co2", "sst"],
+        levels=[500.0, 850.0],
+        horizontal_resolution=(_H, _W),
+        channel_layout="v2",
+        rolling_dit_kwargs=dict(dim=16, num_heads=2, num_blocks=1),
+    )
+    batched = {
+        k: v.unsqueeze(0).unsqueeze(0) if torch.is_tensor(v) else v
+        for k, v in sample.items()
+    }
+    c_grid = w.pack_window_c_grid(batched)  # used to raise RuntimeError
+    assert c_grid.shape[-2:] == (_H * 4, _W * 4)
+    assert c_grid.shape[-3] == 3  # 2 varying + 1 constant
+
+
+def test_mixed_resolution_reaches_the_model_with_stride4_reduction(tmp_path):
+    """The full option-(b) pairing: coarse state + 1-degree forcings, reduced
+    inside the model by ``c_grid_downsample=4`` — upstream amip_v2's layout."""
+    from physicsnemo.experimental.models.amip_si import RollingDiTWrapper
+
+    state_path, bnd_path = tmp_path / "state.zarr", tmp_path / "bnd.zarr"
+    _write_store(state_path)
+    _write_boundary_store(bnd_path)
+    ds = ClimateZarrDataset(
+        state_path, boundary_zarr_path=bnd_path, emit_calendar=True
+    )
+    # The real chain order: fill (physical units) -> route. A normalizer would
+    # sit between them in a recipe; omitted here since this pins shapes.
+    # Without the fill the fixture's masked ``lsm`` NaN propagates through the
+    # boundary conv and the whole forward goes non-finite.
+    from physicsnemo.experimental.datapipes.climate import ComposeTransform
+
+    ds.transform = ComposeTransform(
+        NanFillTransform(
+            constant_boundary_variables=["lsm"],
+            varying_boundary_variables=["global_mean_co2", "sst"],
+            fill_values={"lsm": 0.0},
+        ),
+        ForcingAssembler(
+            varying_boundary_variables=["global_mean_co2", "sst"],
+            constant_boundary_variables=["lsm"],
+            scalar_routed_variables=["global_mean_co2"],
+        ),
+    )
+    w = RollingDiTWrapper(
+        surface_variables=["t2m"],
+        upper_air_variables=["ta"],
+        diagnostic_variables=[],
+        constant_boundary_variables=["lsm"],
+        varying_boundary_variables=["global_mean_co2", "sst"],
+        scalar_routed_boundary_variables=["global_mean_co2"],
+        levels=[500.0, 850.0],
+        horizontal_resolution=(_H, _W),
+        scalar_dim=3,
+        channel_layout="v2",
+        rolling_dit_kwargs=dict(
+            dim=32, num_heads=2, num_blocks=1, c_grid_downsample=4
+        ),
+    ).eval()
+    assert (w.c_grid_dim, w.scalar_dim) == (2, 3)  # co2 routed out of the grid
+
+    frames = [ds[(t, 1)] for t in range(3)]
+    batched = {
+        k: torch.stack([f[k] for f in frames]).unsqueeze(0)
+        for k in ("surface_in", "upper_air_in", "varying_boundary", "calendar")
+    }
+    batched["constant_boundary"] = frames[0]["constant_boundary"]
+    z = w.pack_window_state(batched)
+    c_grid = w.pack_window_c_grid(batched)
+    assert z.shape[-2:] == (_H, _W)
+    assert c_grid.shape[-2:] == (_H * 4, _W * 4)  # forcings stay native
+    with torch.no_grad():
+        out = w(z, torch.rand(1, 3), c_grid=c_grid, c_scalar=batched["calendar"])
+    assert out.shape == z.shape
+    assert torch.isfinite(out).all()

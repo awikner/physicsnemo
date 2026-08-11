@@ -479,14 +479,38 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   tree green**, including a fix for two pre-existing converter-test stubs
   that lacked the `write_batch` arg.
 
-> **12c/12d seam (open, documented):** `coarsen_zarr.py` hard-fills boundary
-> NaN *before* coarsening, so no NaN survives into the coarse store and the
-> smoothing knobs are inert there (the coarse dataset config says so).
-> Upstream builds its coarse boundary store *through* the smoothing path, so
-> a coarse store rebuilt with `--smooth-boundaries` would be the closer
-> parity; the full-res store (still NaN-carrying) already smooths correctly,
-> which covers x_DDC and the upstream-parity `c_grid_downsample=4` path via
-> `boundary_zarr_path`.
+> **12c/12d seam — CLOSED via option (b)** *(user decision 2026-08-11)*.
+> Upstream keeps forcings at **native 1° resolution** and reduces them inside
+> the model with a stride-4 conv (`c_grid_downsample: 4`); only the *state* is
+> coarsened. The fork now matches that:
+>
+> * `ClimateZarrDataset` sources **constant** boundaries from the boundary
+>   store when one is configured, so the whole `c_grid` sits on one grid.
+>   Previously constants came from the prognostic store and varying boundaries
+>   from the boundary store, and the wrapper's `pack_c_grid` concat raised on
+>   the 45×90 vs 180×360 mismatch — i.e. the mixed-resolution pairing was
+>   documented in 12c but did not actually work. Now tested end-to-end
+>   (dataset → pack → forward at `c_grid_downsample=4`).
+> * [`extract_boundary_store.py`](../../tools/data/amip/extract_boundary_store.py)
+>   copies just the 6 boundary variables out of the full-res archive
+>   (~2.3 GB/yr vs ~58, bit-identical, **NaN preserved** so the runtime
+>   masked-Gaussian fade runs exactly where upstream's does). That is what
+>   makes 1° forcings affordable to move: ~105 GB for 1978–2022 instead of
+>   the ~2.6 TB full archive.
+> * `conf/dataset/amip_dailyavg_coarse.yaml` now points `boundary_zarr_path`
+>   at that store and `conf/model/amip_erdm_v2.yaml` sets
+>   `c_grid_downsample: 4` — so the **default** pairing is upstream parity.
+>   The coarse store's own coarsened boundary arrays go unused (kept so it
+>   remains usable standalone).
+>
+> Consequences: the runtime `smooth_nan_boundaries` knobs are now **live**
+> (the boundary store carries NaN), and **12e's `boundary_pool_stats` is
+> unblocked** — within-cell boundary variance still exists at 1°, which is
+> exactly what that feature reads. The earlier recommendation (a)
+> (`coarsen_zarr.py --smooth-boundaries`) stays available and tested for
+> anyone using the standalone coarse store, but no re-coarsening was needed:
+> the state channels are bit-identical either way, so the shipped coarse
+> store required no rebuild.
 
 ### 12e — Backbone feature parity (RollingDiT)
 
