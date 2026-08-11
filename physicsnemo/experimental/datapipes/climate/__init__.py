@@ -36,10 +36,16 @@ from .dataset import (
     ClimateZarrDataset,
     ClimateZarrStoreLayout,
 )
+from .forcing import ForcingAssembler
 from .multiyear import ClimateZarrMultiYearDataset
 from .samplers import LeadTimePairSampler
 from .sequence import IntSampler, SequenceDataset
-from .transforms import ClimateNormalizer, ComposeTransform, NanFillTransform
+from .transforms import (
+    ClimateNormalizer,
+    ComposeTransform,
+    NanFillTransform,
+    smooth_masked_boundary,
+)
 
 __all__ = [
     "CLIMATE_ZARR_SCHEMA_VERSION",
@@ -49,8 +55,10 @@ __all__ = [
     "ClimateZarrMultiYearDataset",
     "ClimateZarrStoreLayout",
     "ComposeTransform",
+    "ForcingAssembler",
     "IntSampler",
     "LeadTimePairSampler",
     "NanFillTransform",
     "SequenceDataset",
+    "smooth_masked_boundary",
 ]

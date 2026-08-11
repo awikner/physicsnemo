@@ -59,6 +59,7 @@ with warnings.catch_warnings():
 
 # Reuse helpers from the deterministic train.py rather than re-implementing.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dataset_setup import build_forcing_pipeline  # noqa: E402
 from ema import ModelEMA  # noqa: E402
 from train import (  # noqa: E402
     _flatten_optimizer_cfg,
@@ -110,17 +111,13 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
         ),
         normalize_diagnostic=bool(data.get("normalize_diagnostic", False)),
     )
-    nan_fill = NanFillTransform(
-        constant_boundary_variables=list(cfg.model.constant_boundary_variables),
-        varying_boundary_variables=list(cfg.model.varying_boundary_variables),
-        fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
-        default=float(data.nan_fill_default),
-    )
-    # Compose normalizer → nan_fill as the dataset transform.
-    def _compose(sample):
-        return nan_fill(normalizer(sample))
-
-    ds.transform = _compose
+    # Phase 12d.13: one construction site for fill → normalize → scalar
+    # routing. NOTE this replaces a ``nan_fill(normalizer(sample))`` compose,
+    # which substituted PHYSICAL-unit fill values (SST 270 K) into an
+    # already-z-scored tensor; dataset_setup pins the documented order.
+    pipeline = build_forcing_pipeline(cfg, normalizer=normalizer)
+    ds.transform = pipeline.dataset_transform
+    ds.forcing_pipeline = pipeline
     return ds
 
 
@@ -471,6 +468,10 @@ def main(cfg: DictConfig) -> None:
 
     # --- Model + DDP + Loss + Optimizer ----------------------------------
     model = build_model(cfg.model).to(dist.device)
+    # Anti-fork guard (Phase 12d.13): the model must be sized for exactly the
+    # c_grid / c_scalar widths the data pipeline emits.
+    if getattr(raw_ds, "forcing_pipeline", None) is not None:
+        raw_ds.forcing_pipeline.assert_matches(model, name="cfg.model")
     if dist.world_size > 1:
         model = DistributedDataParallel(
             model,

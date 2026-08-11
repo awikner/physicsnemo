@@ -54,3 +54,13 @@ shuffle: True
 normalize_constant_boundary: False
 # Upstream z-scores everything through one stats file, diagnostics included.
 normalize_diagnostic: True
+
+# Phase 12d.14 — masked-Gaussian coast fade for boundary NaN (upstream
+# amip_v2 ERDM_co2.yaml defaults). SST/sea-ice monthly_interp carry NaN over
+# land; a hard constant fill stamps a step discontinuity (effectively the
+# land-sea mask) into the channel, so upstream fades from the true coastal
+# value to the fill instead. Valid points are preserved exactly.
+smooth_nan_boundaries: True
+smooth_sigma: 1.5
+smooth_kernel_size: 5
+smooth_n_iters: 10

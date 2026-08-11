@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12c complete (2026-08-10); 12d+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12d complete (2026-08-10); 12e+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -413,6 +413,80 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
     call either way).
 
 **Effort**: ~1.5 days.
+
+**12d delivered** *(2026-08-10)*:
+
+- **The choke point** —
+  [`ForcingAssembler`](../../physicsnemo/experimental/datapipes/climate/forcing.py)
+  performs upstream `forcing_from_raw` steps 3–4: pops spatially-uniform
+  boundary channels (CO₂) out of the gridded stream and appends them to the
+  calendar row, with a uniformity check, a `reduce={mean,first}` choice
+  (`first` = upstream's literal `boundary[0,0,0]` read), and upstream's
+  "no calendar ⇒ no scalar, CO₂ stays in the grid" degradation. Steps 1–2
+  stay where the fork already had them (`ClimateNormalizer`; a
+  `sst_rescaler` hook reserved for 12g, invoked *before* the pop so SST is
+  still gridded, matching upstream's ordering).
+- **One construction site** —
+  [`dataset_setup.py`](../../examples/weather/ai_rossby/dataset_setup.py)
+  (`build_forcing_pipeline`) now defines the fill → normalize → route chain
+  once; all five consumers route through it (`train_diffusion`,
+  `eval_diffusion` (inherits `_build_dataset`), `inference`,
+  `climatology_cli`, `train` for the NaN-fill). Both normalization
+  placements are first-class: `normalize_in_dataset=True` (chain includes
+  the normalizer) and `False` (recipe normalizes per batch at use — the
+  `as_normalizer()` proxy keeps one object for both directions so no
+  rollout-helper signature changed). `assert_matches(wrapper)` is the
+  anti-fork guard, called in all four model-owning recipes.
+- **Two real divergences found and fixed by centralizing** (both pinned by
+  regression tests):
+  1. **Order** — `train_diffusion` composed `nan_fill(normalizer(sample))`,
+     substituting *physical-unit* fills (SST 270 K) into z-scored space
+     (≈ +20σ over every masked gridpoint). The other three recipes fill
+     first. This would have hit the 12c AMIP configs, which are the first
+     to set non-zero boundary fills (`sea_surface_temperature_monthly_interp:
+     270.0`). Test `test_inverted_order_would_leave_the_raw_fill_value`
+     documents the old behavior explicitly.
+  2. **Scope** — `train_diffusion` / `climatology_cli` filled boundary NaN
+     only; `train` / `inference` also fill prognostic-surface + diagnostic
+     NaN (PLASIM/ERA5 SST land-NaN otherwise reaches the loss). The shared
+     builder uses the broad scope everywhere (a no-op for the NaN-free AMIP
+     daily-avg state).
+- **Boundary smoothing (12d.14)** — `smooth_masked_boundary` +
+  `_smooth_fill_channel` ported faithfully (iterated Dirichlet diffusion,
+  circular longitude) and wired into `NanFillTransform` behind
+  `smooth_nan_boundaries` / `smooth_sigma` / `smooth_kernel_size` /
+  `smooth_n_iters`. Deviation from the plan's wording: it lives *inside*
+  `NanFillTransform` rather than beside it, mirroring upstream where
+  `_fill_mask` chooses hard-fill vs smooth-fill per variable from the same
+  `mask_fill` dict — one place for the fill values instead of two.
+  Boundaries only, matching upstream. `amip_dailyavg*` configs enable it
+  (upstream defaults).
+- **Constant-boundary cache (12d.15) — NOT needed, structurally.**
+  Upstream's `.npz` exists because its per-timestep HDF5 layout would
+  re-read time-invariant maps from every file. The fork's Zarr stores each
+  constant once (no time axis) and
+  `ClimateZarrDataset._eager_load_constants` reads them once at init,
+  returning the *same tensor object* to every sample —
+  `test_constant_boundary_cache.py` pins zero per-sample reads (identity
+  check) plus the real hazard of a shared cached tensor: that the 12d
+  chain stays copy-on-write and never mutates it.
+- **Config**: `conf/model/amip_erdm_v2.yaml` now carries
+  `scalar_routed_boundary_variables: [global_mean_co2]` + `scalar_dim: 3`,
+  giving exactly upstream `ERDM_co2.yaml`'s contract (`c_grid_dim` 5 /
+  `scalar_dim` 3, verified end-to-end against the wrapper).
+- **Tests**: 32 new CPU cases (16 assembler/smoothing, 13 pipeline
+  ordering + guard, 3 constant-boundary cache); **1089 → whole affected
+  tree green**, including a fix for two pre-existing converter-test stubs
+  that lacked the `write_batch` arg.
+
+> **12c/12d seam (open, documented):** `coarsen_zarr.py` hard-fills boundary
+> NaN *before* coarsening, so no NaN survives into the coarse store and the
+> smoothing knobs are inert there (the coarse dataset config says so).
+> Upstream builds its coarse boundary store *through* the smoothing path, so
+> a coarse store rebuilt with `--smooth-boundaries` would be the closer
+> parity; the full-res store (still NaN-carrying) already smooths correctly,
+> which covers x_DDC and the upstream-parity `c_grid_downsample=4` path via
+> `boundary_zarr_path`.
 
 ### 12e — Backbone feature parity (RollingDiT)
 

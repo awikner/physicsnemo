@@ -19,9 +19,6 @@
 # hyperparameters; pair it with ``loss=erdm_v2``.
 #
 # Not yet represented (upstream keys that need code, not config):
-#   * CO2 in the scalar slot (upstream: scalar_dim 3, c_grid_dim 5 with
-#     CO2 popped out of the grid by ``forcing_from_raw``) — Phase 12d.
-#     Until then CO2 rides in c_grid: scalar_dim 2, c_grid_dim 6.
 #   * ``input_embed`` (budget mode), ``output_head`` (mix mode),
 #     ``global_cond``, ``c_grid_cross_layers`` — Phase 12e.
 #   * Full-res c_grid with ``c_grid_downsample: 4`` (upstream keeps the
@@ -74,7 +71,16 @@ levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
          500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
 # The v2 forecaster's coarse grid (180x360 pre-coarsened x4, Phase 12c).
 horizontal_resolution: [45, 90]
-scalar_dim: 2
+# Phase 12d: CO₂ is a spatially uniform map in the store, so the
+# ForcingAssembler pops it out of the gridded stream and appends it to the
+# calendar row — upstream's ``forcing_from_raw`` step 3. This gives exactly
+# upstream ERDM_co2.yaml's contract: c_grid_dim 5 (2 constant + 3 remaining
+# varying) and scalar_dim 3 (second_of_day, day_of_year, CO₂). The wrapper
+# derives c_grid_dim from these two lists and validates scalar_dim, so the
+# model and the data pipeline cannot be sized differently.
+scalar_dim: 3
+scalar_routed_boundary_variables:
+  - global_mean_co2
 # Phase 12b: amip_v2 packing — state [surface | diag | upper_air] with the
 # upper-air block level-major (1000 hPa first); c_grid [varying | constant].
 channel_layout: v2

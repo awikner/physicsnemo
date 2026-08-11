@@ -82,6 +82,7 @@ from climatology import (
     StreamingTimeVariance,
     lat_weighted_global_scalars,
 )
+from dataset_setup import build_forcing_pipeline  # noqa: E402
 from validate import Deterministic, GaussianIC, Perturber, ReplicateOnly
 
 
@@ -1012,13 +1013,19 @@ def main(cfg: DictConfig) -> None:
         normalize_constant_boundary=bool(data.get("normalize_constant_boundary", False)),
         normalize_diagnostic=bool(data.get("normalize_diagnostic", False)),
     ).to(dist.device)
-    nan_fill = NanFillTransform(
-        constant_boundary_variables=list(cfg.model.constant_boundary_variables),
-        varying_boundary_variables=list(cfg.model.varying_boundary_variables),
-        fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
-        default=float(data.nan_fill_default),
+    # Phase 12d.13: shared fill → normalize → scalar-route pipeline. This
+    # recipe normalizes at USE (``_prep_sample`` calls the normalizer per IC
+    # frame), so the dataset transform is the NaN-fill and the
+    # normalizer/assembler ride on the proxy below. NOTE the NaN-fill now
+    # also covers prognostic-surface / diagnostic groups, matching train.py
+    # and inference.py (this recipe previously filled boundaries only).
+    forcing_pipeline = build_forcing_pipeline(
+        cfg, normalizer=normalizer, normalize_in_dataset=False
     )
-    base_ds.transform = nan_fill
+    base_ds.transform = forcing_pipeline.dataset_transform
+    normalizer = forcing_pipeline.as_normalizer()
+    # Anti-fork guard (Phase 12d.13).
+    forcing_pipeline.assert_matches(model, name="cfg.model")
 
     # --- Roll out + aggregate ----------------------------------------------
     ic_indices = list(ccfg.ic_start)

@@ -79,6 +79,7 @@ from async_writer import (
     make_forecast_filename,
     subset_forecast_dataset,
 )
+from dataset_setup import build_forcing_pipeline  # noqa: E402
 
 
 def _resolve_path(p: Optional[str]) -> Optional[str]:
@@ -1750,33 +1751,34 @@ def main(cfg: DictConfig) -> None:
         normalize_diagnostic=bool(data.get("normalize_diagnostic", False)),
         **normalizer_kwargs,
     ).to(dist.device)
-    nan_fill = NanFillTransform(
-        constant_boundary_variables=list(cfg.model.constant_boundary_variables),
-        varying_boundary_variables=list(cfg.model.varying_boundary_variables),
-        # Surface + diagnostic fills (Pangu mask values) — SST is a prognostic
-        # SURFACE variable, so its land-NaN must be filled before the model or
-        # the autoregressive rollout goes all-NaN after one step (train.py's
-        # build_datapipe got this wiring 2026-07-24; inference missed it).
-        surface_variables=list(cfg.model.surface_variables),
-        diagnostic_variables=list(cfg.model.get("diagnostic_variables", []) or []),
-        fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
-        default=float(data.nan_fill_default),
-    )
     # Trim varying-boundary channels + upper-air levels to the model's sets
     # BEFORE the NaN-fill so every downstream tensor (normalizer + model)
     # matches cfg.model.
-    _transforms = []
+    _extras = []
     if varying_subset_indices is not None:
-        _transforms.append(_VaryingBoundarySubsetTransform(varying_subset_indices))
+        _extras.append(_VaryingBoundarySubsetTransform(varying_subset_indices))
     if pressure_level_indices is not None:
-        _transforms.append(_PressureLevelSubsetTransform(pressure_level_indices))
+        _extras.append(_PressureLevelSubsetTransform(pressure_level_indices))
         # Report the model's physical level VALUES in the output ``level`` coord
         # (see ``_extract_layout``); a plain attribute, no dataset mutation.
         base_ds._inference_level_coord = [float(lv) for lv in model_levels]
-    _transforms.append(nan_fill)
-    base_ds.transform = (
-        _transforms[0] if len(_transforms) == 1 else ComposeTransform(*_transforms)
+    # Phase 12d.13: shared fill → normalize → scalar-route pipeline. This
+    # recipe normalizes at USE (per batch, on device — see
+    # ``_maybe_normalize``), so the dataset transform is extras + NaN-fill and
+    # the normalizer/assembler run in ``pipeline.finalize``.
+    forcing_pipeline = build_forcing_pipeline(
+        cfg,
+        normalizer=normalizer,
+        normalize_in_dataset=False,
+        extra_transforms=_extras,
     )
+    base_ds.transform = forcing_pipeline.dataset_transform
+    # Proxy so the rollout helpers keep using one object for both directions
+    # (normalize inputs / denormalize outputs) while scalar routing runs in
+    # lockstep with normalization. Identity when nothing is routed.
+    normalizer = forcing_pipeline.as_normalizer()
+    # Anti-fork guard (Phase 12d.13).
+    forcing_pipeline.assert_matches(model, name="cfg.model")
 
     # --- Inference config ---------------------------------------------------
     # IC selection: either an explicit list of integer time indices

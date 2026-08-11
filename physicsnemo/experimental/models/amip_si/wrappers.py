@@ -615,6 +615,18 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
           diag]``, c_grid ``[constant | varying]``). Pinned by the frozen
           ``conf/model/amip_rfm.yaml``; no upstream checkpoint matches it.
 
+    .. note:: **Scalar-routed forcings (Phase 12d).**
+        ``scalar_routed_boundary_variables`` names channels that
+        :class:`~physicsnemo.experimental.datapipes.climate.ForcingAssembler`
+        pops out of ``varying_boundary`` and appends to the calendar row
+        (upstream amip_v2's CO2 handling: ``c_grid_dim`` 6 → 5,
+        ``scalar_dim`` 2 → 3). List them here as a subset of
+        ``varying_boundary_variables`` — ``c_grid_dim`` is reduced
+        accordingly and ``scalar_dim`` is validated against
+        ``2 + n_routed``, so a config that sizes the model differently from
+        the data pipeline fails at construction instead of silently
+        mis-packing.
+
     Same channel-group bookkeeping as :class:`AmipDiTWrapper` but the pack
     operates on ``(B, W, ...)`` window samples (drive via
     :class:`SequenceDataset`).
@@ -632,6 +644,7 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         horizontal_resolution: Sequence[int],
         scalar_dim: int = 2,
         channel_layout: str = "v2",
+        scalar_routed_boundary_variables: Sequence[str] = (),
         rolling_dit_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
@@ -646,13 +659,33 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         self.levels = list(levels)
         self.horizontal_resolution = list(horizontal_resolution)
         self.scalar_dim = int(scalar_dim)
+        # Phase 12d.13: channels the ForcingAssembler pops out of the gridded
+        # stream and appends to the calendar row. They are listed here as a
+        # SUBSET of ``varying_boundary_variables`` (the stored order — the
+        # NaN-fill still needs the full list) and are subtracted from
+        # ``c_grid_dim`` so the backbone is sized for what actually arrives.
+        self.scalar_routed_boundary_variables = list(
+            scalar_routed_boundary_variables
+        )
+        unknown = [
+            v
+            for v in self.scalar_routed_boundary_variables
+            if v not in self.varying_boundary_variables
+        ]
+        if unknown:
+            raise ValueError(
+                f"scalar_routed_boundary_variables {unknown} are not in "
+                f"varying_boundary_variables {self.varying_boundary_variables}"
+            )
 
         self.num_surface = len(self.surface_variables)
         self.num_upper_air_vars = len(self.upper_air_variables)
         self.num_diagnostic = len(self.diagnostic_variables)
         self.num_levels = len(self.levels)
         self.num_constant_boundary = len(self.constant_boundary_variables)
-        self.num_varying_boundary = len(self.varying_boundary_variables)
+        self.num_varying_boundary = len(self.varying_boundary_variables) - len(
+            self.scalar_routed_boundary_variables
+        )
 
         self.in_channels = (
             self.num_surface
@@ -660,6 +693,21 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
             + self.num_diagnostic
         )
         self.c_grid_dim = self.num_constant_boundary + self.num_varying_boundary
+
+        if self.scalar_routed_boundary_variables:
+            # Every calendar encoding this datapipe emits is width 2
+            # (second_of_day, day_of_year) or (month, hour), so a routed
+            # channel must be paid for with a matching scalar_dim. Failing
+            # loudly here is what keeps the model config and the assembler
+            # from drifting apart (they read the same two config keys).
+            expected = 2 + len(self.scalar_routed_boundary_variables)
+            if self.scalar_dim != expected:
+                raise ValueError(
+                    f"scalar_dim={self.scalar_dim} does not match "
+                    f"2 (calendar) + {len(self.scalar_routed_boundary_variables)} "
+                    f"routed boundary channel(s) = {expected}; set "
+                    f"scalar_dim: {expected} in the model config"
+                )
 
         nlat, nlon = self.horizontal_resolution
 

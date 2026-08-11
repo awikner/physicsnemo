@@ -562,6 +562,12 @@ def main(cfg) -> None:
     loaded_epoch = load_checkpoint(ckpt_dir, models=wrapper, device=dist.device)
     logger.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
     wrapper.eval()
+    # Anti-fork guard (Phase 12d.13). ``raw_ds`` comes from
+    # ``train_diffusion._build_dataset``, so this recipe inherits the shared
+    # fill → normalize → route pipeline; verify the checkpoint's model was
+    # sized for the same channel contract.
+    if getattr(raw_ds, "forcing_pipeline", None) is not None:
+        raw_ds.forcing_pipeline.assert_matches(wrapper, name="cfg.model")
 
     # The same scheduler class serves both training loss (compute_loss)
     # and inference sampling (sample / sample_rollout) — see

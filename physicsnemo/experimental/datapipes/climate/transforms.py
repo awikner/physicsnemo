@@ -527,6 +527,21 @@ class NanFillTransform:
     strict : bool, optional, default=False
         If True, raise if any NaN remains after the fill (sentinel for stats
         changes / unexpected source fields). Useful in tests + dev.
+    smooth_nan_boundaries : bool, optional, default=False
+        Replace the hard constant fill on the **boundary** groups with the
+        masked-Gaussian coast fade of :func:`smooth_masked_boundary` (Phase
+        12d.14; upstream amip_v2 ``smooth_nan_boundaries``). Valid values are
+        preserved exactly and the masked region fades smoothly to the
+        per-variable fill, so the land–sea seam does not stamp a step
+        discontinuity into e.g. SST. Surface / diagnostic groups keep the
+        hard fill either way (matching upstream, which only smooths
+        boundaries).
+    smooth_sigma : float, optional, default=1.5
+        Per-step Gaussian std-dev in pixels (upstream AMIP default).
+    smooth_kernel_size : int, optional, default=5
+        Gaussian kernel width (upstream AMIP default).
+    smooth_n_iters : int, optional, default=10
+        Diffusion iterations — larger = wider, softer fade (upstream default).
 
     Forward
     -------
@@ -552,11 +567,22 @@ class NanFillTransform:
         scan_constant: bool = True,
         scan_varying: bool = True,
         strict: bool = False,
+        smooth_nan_boundaries: bool = False,
+        smooth_sigma: float = 1.5,
+        smooth_kernel_size: int = 5,
+        smooth_n_iters: int = 10,
     ) -> None:
         self._scan_constant = scan_constant
         self._scan_varying = scan_varying
         self._strict = strict
         self._default = float(default)
+        # Phase 12d.14: masked-Gaussian coast fade instead of a hard constant
+        # fill, for the BOUNDARY groups only (upstream ``_fill_mask`` smooths
+        # boundaries; surface/diagnostic keep the hard fill).
+        self._smooth = bool(smooth_nan_boundaries)
+        self._smooth_sigma = float(smooth_sigma)
+        self._smooth_kernel_size = int(smooth_kernel_size)
+        self._smooth_n_iters = int(smooth_n_iters)
         fill_values = fill_values or {}
         self._const_fill = self._build_fill_tensor(
             constant_boundary_variables, fill_values
@@ -584,16 +610,41 @@ class NanFillTransform:
             dtype=torch.float32,
         ).view(-1, 1, 1)
 
+    def _fill_boundary(
+        self, tensor: torch.Tensor, fill: torch.Tensor
+    ) -> torch.Tensor:
+        """Hard per-channel fill, or the smooth coast fade when enabled."""
+        if not self._smooth:
+            return _nan_to_per_channel(tensor, fill)
+        nans = torch.isnan(tensor)
+        if not bool(nans.any()):
+            return tensor
+        out = tensor.clone()
+        n_channels = tensor.shape[-3]
+        for c in range(n_channels):
+            ch_nans = nans[..., c, :, :]
+            if not bool(ch_nans.any()):
+                continue
+            out[..., c, :, :] = _smooth_fill_channel(
+                tensor[..., c, :, :],
+                ch_nans,
+                float(fill.reshape(-1)[c]),
+                sigma=self._smooth_sigma,
+                kernel_size=self._smooth_kernel_size,
+                n_iters=self._smooth_n_iters,
+            )
+        return out
+
     def __call__(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         out = dict(sample)
         if self._scan_constant and "constant_boundary" in out and self._const_fill is not None:
-            out["constant_boundary"] = _nan_to_per_channel(
+            out["constant_boundary"] = self._fill_boundary(
                 out["constant_boundary"], self._const_fill
             )
             if self._strict:
                 _assert_finite(out["constant_boundary"], "constant_boundary")
         if self._scan_varying and "varying_boundary" in out and self._varying_fill is not None:
-            out["varying_boundary"] = _nan_to_per_channel(
+            out["varying_boundary"] = self._fill_boundary(
                 out["varying_boundary"], self._varying_fill
             )
             if self._strict:
@@ -631,6 +682,108 @@ class NanFillTransform:
 def _nan_to_per_channel(x: torch.Tensor, fill: torch.Tensor) -> torch.Tensor:
     """Replace NaN with per-channel fill (broadcast against (C, H, W) or (B, C, H, W))."""
     return torch.where(torch.isnan(x), fill.to(x.dtype).to(x.device), x)
+
+
+def _gaussian_kernel_2d(
+    k: int, sigma: float, device, dtype=torch.float32
+) -> torch.Tensor:
+    """Separable-Gaussian 2D kernel, ``(1, 1, k, k)``, normalized to sum 1."""
+    ax = torch.arange(k, device=device, dtype=dtype) - (k - 1) / 2
+    g = torch.exp(-(ax**2) / (2 * sigma**2))
+    g = g / g.sum()
+    return (g[:, None] * g[None, :])[None, None]
+
+
+def smooth_masked_boundary(
+    data: torch.Tensor,
+    mask: torch.Tensor,
+    sigma: float = 1.5,
+    kernel_size: int = 5,
+    n_iters: int = 10,
+    lon_circular: bool = True,
+) -> torch.Tensor:
+    r"""Extend masked-region values outward with a smooth fade to zero
+    (Phase 12d.14 — faithful port of amip_v2 ``data/amip.py``).
+
+    Iterative Dirichlet diffusion: each step blurs the whole field with a
+    Gaussian, then resets the inside of the mask to the original values, so
+    the interior stays **exact** while the outside grows a smooth, curved
+    fade. Used instead of a hard constant fill so the land–ocean seam does
+    not stamp a step discontinuity (and hence the land–sea mask itself)
+    into an SST-like boundary channel.
+
+    Parameters
+    ----------
+    data : torch.Tensor
+        ``(..., H, W)``. **Must be 0 wherever ``mask == 0``** — the fade is
+        toward 0, so callers center the field on their fill value first (see
+        :class:`NanFillTransform`).
+    mask : torch.Tensor
+        ``(..., H, W)`` binary; 1 = valid interior to preserve exactly.
+    sigma : float, optional, default=1.5
+        Per-step Gaussian std-dev in pixels; controls contour smoothness.
+    kernel_size : int, optional, default=5
+        Gaussian width. Upstream recommends ``>= 6 * sigma + 1``; the AMIP
+        configs run ``sigma=1.5, kernel_size=5`` (narrower, cheaper).
+    n_iters : int, optional, default=10
+        Diffusion steps. Larger = wider, softer transition.
+    lon_circular : bool, optional, default=True
+        Treat the last axis as periodic (global longitude); latitude is
+        always replicate-padded.
+
+    Outputs
+    -------
+    torch.Tensor
+        Same shape / dtype as ``data``.
+    """
+    out_dtype = data.dtype
+    *batch, H, W = data.shape
+    d = data.reshape(-1, 1, H, W).to(torch.float32)
+    m = mask.reshape(-1, 1, H, W).to(torch.float32)
+
+    kernel = _gaussian_kernel_2d(kernel_size, sigma, device=d.device)
+    p = kernel_size // 2
+    inv_m = 1.0 - m
+    d_in = d * m
+
+    state = d.clone()
+    lon_mode = "circular" if lon_circular else "replicate"
+    for _ in range(n_iters):
+        s = torch.nn.functional.pad(state, (p, p, 0, 0), mode=lon_mode)
+        s = torch.nn.functional.pad(s, (0, 0, p, p), mode="replicate")
+        blurred = torch.nn.functional.conv2d(s, kernel)
+        state = d_in + blurred * inv_m
+
+    return state.reshape(*batch, H, W).to(out_dtype)
+
+
+def _smooth_fill_channel(
+    channel: torch.Tensor,
+    nans: torch.Tensor,
+    fill_val: float,
+    *,
+    sigma: float,
+    kernel_size: int,
+    n_iters: int,
+) -> torch.Tensor:
+    """One channel's NaN region filled by a smooth fade to ``fill_val``.
+
+    Faithful to upstream ``AMIPDataset._fill_mask``'s smoothing branch:
+    ``smooth_masked_boundary`` fades toward 0, so center the field on
+    ``fill_val``, smooth, then add it back — the far field equals
+    ``fill_val`` and the blend runs from the true coastal value down to it.
+    """
+    mask = (~nans).to(torch.float32)
+    centered = torch.where(nans, torch.zeros_like(channel), channel - fill_val)
+    smoothed = smooth_masked_boundary(
+        centered,
+        mask,
+        sigma=sigma,
+        kernel_size=kernel_size,
+        n_iters=n_iters,
+        lon_circular=True,
+    )
+    return smoothed + fill_val
 
 
 def _assert_finite(t: torch.Tensor, name: str) -> None:

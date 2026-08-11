@@ -264,6 +264,7 @@ def test_pangu_h5_to_zarr_round_trip_one_year(tmp_path):
     args.channel_config = config_path
     args.data_timedelta_hours = 6
     args.n_workers = 1
+    args.write_batch = 50
     args.overwrite = False
     args.verbose = False
 

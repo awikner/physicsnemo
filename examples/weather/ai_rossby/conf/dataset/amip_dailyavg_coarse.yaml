@@ -49,3 +49,15 @@ shuffle: True
 
 normalize_constant_boundary: False
 normalize_diagnostic: True
+
+# Phase 12d.14 — boundary NaN smoothing knobs. NOTE: for THIS store they are
+# inert. coarsen_zarr.py NaN-fills boundaries (hard fill, SST 270 / ice 0)
+# *before* coarsening, so no NaN survives into the coarse store and the fade
+# has nothing to act on. They matter when boundary_zarr_path points at the
+# full-res amip_dailyavg store (upstream-parity c_grid_downsample=4 runs).
+# Upstream builds its coarse boundary store through the smoothing path; see
+# the 12c/12d seam note in docs/dev/phase12_implementation_plan.md.
+smooth_nan_boundaries: True
+smooth_sigma: 1.5
+smooth_kernel_size: 5
+smooth_n_iters: 10

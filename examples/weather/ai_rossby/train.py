@@ -654,18 +654,16 @@ def build_datapipe(
         **normalizer_kwargs,
     )
 
-    nan_fill = NanFillTransform(
-        constant_boundary_variables=list(model.constant_boundary_variables),
-        varying_boundary_variables=list(model.varying_boundary_variables),
-        # Prognostic surface vars (e.g. sea_surface_temperature, now promoted to
-        # match Pangu-S2S) + diagnostics can carry masked NaN over land; fill them
-        # with the same per-variable mask values (Pangu _fill_mask: sst/ts=270,
-        # sic/soil=0). Without this the SST land-NaN reaches the loss -> NaN.
-        surface_variables=list(model.surface_variables),
-        diagnostic_variables=list(model.get("diagnostic_variables", []) or []),
-        fill_values=dict(OmegaConf.to_container(data.nan_fill_values, resolve=True) or {}),
-        default=float(data.nan_fill_default),
-    )
+    # Phase 12d.13: shared NaN-fill definition (prognostic surface vars like
+    # sea_surface_temperature + diagnostics can carry masked NaN over land;
+    # filling them with the same per-variable mask values is what keeps the
+    # SST land-NaN out of the loss). This recipe normalizes inside the
+    # datapipe, i.e. AFTER the dataset transform, so the physical-unit fill
+    # order the shared builder documents already holds here; no scalar
+    # routing (the deterministic models have no c_scalar).
+    from dataset_setup import build_nan_fill  # noqa: E402
+
+    nan_fill = build_nan_fill(cfg)
 
     effective_batch = int(batch_size_override) if batch_size_override else int(data.batch_size)
     pipe = PlasimClimateDatapipe(
