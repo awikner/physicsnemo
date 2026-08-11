@@ -50,13 +50,22 @@ shuffle: True
 normalize_constant_boundary: False
 normalize_diagnostic: True
 
-# Phase 12d.14 — boundary NaN smoothing knobs. NOTE: for THIS store they are
-# inert. coarsen_zarr.py NaN-fills boundaries (hard fill, SST 270 / ice 0)
-# *before* coarsening, so no NaN survives into the coarse store and the fade
-# has nothing to act on. They matter when boundary_zarr_path points at the
-# full-res amip_dailyavg store (upstream-parity c_grid_downsample=4 runs).
-# Upstream builds its coarse boundary store through the smoothing path; see
-# the 12c/12d seam note in docs/dev/phase12_implementation_plan.md.
+# Phase 12d.14 — boundary NaN smoothing knobs. These are INERT for this
+# store: coarsen_zarr.py fills boundary NaN before coarsening, so nothing
+# NaN-shaped survives for the runtime fade to act on. The fade is applied at
+# BUILD time instead (`--smooth-boundaries`, recorded in the store's
+# `coarsen_boundary_fill` attr) — which is what actually matters here, since
+# a coarse cell straddling a coastline averages ocean values with whatever
+# fills the land side. Kept set so a boundary_zarr_path override onto a
+# NaN-carrying store stays correct.
+#
+# CORRECTION (2026-08-10): an earlier version of this comment claimed you
+# could get upstream-parity full-res boundaries by pointing
+# boundary_zarr_path at the amip_dailyavg store. That does NOT work today —
+# constants load from the prognostic store and varying boundaries from the
+# boundary store, so pack_c_grid's concat raises on the 45x90 vs 180x360
+# mismatch (verified). Scoped to Phase 12e; pair this store with
+# c_grid_downsample: 1.
 smooth_nan_boundaries: True
 smooth_sigma: 1.5
 smooth_kernel_size: 5

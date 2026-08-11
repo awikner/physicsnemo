@@ -57,7 +57,9 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
             --input "$IN_PATH" \
             --output "$OUT_TMP" \
             --factor 4 \
-            --time-block 64; then
+            --time-block 64 \
+            --time-chunk 8 \
+            --smooth-boundaries; then
         mv "$OUT_TMP" "$OUT_PATH"
         n_ok=$((n_ok+1))
     else

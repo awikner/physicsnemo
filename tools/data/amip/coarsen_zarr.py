@@ -42,10 +42,32 @@ Semantics (mirrors upstream ``reassemble.py``):
   tool hard-fails if it finds one.
 * **Boundary groups** (constant + varying) are NaN-filled first via the
   ``--mask-fill`` map (default matches upstream ``ERDM_co2.yaml``:
-  SST-like -> 270.0 K, sea-ice-like -> 0.0), then coarsened. The coarse
-  store is therefore self-contained for ``c_grid_downsample=1`` runs;
-  upstream-parity runs (full-res c_grid, ``c_grid_downsample=4``) point
-  ``boundary_zarr_path`` at the full-res store instead.
+  SST-like -> 270.0 K, sea-ice-like -> 0.0), then coarsened.
+
+  ``--smooth-boundaries`` (recommended, and what the PBS script uses)
+  fills through the masked-Gaussian coast fade instead of a hard constant.
+  This is **not cosmetic in a coarsening pipeline**: a 4x4 block straddling
+  a coastline averages real ocean values with whatever fills the land side,
+  so a hard 270 K fill drags coastal coarse cells cold (~10 K for a
+  half-land block at 290 K SST) while the fade starts at the true coastal
+  value and decays outward, landing much closer. Upstream never hits this
+  because it never coarsens boundaries (see the resolution note below);
+  smoothing is how we keep coastal coarse values honest.
+
+  .. note:: **Resolution divergence from upstream (12c/12d seam).**
+     Upstream's fast store keeps boundaries at **native 180x360** and lets
+     the model's stride-4 conv reduce them (``c_grid_downsample: 4``); this
+     tool coarsens them to 45x90 for a self-contained store paired with
+     ``c_grid_downsample: 1``. Consequences: (a) the runtime
+     ``smooth_nan_boundaries`` knobs are inert on the output (no NaN
+     survives — hence doing the fade *here*), and (b) within-cell boundary
+     variance is gone, which is what upstream's 12e ``boundary_pool_stats``
+     reads. Pointing ``boundary_zarr_path`` at the full-res store does NOT
+     work around this today: constants load from the prognostic store while
+     varying boundaries load from the boundary store, and the wrapper's
+     ``pack_c_grid`` concatenates them (verified ``RuntimeError`` on the
+     mismatch). Closing that is scoped to Phase 12e, where
+     ``boundary_pool_stats`` forces the decision.
 * **Extra variables** (the converter's not-routed archive-preservation
   channels) are skipped by default — the coarse store is a lean training
   artifact. ``--include-extras`` coarsens them too.
@@ -117,6 +139,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "variable; the 12c benchmark showed 64-step chunks force a 64x "
         "over-read per random sample, erasing the coarse store's I/O win.",
     )
+    p.add_argument(
+        "--smooth-boundaries",
+        action="store_true",
+        help="Fill boundary NaN with the masked-Gaussian coast fade instead of "
+        "a hard constant, BEFORE coarsening. Keeps coastal coarse cells from "
+        "being dragged toward the fill value (see module docstring).",
+    )
+    p.add_argument("--smooth-sigma", type=float, default=1.5)
+    p.add_argument("--smooth-kernel-size", type=int, default=5)
+    p.add_argument("--smooth-n-iters", type=int, default=10)
     p.add_argument(
         "--include-extras",
         action="store_true",
@@ -199,6 +231,10 @@ def coarsen_store(
     time_chunk: int = 8,
     include_extras: bool = False,
     mask_fill: dict[str, float] | None = None,
+    smooth_boundaries: bool = False,
+    smooth_sigma: float = 1.5,
+    smooth_kernel_size: int = 5,
+    smooth_n_iters: int = 10,
 ) -> xr.Dataset:
     """Coarsen one per-year store; returns the (lazily-opened) output."""
     mask_fill = DEFAULT_MASK_FILL if mask_fill is None else dict(mask_fill)
@@ -257,6 +293,24 @@ def coarsen_store(
                     f"{name!r} contains NaN but has no --mask-fill entry; "
                     f"a NaN would bleed through the bilinear kernel"
                 )
+            if smooth_boundaries:
+                # Masked-Gaussian coast fade (same operator the runtime
+                # NanFillTransform uses, so the store and an un-coarsened
+                # boundary path agree). One variable per call, leading time
+                # axis rides the conv batch dim.
+                from physicsnemo.experimental.datapipes.climate.transforms import (
+                    _smooth_fill_channel,
+                )
+
+                smoothed = _smooth_fill_channel(
+                    torch.from_numpy(np.ascontiguousarray(arr)).to(torch.float32),
+                    torch.from_numpy(nan_mask),
+                    float(fill),
+                    sigma=smooth_sigma,
+                    kernel_size=smooth_kernel_size,
+                    n_iters=smooth_n_iters,
+                )
+                return smoothed.numpy().astype(arr.dtype)
             return np.where(nan_mask, np.asarray(fill, dtype=arr.dtype), arr)
         raise ValueError(
             f"state variable {name!r} contains NaN — the daily-avg state "
@@ -302,12 +356,24 @@ def coarsen_store(
             "align_corners=False)  # == amip_v2 modules/layers/bilinear.py"
         ),
         "coarsen_mask_fill": json.dumps(mask_fill),
+        "coarsen_boundary_fill": "smooth" if smooth_boundaries else "hard",
+        "coarsen_smooth_params": json.dumps(
+            {
+                "sigma": smooth_sigma,
+                "kernel_size": smooth_kernel_size,
+                "n_iters": smooth_n_iters,
+            }
+            if smooth_boundaries
+            else {}
+        ),
         "coarsen_included_extras": bool(include_extras),
         "coarsen_time_chunk": int(time_chunk),
         "coarsen_boundary_note": (
-            "boundary channels are NaN-filled (coarsen_mask_fill) then "
-            "coarsened; for upstream-parity full-res boundaries use "
-            "boundary_zarr_path -> the source store"
+            "boundary channels are NaN-filled (coarsen_mask_fill, see "
+            "coarsen_boundary_fill for hard vs smooth) then coarsened to the "
+            "state grid. Upstream keeps boundaries at native resolution with "
+            "c_grid_downsample=4; pair THIS store with c_grid_downsample=1. "
+            "See the 12c/12d seam note in the coarsen_zarr.py docstring."
         ),
     }
 
@@ -351,6 +417,10 @@ def main(argv: list[str] | None = None) -> int:
         time_chunk=args.time_chunk,
         include_extras=args.include_extras,
         mask_fill=mask_fill,
+        smooth_boundaries=args.smooth_boundaries,
+        smooth_sigma=args.smooth_sigma,
+        smooth_kernel_size=args.smooth_kernel_size,
+        smooth_n_iters=args.smooth_n_iters,
     )
     logger.info("coarse store written to %s", args.output)
     return 0

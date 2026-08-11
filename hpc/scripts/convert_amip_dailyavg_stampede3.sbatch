@@ -92,7 +92,8 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
                 --output "$COARSE_TMP" \
                 --factor 4 \
                 --time-block 64 \
-                --time-chunk 8; then
+                --time-chunk 8 \
+                --smooth-boundaries; then
             mv "$COARSE_TMP" "$COARSE_PATH"
             n_ok=$((n_ok+1))
         else

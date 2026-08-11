@@ -13,6 +13,7 @@ x_DDC downscaler's corruption operator is *defined* by that blur.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -221,3 +222,50 @@ def test_coarsen_store_rejects_indivisible_grid(tmp_path):
     _make_store(src_path)
     with pytest.raises(ValueError, match="divisible"):
         coarsen_store(src_path, tmp_path / "out.zarr", factor=5)
+
+def test_smooth_boundaries_changes_coastal_coarse_cells(tmp_path):
+    """Phase 12d follow-up (recommendation (a)): smooth-filling BEFORE
+    coarsening is not cosmetic — it changes the value of every coarse cell
+    that straddles a coastline, because a 4x4 block averages real ocean
+    values with whatever fills the land side."""
+    src_path = tmp_path / "src.zarr"
+    src = _make_store(src_path)
+    hard = coarsen_store(src_path, tmp_path / "hard.zarr", factor=_FACTOR)
+    soft = coarsen_store(
+        src_path, tmp_path / "soft.zarr", factor=_FACTOR, smooth_boundaries=True
+    )
+    name = "sea_surface_temperature_monthly_interp"
+    h = hard[name].isel(time=0).values
+    s = soft[name].isel(time=0).values
+
+    # Both are NaN-free and same shape.
+    assert np.isfinite(h).all() and np.isfinite(s).all()
+    assert h.shape == s.shape
+
+    # The fixture masks the northern half (rows 0..3 of 8 -> coarse row 0),
+    # so coarse row 1 is the coast-adjacent band: smoothing pulls it AWAY
+    # from the 270 K fill and toward the real ocean values.
+    assert not np.allclose(h, s)
+    assert s[1].mean() > h[1].mean()
+    # Fully-masked coarse cells still relax toward the fill under smoothing,
+    # so the fade is bounded by the two extremes rather than inventing data.
+    raw = src[name].isel(time=0).values
+    ocean_mean = float(np.nanmean(raw))
+    assert 270.0 <= float(s[0].mean()) <= ocean_mean
+
+    # Provenance records which fill built the store.
+    assert hard.attrs["coarsen_boundary_fill"] == "hard"
+    assert soft.attrs["coarsen_boundary_fill"] == "smooth"
+    assert json.loads(soft.attrs["coarsen_smooth_params"])["n_iters"] == 10
+
+
+def test_smooth_boundaries_leaves_state_and_nan_free_channels_untouched(tmp_path):
+    src_path = tmp_path / "src.zarr"
+    _make_store(src_path)
+    hard = coarsen_store(src_path, tmp_path / "hard.zarr", factor=_FACTOR)
+    soft = coarsen_store(
+        src_path, tmp_path / "soft.zarr", factor=_FACTOR, smooth_boundaries=True
+    )
+    # State groups have no NaN, so the flag must not perturb them at all.
+    for name in ("t2m", "temperature", "PRATEsfc_24h", "land_sea_mask"):
+        assert np.array_equal(hard[name].values, soft[name].values), name
