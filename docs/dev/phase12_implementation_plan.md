@@ -757,6 +757,11 @@ which was not reachable during the audit — and amip v1's *own* E3SM configs
 (`SI_E3SM.yaml`, `DDC_E3SM.yaml`) use 24 h, so if SFNO-E3SM is meant to match
 them it needs `[4]` + `timedelta_hours: 24`. Not changed on a guess.
 
+**Verified on real data** — Polaris job `7446896`, the 12f smoke re-run after the
+fix: all three steps green, every run logging `model step: 4 store row(s) (24 h)`
+and `steps_per_epoch=1436` (= 1460 rows - 6 x 4 for the 7-frame window; it was
+1454 = 1460 - 6 before), 718 under 2-rank DDP. Warm start still zero skipped keys.
+
 **Re-measure before trusting 12c's chunking.** `--time-chunk 8` on the coarse
 store was measured with an *unstrided* window: a W=7 window at stride 4 spans 25
 rows and touches ~4 chunks instead of 1. `bench_amip_dailyavg_coarse.py` gained
