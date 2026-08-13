@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12f complete (2026-08-12), 12f GPU smoke outstanding; 12g+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12f complete + GPU-smoked (2026-08-12); 12g+ planned. ⚠ one blocking gap found for real training runs — see 12f's 6-hourly-store note** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -670,10 +670,62 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   validation or inference run. `unpack_window_state` is frameless
   (`narrow(-3, ...)` + a `shape[:-3]` unflatten), so it is aliased.
 
-**Outstanding:** the GPU mini-epoch smoke. Item 23 says "Delta A40", but
-`amip_dailyavg_coarse` + `amip_dailyavg_boundary` exist only on **Stampede3
-and Polaris** (see `hpc/data_registry.yaml`) — Delta holds neither, so the
-smoke runs on Polaris, where the 12c benchmark and venv already live.
+**GPU smoke: PASSED** — Polaris job `7438613`
+(`hpc/scripts/smoke_amip_ocean_polaris.pbs`), on the real
+`amip_dailyavg_coarse` 45x90 state + `amip_dailyavg_boundary` 1-degree
+forcings. Item 23 said "Delta A40", but Delta holds neither store (see
+`hpc/data_registry.yaml`), so the smoke lives on Polaris. Three steps:
+
+1. no-ocean baseline mini-stage, checkpoint saved;
+2. ocean variant warm-started from it — **loaded 74/74 keys, 0 skipped, 8 left
+   at init** and all 8 are the ocean additions
+   (`input_embed.ocean_embed.{weight,bias}`,
+   `output_head.ocean_experts.{0,1}.{weight,bias}`, `output_head.ocean_gate.*`).
+   `loss_ocean` ~1.6e2 against a ~1.2e4 total = **1.3%**, matching upstream's
+   "~2% of the loss at nocean=3" note — which is exactly why it is logged
+   separately rather than folded in;
+3. same run under 2-rank DDP: `steps_per_epoch` 1454 -> 727 (the
+   DistributedSampler shards the shifted SequenceDataset correctly), wandb on
+   every rank, no NCCL hang, peak GPU memory 1.07 GB.
+
+Two environment issues cost three job submissions and are now recorded in
+`hpc/polaris.md`: `/eagle` resolves to `/lus/eagle/projects` (a string prefix
+check on `$REPO` fails a correct import), and the uv-built venv has no `pip`
+while `muon` is absent from `uv sync` even though every AMIP diffusion recipe
+defaults to it. `_make_muon_optimizer` now refuses to build outside a process
+group with the `torchrun` invocation in the message, instead of dying on the
+first optimizer step inside `distributed_c10d`.
+
+### ⚠ Gap found by the 12f smoke: the store is 6-hourly, the model steps daily
+
+Not a 12f regression — a 12c/12d loader-semantics gap, and it invalidates any
+real training run on this store, so it belongs to whoever starts one.
+
+`amip_dailyavg_*/1981.zarr` has **1460 rows spaced 6 hours apart** (verified on
+Polaris: `unique spacing (hours): [6]`) — upstream's `h5_dailyavg` files are
+24-hour means/accumulations *sampled every 6 hours*, not one row per day.
+Upstream handles this explicitly:
+
+```yaml
+data_timedelta_hours: 6     # store row spacing
+timedelta_hours: 24         # model step
+```
+```python
+self.step_stride = self.timedelta_hours // self.data_timedelta_hours   # = 4
+```
+
+Every upstream read is `index + step_stride * step`. Our `ClimateZarrDataset` /
+`SequenceDataset` walk **consecutive rows**, so a model step is 6 hours, not
+24: `W=6` spans 36 hours rather than 6 days, and consecutive frames are
+overlapping 24-hour accumulations. Shapes and losses look entirely healthy —
+the 12f smoke trains fine — which is why this needs to be fixed deliberately
+rather than noticed later.
+
+Fix shape (needs a decision, since it touches the dataset contract every
+recipe shares): a `step_stride` / `timedelta_hours` pair on
+`ClimateZarrDataset` threaded through `SequenceDataset` (window frames and the
+`forcing_lag` offset both stride), defaulting to 1 so PLASIM / ERA5 / E3SM
+recipes are unchanged, with the AMIP daily-avg dataset configs setting 4.
 
 > **Alignment note for anyone reading a v1-translated checkpoint's metrics
 > from before 12f:** they were produced with `forcing_lag=0`. Nothing about
