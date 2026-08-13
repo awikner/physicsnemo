@@ -15,6 +15,7 @@ allowed to fail loudly.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pytest
 import torch
@@ -298,6 +299,52 @@ def test_pack_unpack_state_round_trip_ignores_ocean():
     back = w.unpack_window_state(packed)
     for key, value in sample.items():
         assert torch.allclose(back[key], value)
+
+
+def test_erdm_fancy_config_matches_the_real_v2_checkpoints_contract():
+    """Our derived widths vs the numbers a real v2 checkpoint states by hand.
+
+    ``ERDM_ERDM_fancy_42_2026-08-10T13-21-13`` (project: amip_v2) is the first
+    real v2-trained forecaster we have. Its ``config.yml`` writes the four widths
+    out explicitly, while this fork derives all four from variable lists — so
+    this is an independent cross-check of the 12b packing, the 12e feature set,
+    12f's ocean tail and 12g's derived anomaly channel, against weights that
+    actually exist.
+
+    ``ocean_grid_indices [1, 2, 3]`` is the part worth pinning: it is only right
+    because the anomaly is listed in the POST-rescaler position (index 2, right
+    after absolute SST), which is where 12g's insertion puts it.
+    """
+    from omegaconf import OmegaConf
+
+    conf = (
+        Path(__file__).resolve().parents[2].parent
+        / "examples" / "weather" / "ai_rossby" / "conf" / "model"
+        / "amip_erdm_fancy.yaml"
+    )
+    cfg = OmegaConf.load(conf)
+    args = {
+        k: v
+        for k, v in OmegaConf.to_container(cfg, resolve=True).items()
+        if k not in {"name", "module", "timedelta_hours"}
+    }
+    # Shrink the backbone; the contract is in the variable lists, not the width.
+    args["rolling_dit_kwargs"].update(
+        dim=64, num_heads=2, num_blocks=1, temporal_num_heads=2,
+        c_grid_cross_layers=1, c_grid_cross_heads=2,
+    )
+    args["rolling_dit_kwargs"]["input_embed"].update(
+        d_boundary=16, d_calendar=16, d_co2=8
+    )
+    w = RollingDiTWrapper(**args)
+
+    assert w.in_channels == 154          # their in_channels / out_channels
+    assert w.c_grid_dim == 6             # their c_grid_dim
+    assert w.scalar_dim == 3             # their scalar_dim
+    assert w.num_ocean == 3              # len(their ocean_state_variables)
+    assert w.ocean_grid_indices == [1, 2, 3]
+    # The trend scalar is the SST anomaly's, so nothing is routed out of c_grid.
+    assert w.scalar_routed_boundary_variables == []
 
 
 def test_muon_param_groups_still_cover_every_parameter():
