@@ -1,0 +1,241 @@
+# UC S2S — exp16 nvidia v2 config (DSI HPC)
+# Adapted from /net/monsoon/bing/S2S/v2.0/config/exp16_nvidia_v2.yaml
+# Used by: train.py, train_diffusion.py, train_finetune_rollout.py, inference.py
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
+
+# ---------------------------------------------------------------
+# Experiment
+# ---------------------------------------------------------------
+name: S2S-SI
+group: s2s-dev
+project: Pangu-S2S
+entity: binggong
+exp_dir: results
+output_dir: /net/monsoon/bing/physicsnemo/examples/weather/uc_s2s/results/inference_output
+async_save: true
+disable_save: false
+nvme_dir: /tmp/scratch
+fresh_start: false
+mode: train
+run_iter: 1
+resuming: false
+
+# ---------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------
+log_to_screen: true
+log_to_wandb: true
+wandb_offline: false
+save_checkpoint: true
+plot_animations: false
+
+# ---------------------------------------------------------------
+# Checkpoints
+# ---------------------------------------------------------------
+checkpoint_path_vae_c1: /net/monsoon/bing/uc_si_checkpoints/checkpoints/c1/ckpt.tar
+checkpoint_path_det: /net/monsoon/bing/uc_si_checkpoints/checkpoints/determinstic/ckpt.tar
+checkpoint_path_diff: /net/monsoon/bing/uc_si_checkpoints/si_c1_full_state/training_checkpoints/diff_ckpt.tar
+checkpoint_path_finetune: /net/monsoon/bing/uc_si_checkpoints/rollout_finetune_finetune_rollout_crps_multipsteps/training_checkpoints/rollout_ckpt_1400.tar
+
+# ---------------------------------------------------------------
+# Data  (data_dir overridden at runtime with NVME scratch path)
+# ---------------------------------------------------------------
+data_dir: /net/monsoon/S2S/h5data
+climatology_file: 1979-2018_mean_climatology.nc
+calendar: standard
+has_year_zero: false
+
+train_year_start: 1979
+train_year_end: 2018
+val_year_start: 2018
+val_year_end: 2019
+train_year_to_year: false
+data_timedelta_hours: 6
+timedelta_hours: 24
+sel_dates: true
+lev: plev
+
+surface_variables:
+  - 2m_temperature
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+  - mean_sea_level_pressure
+  - surface_pressure
+
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - specific_humidity
+  - geopotential
+
+diagnostic_variables:
+  - total_precipitation_24hr
+  - mean_top_net_long_wave_radiation_flux
+
+land_variables:
+  - volumetric_soil_water_layer_1
+  - soil_temperature_level_1
+  - skin_temperature
+
+ocean_variables:
+  - sea_surface_temperature
+
+constant_boundary_variables:
+  - land_sea_mask
+  - geopotential_at_surface
+
+varying_boundary_variables:
+  - toa_incident_solar_radiation
+
+mask_fill:
+  volumetric_soil_water_layer_1: 0.0
+  soil_temperature_level_1: 270.0
+  skin_temperature: 270.0
+  sea_surface_temperature: 270.0
+  sea_ice_cover: 0.0
+  snow_depth: 0.0
+
+mask_output: false
+has_diagnostic: true
+
+surface_mean: pangu_s2s_1979-2018_surface_mean.nc
+surface_std: pangu_s2s_1979-2018_surface_std.nc
+surface_ff_std: pangu_s2s_1979-2018_surface_std.nc
+upper_air_mean: pangu_s2s_1979-2018_mean.nc
+upper_air_std: pangu_s2s_1979-2018_std.nc
+upper_air_ff_std: pangu_s2s_1979-2018_std.nc
+boundary_mean: pangu_s2s_1979-2018_surface_mean.nc
+boundary_std: pangu_s2s_1979-2018_surface_std.nc
+diagnostic_mean: pangu_s2s_1979-2018_surface_mean.nc
+diagnostic_std: pangu_s2s_1979-2018_surface_std.nc
+
+# ---------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------
+batch_size: 4
+num_data_workers: 1
+max_epochs: 200
+loss: weightedl1
+lr: 0.000001
+weight_decay: 3.0e-6
+scheduler: CosineAnnealingLR
+oc_pct_start: 0.1
+oc_div_factor: 1.0e5
+oc_final_div_factor: 0.00025
+optimizer_type: Adam
+
+vae_loss: true
+vae_loss_weight: 0.01
+early_stopping: false
+save_checkpoint_freq: 5
+
+num_inferences: 10000
+num_ensemble_members: 1
+forecast_lead_times: [1, 2, 10, 15, 45]
+
+epsilon_factor: 0
+ic_noise_std: 0.02
+step_noise_std: 0.005
+step_noise_growth: sqrt
+
+# ---------------------------------------------------------------
+# Diffusion / SI
+# ---------------------------------------------------------------
+diffusion_model_type: SI
+source_sigma: 1.0
+temperature: 1.5
+valid_max_batches: 30
+
+# ---------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------
+nettype: pangu_plasim
+use_transformer_engine: false
+use_reentrant: false
+checkpointing: 2
+patch_size: [2, 4, 4]
+window_size: [2, 6, 12]
+depths: [2, 6, 6, 2]
+updown_scale_factor: 2
+num_levels: 17
+levels: [5, 10, 20, 30, 50, 70, 100, 150, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
+horizontal_resolution: [180, 360]
+predict_delta: false
+subpixel_deconv: true
+recovery_head: true
+diagnostic_head: false
+vertical_windowing: true
+upper_air_boundary: false
+
+component: 8
+base_channels: 2
+z_channels: 2
+
+dropout_rate: 0.1
+drop_rate: 0.0
+
+diagnostic_acc: false
+diagnostic_gif: false
+diagnostic_spectra: false
+diagnostic_logs: true
+
+test_iterations: 10000000000
+
+lat: [-89.5, -88.5, -87.5, -86.5, -85.5, -84.5, -83.5, -82.5, -81.5, -80.5,
+      -79.5, -78.5, -77.5, -76.5, -75.5, -74.5, -73.5, -72.5, -71.5, -70.5,
+      -69.5, -68.5, -67.5, -66.5, -65.5, -64.5, -63.5, -62.5, -61.5, -60.5,
+      -59.5, -58.5, -57.5, -56.5, -55.5, -54.5, -53.5, -52.5, -51.5, -50.5,
+      -49.5, -48.5, -47.5, -46.5, -45.5, -44.5, -43.5, -42.5, -41.5, -40.5,
+      -39.5, -38.5, -37.5, -36.5, -35.5, -34.5, -33.5, -32.5, -31.5, -30.5,
+      -29.5, -28.5, -27.5, -26.5, -25.5, -24.5, -23.5, -22.5, -21.5, -20.5,
+      -19.5, -18.5, -17.5, -16.5, -15.5, -14.5, -13.5, -12.5, -11.5, -10.5,
+      -9.5, -8.5, -7.5, -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5,
+       0.5,  1.5,  2.5,  3.5,  4.5,  5.5,  6.5,  7.5,  8.5,  9.5,
+      10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5,
+      20.5, 21.5, 22.5, 23.5, 24.5, 25.5, 26.5, 27.5, 28.5, 29.5,
+      30.5, 31.5, 32.5, 33.5, 34.5, 35.5, 36.5, 37.5, 38.5, 39.5,
+      40.5, 41.5, 42.5, 43.5, 44.5, 45.5, 46.5, 47.5, 48.5, 49.5,
+      50.5, 51.5, 52.5, 53.5, 54.5, 55.5, 56.5, 57.5, 58.5, 59.5,
+      60.5, 61.5, 62.5, 63.5, 64.5, 65.5, 66.5, 67.5, 68.5, 69.5,
+      70.5, 71.5, 72.5, 73.5, 74.5, 75.5, 76.5, 77.5, 78.5, 79.5,
+      80.5, 81.5, 82.5, 83.5, 84.5, 85.5, 86.5, 87.5, 88.5, 89.5]
+
+lon: [  0.,   1.,   2.,   3.,   4.,   5.,   6.,   7.,   8.,   9.,  10.,
+       11.,  12.,  13.,  14.,  15.,  16.,  17.,  18.,  19.,  20.,  21.,
+       22.,  23.,  24.,  25.,  26.,  27.,  28.,  29.,  30.,  31.,  32.,
+       33.,  34.,  35.,  36.,  37.,  38.,  39.,  40.,  41.,  42.,  43.,
+       44.,  45.,  46.,  47.,  48.,  49.,  50.,  51.,  52.,  53.,  54.,
+       55.,  56.,  57.,  58.,  59.,  60.,  61.,  62.,  63.,  64.,  65.,
+       66.,  67.,  68.,  69.,  70.,  71.,  72.,  73.,  74.,  75.,  76.,
+       77.,  78.,  79.,  80.,  81.,  82.,  83.,  84.,  85.,  86.,  87.,
+       88.,  89.,  90.,  91.,  92.,  93.,  94.,  95.,  96.,  97.,  98.,
+       99., 100., 101., 102., 103., 104., 105., 106., 107., 108., 109.,
+      110., 111., 112., 113., 114., 115., 116., 117., 118., 119., 120.,
+      121., 122., 123., 124., 125., 126., 127., 128., 129., 130., 131.,
+      132., 133., 134., 135., 136., 137., 138., 139., 140., 141., 142.,
+      143., 144., 145., 146., 147., 148., 149., 150., 151., 152., 153.,
+      154., 155., 156., 157., 158., 159., 160., 161., 162., 163., 164.,
+      165., 166., 167., 168., 169., 170., 171., 172., 173., 174., 175.,
+      176., 177., 178., 179., 180., 181., 182., 183., 184., 185., 186.,
+      187., 188., 189., 190., 191., 192., 193., 194., 195., 196., 197.,
+      198., 199., 200., 201., 202., 203., 204., 205., 206., 207., 208.,
+      209., 210., 211., 212., 213., 214., 215., 216., 217., 218., 219.,
+      220., 221., 222., 223., 224., 225., 226., 227., 228., 229., 230.,
+      231., 232., 233., 234., 235., 236., 237., 238., 239., 240., 241.,
+      242., 243., 244., 245., 246., 247., 248., 249., 250., 251., 252.,
+      253., 254., 255., 256., 257., 258., 259., 260., 261., 262., 263.,
+      264., 265., 266., 267., 268., 269., 270., 271., 272., 273., 274.,
+      275., 276., 277., 278., 279., 280., 281., 282., 283., 284., 285.,
+      286., 287., 288., 289., 290., 291., 292., 293., 294., 295., 296.,
+      297., 298., 299., 300., 301., 302., 303., 304., 305., 306., 307.,
+      308., 309., 310., 311., 312., 313., 314., 315., 316., 317., 318.,
+      319., 320., 321., 322., 323., 324., 325., 326., 327., 328., 329.,
+      330., 331., 332., 333., 334., 335., 336., 337., 338., 339., 340.,
+      341., 342., 343., 344., 345., 346., 347., 348., 349., 350., 351.,
+      352., 353., 354., 355., 356., 357., 358., 359.]
