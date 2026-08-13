@@ -40,6 +40,12 @@ from .dataset import (
 from .forcing import ForcingAssembler
 from .multiyear import ClimateZarrMultiYearDataset
 from .samplers import LeadTimePairSampler
+from .sst_forcing import (
+    SST_ANOMALY_CHANNEL_NAME,
+    SST_VARIABLE_NAMES,
+    SSTForcing,
+    SSTRescaler,
+)
 from .sequence import IntSampler, SequenceDataset
 from .transforms import (
     ClimateNormalizer,
@@ -60,6 +66,10 @@ __all__ = [
     "IntSampler",
     "LeadTimePairSampler",
     "NanFillTransform",
+    "SST_ANOMALY_CHANNEL_NAME",
+    "SST_VARIABLE_NAMES",
+    "SSTForcing",
+    "SSTRescaler",
     "SequenceDataset",
     "resolve_step_stride",
     "smooth_masked_boundary",
