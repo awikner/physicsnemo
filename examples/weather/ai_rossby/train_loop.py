@@ -14,6 +14,11 @@ for the future PanguPlasim with VAE).
 from __future__ import annotations
 
 import contextlib
+import io
+import logging
+import tarfile
+import zipfile
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -23,6 +28,175 @@ from torch.optim.lr_scheduler import (
     OneCycleLR,
     SequentialLR,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Predicted ocean channels (Phase 12f) — one injection point.
+# ---------------------------------------------------------------------------
+
+
+def adopt_ocean_contract(scheduler: Any, model: torch.nn.Module) -> Any:
+    """Teach a diffusion scheduler the model's predicted-ocean contract.
+
+    ``nocean`` (how many tail channels of the state axis are ocean) and
+    ``ocean_grid_indices`` (which ``c_grid`` channels their truth is read
+    from) are two halves of one fact, and the model already derives both from
+    ``ocean_state_variables``. Every driver — training, mid-training
+    validation, ``inference.py``, ``eval_diffusion.py`` — routes through this
+    function instead of restating them in a config, because a scheduler built
+    without them does not pad, impose, or supervise the ocean block: the model
+    would then be handed a state-width window and fail on a channel count, or
+    worse, run with the ocean block left at whatever the sampler happened to
+    put there.
+
+    A no-op for models without ocean channels and for schedulers that have no
+    ocean support (the single-step SI / SI_X families).
+    """
+    nocean = int(getattr(model, "num_ocean", 0) or 0)
+    if not nocean or not hasattr(scheduler, "nocean"):
+        return scheduler
+    indices = list(getattr(model, "ocean_grid_indices", []))
+    if len(indices) != nocean:
+        raise ValueError(
+            f"model reports num_ocean={nocean} but "
+            f"ocean_grid_indices={indices}; the two are derived together and "
+            f"must agree"
+        )
+    scheduler.nocean = nocean
+    scheduler.ocean_grid_indices = indices
+    logger.info(
+        f"ocean contract: nocean={nocean}, c_grid indices={indices} "
+        f"({type(scheduler).__name__})"
+    )
+    return scheduler
+
+
+
+# ---------------------------------------------------------------------------
+# Partial-checkpoint warm start (Phase 12f) — upstream amip's
+# ``load_partial_weights``.
+# ---------------------------------------------------------------------------
+
+#: Wrapper prefixes torch adds around the real module tree, stripped so a
+#: checkpoint saved under DDP or ``torch.compile`` warm-starts a plain model.
+_WRAP_PREFIXES = ("module.", "_orig_mod.", "model.")
+
+
+def _strip_wrap_prefixes(key: str) -> str:
+    """Iteratively drop DDP / compile / Lightning wrapper prefixes."""
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _WRAP_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                changed = True
+    return key
+
+
+def _mdlus_state_dict(path: Path) -> dict[str, torch.Tensor]:
+    """Read ``model.pt`` out of a ``.mdlus`` archive (zip or legacy tar).
+
+    Deliberately *not*
+    :meth:`physicsnemo.core.module.Module.from_checkpoint`: that would
+    instantiate the source model from its stored args — the pre-warm-start
+    architecture, several GB of parameters we would immediately discard —
+    and then still refuse a shape mismatch. We only ever want its tensors.
+    """
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path, "r") as archive:
+            blob = archive.read("model.pt")
+        return torch.load(io.BytesIO(blob), map_location="cpu")
+    with tarfile.open(path, "r") as tar:
+        member = tar.extractfile("model.pt")
+        if member is None:
+            raise IOError(f"{path} has no 'model.pt' member")
+        return torch.load(io.BytesIO(member.read()), map_location="cpu")
+
+
+def _extract_state_dict(blob: Any) -> dict[str, torch.Tensor]:
+    """Pull a flat ``{name: tensor}`` mapping out of a loaded checkpoint."""
+    if isinstance(blob, dict):
+        for key in ("state_dict", "model_state_dict"):
+            inner = blob.get(key)
+            if isinstance(inner, dict):
+                return inner
+    if not isinstance(blob, dict):
+        raise TypeError(f"checkpoint is a {type(blob).__name__}, not a state dict")
+    return blob
+
+
+def load_partial_weights(
+    model: torch.nn.Module,
+    partial_ckpt: str | Path,
+    *,
+    log: Any = None,
+) -> dict[str, list[str]]:
+    """Warm-start ``model`` from every *compatible* key of a checkpoint.
+
+    Mirrors upstream amip's ``load_partial_weights``: keys present in both
+    with matching shapes are loaded, anything else is skipped loudly. Used
+    to start an ocean-variant run (Phase 12f) from a no-ocean ERDM
+    checkpoint — where the expectation is **zero skipped keys**, because the
+    ocean block only *adds* parameters (``input_embed.ocean_embed``, the
+    head's ``ocean_experts`` / ``ocean_gate``) and widens nothing. A nonzero
+    skip count means the two configs differ somewhere else as well, which is
+    worth seeing before burning GPU hours on it — hence the report rather
+    than a silent ``strict=False`` load.
+
+    Returns ``{"loaded": [...], "skipped": [...], "fresh": [...]}`` —
+    ``fresh`` being the target's newly initialised keys.
+    """
+    log = log or logger
+    path = Path(partial_ckpt)
+    if not path.exists():
+        raise FileNotFoundError(f"partial_checkpoint {path} does not exist")
+
+    if path.suffix == ".mdlus":
+        src = _mdlus_state_dict(path)
+    else:
+        src = _extract_state_dict(
+            torch.load(path, map_location="cpu", weights_only=False)
+        )
+    src = {_strip_wrap_prefixes(k): v for k, v in src.items()}
+
+    target = model.state_dict()
+    filtered, skipped = {}, []
+    for k, v in src.items():
+        if k in target and getattr(v, "shape", None) == target[k].shape:
+            filtered[k] = v
+        else:
+            reason = (
+                "not in model"
+                if k not in target
+                else f"shape {tuple(v.shape)} != {tuple(target[k].shape)}"
+            )
+            skipped.append(f"{k} ({reason})")
+
+    model.load_state_dict(filtered, strict=False)
+    fresh = [k for k in target if k not in filtered]
+
+    # f-strings, not %-args: the recipes pass physicsnemo's ``PythonLogger``,
+    # whose info()/warning() take a single message argument.
+    log.info(
+        f"partial checkpoint {path}: loaded {len(filtered)}/{len(src)} keys, "
+        f"{len(fresh)} left at init"
+    )
+    if skipped:
+        log.warning(
+            f"partial checkpoint: SKIPPED {len(skipped)} key(s) — the source "
+            f"and this config disagree beyond added parameters:"
+        )
+        for k in skipped:
+            log.warning(f"  {k}")
+    if fresh:
+        log.info(
+            f"partial checkpoint: {len(fresh)} key(s) newly initialised "
+            f"(e.g. {', '.join(fresh[:5])})"
+        )
+    return {"loaded": sorted(filtered), "skipped": skipped, "fresh": fresh}
 
 
 def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:

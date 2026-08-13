@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12e complete (2026-08-11); 12f+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12f complete (2026-08-12), 12f GPU smoke outstanding; 12g+ planned** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -608,6 +608,71 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
     ocean never survives a roll); warm-start zero-skipped-keys on a
     synthetic ERDM→ERDM-ocean pair; Delta A40 smoke of one ocean-variant
     mini-epoch.
+
+**Delivered (2026-08-12).**
+
+- **Scheduler** (`physicsnemo/experimental/diffusion/erdm.py`): the five
+  ocean helpers (`ocean_truth`, `append_ocean_target`, `pad_state`,
+  `strip_ocean`, `impose_ocean`) plus `nocean` / `ocean_grid_indices` /
+  `ocean_loss_weight` constructor params; `compute_loss(..., return_parts)`
+  splits state from ocean MSE; `ocean_win` threaded through `sample_window`
+  / `sample_rollout` / `sample_rollout_generator` (the generator's
+  `forcing_provider` may return a third element; two-element returns stay
+  valid). Every helper is the identity at `nocean=0` and the loss is
+  bit-identical to the pre-12f path.
+- **The alignment fix this exposed.** Upstream aligns window slot `w` (the
+  state at step `w+1`) with the forcing at step `w` — *denoising the frame at
+  time T uses the boundary forcing from T-1*. The fork's rolling path paired
+  state(t+j) with forcing(t+j). Two consequences: v1-translated checkpoints
+  were being trained/evaluated against a one-step-shifted forcing, and the
+  ocean target would have been a bit-identical copy of an input channel in
+  the same token (an identity task the shapes cannot detect). Fixed with
+  `SequenceDataset(forcing_lag=...)` + `emit_boundary_next`, and
+  `RollingDiTWrapper.forcing_lag` **derives** it from the channel layout
+  (0 for `"fork"`, 1 for `"v1"` / `"v2"`) rather than exposing a config knob.
+- **Model** (`wrappers.py`, `rolling_dit.py`): `ocean_state_variables` on
+  `RollingDiTWrapper` widens `in/out_channels` by a tail block, publishes
+  `active_varying_boundary_variables` / `ocean_grid_indices` (derived, valid
+  against the assembled `c_grid` because v1/v2 put varying first), and fails
+  at construction on a `"fork"` layout, an empty varying stream, a
+  scalar-routed name, an unknown name, or duplicates. `RollingDiT` refuses
+  the ocean block on a legacy input_embed/output_head (widening PatchEmbed /
+  Unpatchify would discard the trained projection). The 12e projections
+  already carried `nocean`; `ocean_embed` is zero-init so a warm start starts
+  inert.
+- **One injection point**: `train_loop.adopt_ocean_contract(scheduler, model)`
+  — used by training, the mid-training validator, `inference.py` and
+  `eval_diffusion.py`, so `nocean` / `ocean_grid_indices` are never restated
+  in a config. Both rollout drivers also fetch **one extra forcing frame**
+  when ocean channels are on (the final roll's imposition would otherwise be
+  clamped to a stale SST, silently).
+- **Warm start**: `train_loop.load_partial_weights` (`.mdlus` zip/tar, `.pt`,
+  bare state dict, DDP/compile prefix stripping) + `training.partial_checkpoint`
+  in `train_diffusion.py`, applied only when this run's own `checkpoint_dir`
+  resume found nothing. Reports loaded / skipped / newly-initialised keys.
+- **Configs**: `conf/model/amip_erdm_v2_ocean.yaml` (SST + sea ice
+  predicted, 151 → 153 channels), `ocean_loss_weight` in
+  `conf/loss/erdm_v2.yaml`, `partial_checkpoint: null` in both
+  `conf/training/amip_diffusion*.yaml`.
+- **Tests**: 68 new CPU cases —
+  `test/diffusion/test_erdm_ocean.py` (25),
+  `test/datapipes/climate/test_sequence_alignment.py` (11),
+  `test/models/amip_si/test_ocean_channels.py` (20),
+  `test/recipes/ai_rossby/test_train_diffusion_ocean.py` (18, incl. the
+  end-to-end "the target is the own-time boundary, not the forcing" check and
+  the zero-skipped-keys warm start). **5049 green** across
+  `test/{diffusion,models/amip_si,datapipes/climate,recipes/ai_rossby}`.
+
+**Outstanding:** the GPU mini-epoch smoke. Item 23 says "Delta A40", but
+`amip_dailyavg_coarse` + `amip_dailyavg_boundary` exist only on **Stampede3
+and Polaris** (see `hpc/data_registry.yaml`) — Delta holds neither, so the
+smoke runs on Polaris, where the 12c benchmark and venv already live.
+
+> **Alignment note for anyone reading a v1-translated checkpoint's metrics
+> from before 12f:** they were produced with `forcing_lag=0`. Nothing about
+> the tensors changes, so nothing errored — but the model was conditioned on
+> the forcing at the target frame's own time instead of the previous step's.
+> Re-run any v1 evaluation that mattered.
 
 **Effort**: ~1.5 days.
 

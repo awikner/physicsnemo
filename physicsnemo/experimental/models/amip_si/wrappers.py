@@ -484,21 +484,45 @@ class _RollingPackUnpackMixin:
     """
 
     channel_layout: str = "fork"
+    #: Predicted ocean channels (Phase 12f). 0 for the frozen families;
+    #: :class:`RollingDiTWrapper` derives it from ``ocean_state_variables``.
+    num_ocean: int = 0
 
     def state_layout(self) -> dict[str, int]:
         r"""Block sizes of the packed channel axis (upstream ``state_layout``).
 
         Mirrors amip_v2 ``common/utils.py:state_layout`` so a
         contract-aware projection (Phase 12e) can address the blocks.
-        ``nocean`` is fixed at 0 until Phase 12f (ocean-state prediction).
+        ``nocean`` (Phase 12f) counts the predicted ocean channels, which
+        occupy a block at the TAIL of the state axis — after ``diagnostic``
+        / ``upper_air``, so the state blocks keep their offsets and a
+        ``nocean=0`` checkpoint's projections stay addressable.
         """
         return {
             "nsurface": self.num_surface,
             "ndiagnostic": self.num_diagnostic,
             "nlevels": self.num_levels,
             "n_upper_air": self.num_upper_air_vars,
-            "nocean": 0,
+            "nocean": self.num_ocean,
         }
+
+    @property
+    def forcing_lag(self) -> int:
+        r"""Frames by which the forcing window lags the state window.
+
+        ``0`` for ``"fork"`` (own-time forcing — the Phase-8 convention the
+        frozen configs are pinned to), ``1`` for ``"v1"`` / ``"v2"``, where
+        upstream aligns window slot ``w`` (the state at step ``w+1``) with
+        the forcing at step ``w``: *denoising the frame at time T uses the
+        boundary forcing from T-1*.
+
+        Derived from the layout rather than configured, because the two
+        conventions differ by a whole-window shift — every tensor keeps its
+        shape, so a mismatch trains silently against the wrong forcings. Read
+        by the recipe when it builds
+        :class:`~physicsnemo.experimental.datapipes.climate.SequenceDataset`.
+        """
+        return 0 if self.channel_layout == "fork" else 1
 
     def _flatten_ua(self, upper_air: torch.Tensor) -> torch.Tensor:
         if self.channel_layout == "v2":
@@ -544,7 +568,16 @@ class _RollingPackUnpackMixin:
         return torch.cat(parts, dim=-3)
 
     def unpack_window_state(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        r"""``x [B, W, C, H, W] -> {surface_in, upper_air_in, diagnostic}``."""
+        r"""``x [B, W, C, H, W] -> {surface_in, upper_air_in, diagnostic}``.
+
+        Under ``num_ocean > 0`` the trailing ocean block is dropped: every
+        block is read at its own width from the front, so the tail simply
+        falls off the end. Equivalent to
+        :meth:`~physicsnemo.experimental.diffusion.erdm.ERDMScheduler.strip_ocean`
+        for unpack purposes — the predicted SST is a diagnostic byproduct,
+        while the *forcing* SST that the writers record comes from the
+        boundary data.
+        """
         n_ua = self.num_upper_air_vars * self.num_levels
         idx = 0
         out: dict[str, torch.Tensor] = {}
@@ -627,6 +660,17 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         the data pipeline fails at construction instead of silently
         mis-packing.
 
+    .. note:: **Predicted ocean channels (Phase 12f).**
+        ``ocean_state_variables`` names gridded forcings (SST, sea ice) the
+        forecaster should *also predict*. They widen ``in_channels`` /
+        ``out_channels`` by a block at the TAIL of the state axis, and
+        :attr:`ocean_grid_indices` says where in the assembled ``c_grid``
+        their truth is read from — derived here, from the same variable
+        lists that build the pack, so the training target and the
+        inference-imposed field cannot disagree. Requires a varying-first
+        c_grid layout (``"v1"`` / ``"v2"``) and a non-legacy
+        input_embed/output_head; both are checked at construction.
+
     Same channel-group bookkeeping as :class:`AmipDiTWrapper` but the pack
     operates on ``(B, W, ...)`` window samples (drive via
     :class:`SequenceDataset`).
@@ -645,6 +689,7 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         scalar_dim: int = 2,
         channel_layout: str = "v2",
         scalar_routed_boundary_variables: Sequence[str] = (),
+        ocean_state_variables: Sequence[str] = (),
         rolling_dit_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
@@ -687,11 +732,21 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
             self.scalar_routed_boundary_variables
         )
 
-        self.in_channels = (
+        # Phase 12f: predicted ocean channels. Validated against the *active*
+        # varying names (scalar-routed channels removed) because that is the
+        # stream that reaches c_grid — asking to predict ``global_mean_co2``
+        # after it has been popped into the calendar row has no field to read.
+        self.ocean_state_variables = list(ocean_state_variables)
+        self.num_ocean = len(self.ocean_state_variables)
+        self._validate_ocean_state_variables()
+
+        self.num_state_channels = (
             self.num_surface
             + self.num_upper_air_vars * self.num_levels
             + self.num_diagnostic
         )
+        # ``in_channels`` is the model's channel width: state + ocean tail.
+        self.in_channels = self.num_state_channels + self.num_ocean
         self.c_grid_dim = self.num_constant_boundary + self.num_varying_boundary
 
         if self.scalar_routed_boundary_variables:
@@ -729,6 +784,76 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         # the upstream ``state_layout`` lesson, so the two can never drift.
         rolling_dit_kwargs.setdefault("state_layout", self.state_layout())
         self.backbone = RollingDiT(**rolling_dit_kwargs)
+
+    # -- Predicted ocean channels (Phase 12f) --------------------------------
+
+    @property
+    def active_varying_boundary_variables(self) -> list[str]:
+        r"""Varying-boundary names in the order they reach ``c_grid``.
+
+        The stored list minus the scalar-routed channels (upstream
+        ``grid_forcing_names``). This is the ordering
+        :class:`~physicsnemo.experimental.datapipes.climate.ForcingAssembler`
+        emits, so it is what indexes the assembled forcing stream.
+        """
+        routed = set(self.scalar_routed_boundary_variables)
+        return [v for v in self.varying_boundary_variables if v not in routed]
+
+    @property
+    def ocean_grid_indices(self) -> list[int]:
+        r"""Channel indices of the ocean variables within ``c_grid``.
+
+        Mirrors upstream ``AMIPDataset.ocean_grid_indices``. Valid against
+        the assembled ``c_grid`` as well as the bare varying stream because
+        the ``"v1"`` / ``"v2"`` c_grid layout puts varying first, so the
+        varying channels are a prefix — which is exactly why
+        :meth:`_validate_ocean_state_variables` rejects ``"fork"``.
+
+        Derived, never configured: the scheduler reads the training target
+        and the inference-imposed field through this one list.
+        """
+        names = self.active_varying_boundary_variables
+        return [names.index(v) for v in self.ocean_state_variables]
+
+    def _validate_ocean_state_variables(self) -> None:
+        """Fail at construction, not mid-epoch, on an unreachable channel."""
+        if not self.num_ocean:
+            return
+        if self.channel_layout == "fork":
+            raise ValueError(
+                "ocean_state_variables needs a varying-first c_grid layout so "
+                "the forcing indices also address the assembled c_grid; "
+                'channel_layout="fork" puts the constant boundary first. Use '
+                'channel_layout="v2".'
+            )
+        if self.num_varying_boundary == 0:
+            raise ValueError(
+                "ocean_state_variables needs gridded forcings to read the "
+                "truth from, but no varying boundary channels reach c_grid"
+            )
+        names = self.active_varying_boundary_variables
+        for v in self.ocean_state_variables:
+            if v in names:
+                continue
+            if v in self.scalar_routed_boundary_variables:
+                raise ValueError(
+                    f"ocean_state_variables cannot contain {v!r}: it is "
+                    f"scalar-routed (popped out of the gridded forcings into "
+                    f"the calendar row), so there is no field to predict"
+                )
+            raise ValueError(
+                f"ocean_state_variables entry {v!r} is not one of the gridded "
+                f"forcing channels {names}"
+            )
+        dupes = [
+            v for v in set(self.ocean_state_variables)
+            if self.ocean_state_variables.count(v) > 1
+        ]
+        if dupes:
+            raise ValueError(
+                f"ocean_state_variables has duplicate entries {sorted(dupes)}; "
+                f"each predicted ocean channel needs its own state channel"
+            )
 
     def forward(self, z, t, c_grid=None, c_scalar=None):
         return self.backbone(z, t, c_grid=c_grid, c_scalar=c_scalar)

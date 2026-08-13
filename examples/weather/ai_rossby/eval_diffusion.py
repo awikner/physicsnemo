@@ -576,6 +576,12 @@ def main(cfg) -> None:
     import hydra as _hydra
 
     scheduler = _hydra.utils.instantiate(cfg.loss).to(dist.device)
+    # Phase 12f: predicted-ocean channels are a property of the checkpoint's
+    # model, so the evaluation scheduler adopts them from it (see
+    # train_loop.adopt_ocean_contract) rather than from cfg.loss.
+    from train_loop import adopt_ocean_contract
+
+    adopt_ocean_contract(scheduler, wrapper)
 
     normalizer = ClimateNormalizer.from_dataset(
         raw_ds,

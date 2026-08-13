@@ -1046,7 +1046,9 @@ def _is_diffusion_model(model) -> bool:
     return hasattr(inner, "pack_state")
 
 
-def _build_inference_scheduler(cfg: DictConfig, device: torch.device):
+def _build_inference_scheduler(
+    cfg: DictConfig, device: torch.device, model: torch.nn.Module | None = None
+):
     """Instantiate the inference-time diffusion scheduler.
 
     Order of precedence:
@@ -1068,6 +1070,13 @@ def _build_inference_scheduler(cfg: DictConfig, device: torch.device):
         sched = hydra.utils.instantiate(sampler_cfg)
     if hasattr(sched, "to"):
         sched = sched.to(device)
+    if model is not None:
+        # Phase 12f: the predicted-ocean contract comes from the model, not
+        # ``cfg.loss`` — without it the sampler would hand the model a
+        # state-width window and never impose the true ocean fields.
+        from train_loop import adopt_ocean_contract
+
+        adopt_ocean_contract(sched, model.module if hasattr(model, "module") else model)
     return sched
 
 
@@ -1256,7 +1265,17 @@ def run_diffusion_inference_streaming_per_ic(
             init_y = inner_model.pack_window_state(init_window)
 
             # Build c_grid_traj + c_scalar_traj over [ic - W + 1 .. ic + max_step - 1].
-            traj_len = window_size + max_step - 1
+            # +1 with predicted ocean channels: they are imposed from the
+            # boundary at each slot's own time, one step past the last forcing
+            # the model is conditioned on (Phase 12f). Omitting it would clamp
+            # the final roll's imposition to a stale frame. Skipped when that
+            # frame is past the end of the archive — there the scheduler's own
+            # clamp is the only option anyway.
+            ocean_lookahead = int(bool(getattr(scheduler, "nocean", 0)))
+            n_archive = int(getattr(dataset, "n_time", 0) or 0)
+            if ocean_lookahead and n_archive and ic + max_step >= n_archive:
+                ocean_lookahead = 0
+            traj_len = window_size + max_step - 1 + ocean_lookahead
             traj_frames = [
                 _maybe_normalize(
                     normalizer,
@@ -1859,7 +1878,7 @@ def main(cfg: DictConfig) -> None:
     ensemble_save_mode = str(inf_cfg.get("ensemble_save_mode", "members"))
 
     if is_diffusion:
-        scheduler = _build_inference_scheduler(cfg, dist.device)
+        scheduler = _build_inference_scheduler(cfg, dist.device, model=model)
         sampler_num_steps_raw = inf_cfg.get("sampler_num_steps", None)
         sampler_num_steps = (
             int(sampler_num_steps_raw)

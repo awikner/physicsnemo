@@ -248,6 +248,12 @@ class RollingDiT(_PNeMoModule):
 
         self.window_size = int(window_size)
 
+        # Phase 12f: predicted ocean channels occupy a block at the tail of
+        # in/out_channels (it arrives here inside ``state_layout``, derived by
+        # the wrapper). Recorded before the projections are built so the
+        # legacy-mode guard below can refuse them.
+        self.nocean = int((state_layout or {}).get("nocean", 0) or 0)
+
         # ── Input projection (Phase 12e) ──────────────────────────────────
         # ``mode="legacy"`` reproduces the pre-12e module tree EXACTLY (same
         # submodules, same names, same shapes) so trained checkpoints load
@@ -383,6 +389,30 @@ class RollingDiT(_PNeMoModule):
                 dim=dim, out_channels=self.out_channels, nlat=nlat, nlon=nlon,
                 cond_dim=dim,
                 **{**(dict(state_layout) if state_layout else {}), **head_cfg})
+
+        if self.nocean:
+            # The legacy projections cannot carry the ocean block: PatchEmbed's
+            # and Unpatchify's widths are exactly what a trained state dict
+            # stores, so widening them would silently discard the trained input
+            # projection and output head rather than extend them. Refuse here
+            # instead of building a model that cannot load its own checkpoint.
+            legacy = [
+                name
+                for name, mode in (
+                    ("input_embed", self.input_embed_mode),
+                    ("output_head", self.output_head_mode),
+                )
+                if mode == "legacy"
+            ]
+            if legacy:
+                raise ValueError(
+                    f"ocean_state_variables adds {self.nocean} channel(s), "
+                    f"which the legacy {' and '.join(legacy)} cannot carry: "
+                    f"their PatchEmbed / Unpatchify widths are checkpoint "
+                    f"state-dict shapes, so widening them would discard the "
+                    f"trained projection. Set input_embed.mode / "
+                    f"output_head.mode to a non-legacy variant."
+                )
 
         self.initialize_weights()
 

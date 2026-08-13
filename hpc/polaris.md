@@ -56,9 +56,28 @@ nodes must go to `debug-scaling` (≤1 h) or `preemptable`.
 | `/eagle/MDClimSim` | project space — ⚠️ **100% full** (42 TB free of 7.9 PB, 2026-08-07) |
 | `/grand/...` | other project spaces exist; none allocated to us yet |
 
-**The `/eagle` capacity is a live blocker** for staging E3SM/ERA5 Zarr archives here. Check
-`df -h /eagle/MDClimSim` before planning any data move. There is currently **no physicsnemo
-checkout or venv on Polaris** — see "Not yet done".
+**The `/eagle` capacity is a live blocker** for staging E3SM/ERA5 Zarr archives *under
+`/eagle/MDClimSim`*. Check `df -h` before planning any data move. The group's own
+allocation `/eagle/lighthouse-uchicago` is where the checkout and the AMIP Zarr live:
+
+| Path | Contents |
+|---|---|
+| `/eagle/lighthouse-uchicago/members/awikner/physicsnemo` | the fork checkout + `.venv` (torch 2.10.0+cu128) |
+| `/eagle/lighthouse-uchicago/physicsnemo-zarr/amip_dailyavg_coarse` | 45×90 forecaster store, 1978–2022 (134 GB) |
+| `/eagle/lighthouse-uchicago/physicsnemo-zarr/amip_dailyavg_boundary` | 1° forcings, 1978–2022 (20 GB) |
+| `/eagle/lighthouse-uchicago/physicsnemo-zarr/norm_stats` | daily-avg mean/std NetCDFs |
+
+**Pushing code here:** GitHub SSH auth from the Polaris login node fails
+(`Permission denied (publickey)`). Ship commits with a git bundle instead:
+
+```bash
+# local
+git bundle create /tmp/amipv2.bundle <last-polaris-sha>..<branch>
+scp /tmp/amipv2.bundle polaris:/eagle/lighthouse-uchicago/members/awikner/
+# polaris
+cd /eagle/lighthouse-uchicago/members/awikner/physicsnemo
+git fetch ../amipv2.bundle '<branch>:refs/remotes/bundle/<branch>' && git merge --ff-only FETCH_HEAD
+```
 
 ## Software stack
 
@@ -271,10 +290,8 @@ but **not** PALS, and without the shim `initialize_env()` raises on `int(None)`.
 
 ## Not yet done
 
-- **No physicsnemo checkout / venv on Polaris.** Needs a uv venv per `hpc/install.md`, and
-  a home for it that isn't the full `/eagle`. The conda module's torch is 2.8.0, below
-  physicsnemo's `>=2.10` pin.
-- **No E3SM/ERA5 Zarr staged here** — blocked on `/eagle` capacity.
+- **No E3SM/ERA5 Zarr staged here** — blocked on `/eagle/MDClimSim` capacity. (The AMIP
+  daily-avg coarse + boundary stores *are* staged, under `/eagle/lighthouse-uchicago`.)
 - **SFNO-E3SM has never actually been trained on Polaris.** `polaris_train_sfno_e3sm.pbs`
   mirrors the validated Delta invocation and its NCCL env / `--cpu-bind` are measured, but
   the script itself has not been executed here — expect to shake out venv and data paths

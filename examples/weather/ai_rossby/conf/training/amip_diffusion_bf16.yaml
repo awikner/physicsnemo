@@ -19,6 +19,9 @@ amp: bf16                      # bf16-native (Phase 8f, F3) — fp32 default liv
 grad_clip_norm: 0.0
 max_epochs: 50
 
+# See amip_diffusion.yaml for what this does (Phase 12f).
+partial_checkpoint: null
+
 optimizer:
   type: Muon                    # ``uv pip install muon`` required
   lr: 5.0e-5

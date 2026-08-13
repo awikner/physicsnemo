@@ -28,18 +28,26 @@ import torch
 from torch.utils.data import Dataset
 
 
-_SEQ_KEYS = (
+# State (predicted) fields. Under ``forcing_lag > 0`` these are read one step
+# LATER than the forcing keys below.
+_STATE_SEQ_KEYS = (
     "surface_in",
     "upper_air_in",
     "upper_air_sigma_in",
     "upper_air_pressure_in",
-    "varying_boundary",
     "diagnostic",
-    # Per-frame calendar vector (present when the base dataset runs with
-    # ``emit_calendar=True``). Rolling-window diffusion (ERDM/RFM) needs
-    # the (W, scalar_dim) stack as ``c_scalar`` — Phase 12b.
+)
+
+# Exogenous (conditioning) fields — the gridded boundary and the per-frame
+# calendar vector (present when the base dataset runs with
+# ``emit_calendar=True``; rolling-window diffusion needs the
+# ``(W, scalar_dim)`` stack as ``c_scalar`` — Phase 12b).
+_FORCING_SEQ_KEYS = (
+    "varying_boundary",
     "calendar",
 )
+
+_SEQ_KEYS = _STATE_SEQ_KEYS + _FORCING_SEQ_KEYS
 
 
 class SequenceDataset(Dataset):
@@ -52,7 +60,10 @@ class SequenceDataset(Dataset):
     * ``upper_air_in_seq``:      ``(T+1, C_u, L, H, W)`` (when single-coord layout)
     * ``upper_air_sigma_in_seq`` / ``upper_air_pressure_in_seq``: same when the
                                    dataset emits separated sigma + pressure keys
-    * ``varying_boundary_seq``:  ``(T+1, C_b, H, W)``
+    * ``varying_boundary_seq``:  ``(T+1, C_b, H, W)`` — the forcing window
+      (one step behind the state under ``forcing_lag=1``)
+    * ``varying_boundary_next_seq``: ``(T+1, C_b, H, W)`` — same channels at
+      the *state* frames' own times, when ``emit_boundary_next=True``
     * ``diagnostic_seq``:        ``(T+1, C_d, H, W)`` (when the layout has diag)
     * ``constant_boundary``:     unchanged (constant in time)
     * ``start_idx``, ``unroll_steps``: scalar tensors for debug/replay
@@ -60,6 +71,23 @@ class SequenceDataset(Dataset):
     For ``T = 0`` the leading dim is 1 and the emitted dict carries the
     same data as a single-step ``(start, 1)`` lookup, just under the
     ``_seq`` keys.
+
+    .. note:: **Forcing alignment (Phase 12f).** ``forcing_lag`` chooses
+        which forcing frame conditions a state frame:
+
+        * ``0`` (default) — own-time: slot ``j`` is state(t+j) with
+          boundary(t+j). The historical fork behavior; pinned by the frozen
+          ``channel_layout="fork"`` configs.
+        * ``1`` — upstream amip's convention: slot ``j`` is state(t+1+j)
+          conditioned on boundary(t+j), i.e. denoising the frame at time T
+          uses the forcing from T-1. This is what real v1/v2 checkpoints
+          were trained with, so it is what the ``"v1"`` / ``"v2"`` layouts
+          use.
+
+        The two differ by a whole-window shift, so nothing changes shape and
+        a mismatch is silent — which is why
+        :class:`~physicsnemo.experimental.models.amip_si.RollingDiTWrapper`
+        derives it from the channel layout rather than a config knob.
 
     Parameters
     ----------
@@ -70,22 +98,56 @@ class SequenceDataset(Dataset):
     unroll_steps
         Number of rollout steps the model will be trained on. Sequence
         length is ``unroll_steps + 1``.
+    forcing_lag
+        Frames by which the exogenous keys (``varying_boundary``,
+        ``calendar``) lag the state keys — see the note above. Each sample
+        reads ``unroll_steps + 1 + forcing_lag`` base frames.
+    emit_boundary_next
+        Also emit ``varying_boundary_next_seq``: the boundary at each state
+        frame's *own* time, the ocean-channel training target (upstream's
+        ``[1:]`` view of its ``W+1`` boundary stack). Requires
+        ``forcing_lag >= 1``, because at lag 0 it would be bit-identical to
+        ``varying_boundary_seq`` and the ocean task would be an identity
+        copy of an input channel.
     """
 
-    def __init__(self, base, unroll_steps: int):
+    def __init__(
+        self,
+        base,
+        unroll_steps: int,
+        *,
+        forcing_lag: int = 0,
+        emit_boundary_next: bool = False,
+    ):
         if unroll_steps < 0:
             raise ValueError(f"unroll_steps must be ≥ 0, got {unroll_steps}")
+        if forcing_lag < 0:
+            raise ValueError(f"forcing_lag must be ≥ 0, got {forcing_lag}")
+        if emit_boundary_next and forcing_lag == 0:
+            raise ValueError(
+                "emit_boundary_next=True with forcing_lag=0 would emit "
+                "varying_boundary_next_seq identical to varying_boundary_seq "
+                "— the ocean target would be a copy of an input channel in the "
+                "same token (a silent identity task). Set forcing_lag=1."
+            )
         self.base = base
         self.unroll_steps = int(unroll_steps)
+        self.forcing_lag = int(forcing_lag)
+        self.emit_boundary_next = bool(emit_boundary_next)
         self.layout = getattr(base, "layout", None)
 
     @property
     def n_time(self) -> int:
         return int(self.base.n_time)
 
+    @property
+    def frames_per_sample(self) -> int:
+        """Base-dataset frames read per sample: ``W + forcing_lag``."""
+        return self.unroll_steps + 1 + self.forcing_lag
+
     def __len__(self) -> int:
-        # We need ``unroll_steps + 1`` consecutive frames starting at idx.
-        return max(0, self.n_time - self.unroll_steps)
+        # We need ``W + forcing_lag`` consecutive frames starting at idx.
+        return max(0, self.n_time - self.unroll_steps - self.forcing_lag)
 
     @property
     def transform(self):
@@ -104,19 +166,20 @@ class SequenceDataset(Dataset):
             start_idx = int(index[0])
         else:
             start_idx = int(index)
-        if start_idx < 0 or start_idx + self.unroll_steps >= self.n_time:
+        span = self.unroll_steps + self.forcing_lag
+        if start_idx < 0 or start_idx + span >= self.n_time:
             raise IndexError(
-                f"sequence index {start_idx} (+{self.unroll_steps}) out of "
+                f"sequence index {start_idx} (+{span}) out of "
                 f"range [0, {self.n_time})"
             )
 
-        # Fetch ``unroll_steps + 1`` consecutive frames.
+        # Fetch ``W + forcing_lag`` consecutive frames.
         # Each lookup with lead=1 gives surface_in/upper_air_in at start
         # (and a target at start+1 we ignore). We just want the input
         # frame at each successive start; reading lead=1 also pulls the
         # next frame which we discard.
         frames = []
-        for k in range(self.unroll_steps + 1):
+        for k in range(self.frames_per_sample):
             t = start_idx + k
             # Use lead=1 for k<T (so the dataset can build target_*) and
             # lead=1 also at the last frame — the target is never used in
@@ -132,12 +195,30 @@ class SequenceDataset(Dataset):
                 sample = self.base[(t - 1, 1)]
             frames.append(sample)
 
+        # Slice the read window into the two views. With ``forcing_lag=0``
+        # both are ``frames[:W]`` and this is the historical behavior; with
+        # ``forcing_lag=1`` the state frames sit one step later than the
+        # forcings they are conditioned on (upstream amip's convention).
+        W = self.unroll_steps + 1
+        lag = self.forcing_lag
+        state_frames = frames[lag : lag + W]
+        forcing_frames = frames[:W]
+
+        def _stack(key, src):
+            return torch.stack([f[key] for f in src], dim=0)
+
         out: dict[str, torch.Tensor] = {}
         for key in _SEQ_KEYS:
             if key in frames[0] and isinstance(frames[0][key], torch.Tensor):
-                out[f"{key}_seq"] = torch.stack(
-                    [f[key] for f in frames], dim=0
-                )
+                src = forcing_frames if key in _FORCING_SEQ_KEYS else state_frames
+                out[f"{key}_seq"] = _stack(key, src)
+        if self.emit_boundary_next and "varying_boundary" in frames[0]:
+            # The boundary at each STATE frame's own time — the ocean-channel
+            # training target (upstream's ``[1:]`` view of its W+1 stack). Not
+            # a third read: it is the same frames the state came from.
+            out["varying_boundary_next_seq"] = _stack(
+                "varying_boundary", state_frames
+            )
         if "constant_boundary" in frames[0]:
             out["constant_boundary"] = frames[0]["constant_boundary"]
         out["start_idx"] = torch.tensor(start_idx, dtype=torch.long)

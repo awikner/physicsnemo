@@ -49,6 +49,15 @@ amp: none                       # fp32 default per Phase 8 decision A5
 grad_clip_norm: 0.0
 max_epochs: 50
 
+# Phase 12f: warm-start weights from a DIFFERENT run's checkpoint (a
+# ``.mdlus`` from ``checkpoint_dir``, or a ``.pt`` state dict). Every
+# compatible key is loaded and anything else is reported loudly — the
+# ocean-variant case (``model=amip_erdm_v2_ocean`` from a trained
+# ``amip_erdm_v2``) expects ZERO skipped keys, since ocean channels only add
+# parameters. Ignored when this run resumes its own ``checkpoint_dir``, so
+# restarting a long job never rewinds to the warm-start weights.
+partial_checkpoint: null
+
 optimizer:
   type: Muon                    # ``uv pip install muon`` required
   lr: 5.0e-5

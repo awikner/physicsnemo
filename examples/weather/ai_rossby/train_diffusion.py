@@ -68,7 +68,12 @@ from train import (  # noqa: E402
     _resolve_path,
     build_model,
 )
-from train_loop import make_optimizer, make_scheduler  # noqa: E402
+from train_loop import (  # noqa: E402
+    adopt_ocean_contract,
+    load_partial_weights,
+    make_optimizer,
+    make_scheduler,
+)
 from validate import Deterministic, GaussianIC, ReplicateOnly  # noqa: E402
 from validate_diffusion import DiffusionRolloutValidator  # noqa: E402
 
@@ -146,6 +151,8 @@ def _build_loader(
     window_size: int,
     rank: int,
     world_size: int = 1,
+    forcing_lag: int = 0,
+    emit_boundary_next: bool = False,
 ) -> tuple[DataLoader, bool]:
     """Build the per-stage DataLoader.
 
@@ -156,12 +163,21 @@ def _build_loader(
     rolling stages stride through the SequenceDataset with a plain
     :class:`~torch.utils.data.DistributedSampler` under DDP so ranks
     see disjoint windows.
+
+    ``forcing_lag`` / ``emit_boundary_next`` (Phase 12f) come from the
+    model's channel contract, not from a config knob — see
+    ``RollingDiTWrapper.forcing_lag``.
     """
     window_mode = window_size > 1
     if window_mode:
         from physicsnemo.experimental.datapipes.climate import SequenceDataset
 
-        dataset = SequenceDataset(raw_ds, unroll_steps=window_size - 1)
+        dataset = SequenceDataset(
+            raw_ds,
+            unroll_steps=window_size - 1,
+            forcing_lag=forcing_lag,
+            emit_boundary_next=emit_boundary_next,
+        )
     else:
         dataset = raw_ds
 
@@ -299,20 +315,30 @@ def _build_validator(
 
 
 def _build_scheduler_loss(
-    cfg: DictConfig, stage: DictConfig, device
+    cfg: DictConfig, stage: DictConfig, device, model: nn.Module | None = None
 ):
     """Instantiate the diffusion scheduler (training loss) for a stage.
 
     Per-stage knobs come from ``stage.loss_overrides`` and are merged on
     top of ``cfg.loss`` before :func:`hydra.utils.instantiate`. Common
     overrides: ``window_size``, ``num_steps``, ``noise``.
+
+    Phase 12f: ``nocean`` / ``ocean_grid_indices`` are *injected from the
+    model* rather than configured. They are two halves of one contract — the
+    tail width of the state axis and where in ``c_grid`` its truth lives — and
+    the model already derives both from ``ocean_state_variables``. A config
+    that restated them could disagree with the pack, and would do so silently.
     """
     overrides = stage.get("loss_overrides", None)
     if overrides is None or len(overrides) == 0:
         loss_cfg = cfg.loss
     else:
         loss_cfg = OmegaConf.merge(cfg.loss, overrides)
-    return hydra.utils.instantiate(loss_cfg).to(device)
+
+    sched = hydra.utils.instantiate(loss_cfg).to(device)
+    if model is not None:
+        adopt_ocean_contract(sched, model)
+    return sched
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +425,26 @@ def _train_step(
         enabled=amp_dtype is not None,
         dtype=amp_dtype or torch.float32,
     ):
+        ocean_loss = None
         if window_mode:
             y, c_grid, c_scalar = _pack_window(model, sample)
-            loss = scheduler_loss.compute_loss(model, c_grid, c_scalar, y)
+            if getattr(scheduler_loss, "nocean", 0):
+                # The ocean target is the boundary at each state frame's OWN
+                # time — a different slice of the loader's read window than the
+                # forcing that conditions it. Both slices have the same shape,
+                # so passing the forcing window here would silently train an
+                # identity copy; the loader emits the shifted view explicitly.
+                bnd_next = sample.get("varying_boundary_next_seq")
+                if bnd_next is None:
+                    raise KeyError(
+                        "the scheduler predicts ocean channels but the loader "
+                        "emitted no 'varying_boundary_next_seq'; build the "
+                        "SequenceDataset with emit_boundary_next=True"
+                    )
+                y = scheduler_loss.append_ocean_target(y, bnd_next)
+            loss, ocean_loss = scheduler_loss.compute_loss(
+                model, c_grid, c_scalar, y, return_parts=True
+            )
         else:
             x, y, c_grid, c_scalar = _pack_single_step(model, sample)
             loss = scheduler_loss.compute_loss(model, x, c_grid, c_scalar, y)
@@ -414,7 +457,14 @@ def _train_step(
         loss.backward()
         optimizer.step()
 
-    return {"loss": float(loss.detach().cpu())}
+    out = {"loss": float(loss.detach().cpu())}
+    if getattr(scheduler_loss, "nocean", 0) and ocean_loss is not None:
+        # Logged separately because it is ~1-2% of a channel-summed loss and
+        # collapses fast (the target is recoverable from a forcing in the same
+        # forward pass) — folded in, "learned it" and "weighted too low to
+        # matter" look identical.
+        out["loss_ocean"] = float(ocean_loss.detach().cpu())
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -506,16 +556,32 @@ def main(cfg: DictConfig) -> None:
     # --- Checkpoint resume (mirrors train.py) -----------------------------
     ckpt_dir = _resolve_path(cfg.get("checkpoint_dir", "checkpoints"))
     start_epoch = int(cfg.start_epoch)
-    start_epoch = max(
-        start_epoch,
-        load_checkpoint(
-            ckpt_dir,
-            models=inner_model,
-            optimizer=optimizer,
-            device=dist.device,
-        )
-        + 1,
+    resumed_epoch = load_checkpoint(
+        ckpt_dir,
+        models=inner_model,
+        optimizer=optimizer,
+        device=dist.device,
     )
+    start_epoch = max(start_epoch, resumed_epoch + 1)
+
+    # --- Partial-checkpoint warm start (Phase 12f) -------------------------
+    # ``training.partial_checkpoint`` warm-starts from a DIFFERENT run's
+    # weights — the ocean-variant use case: start from a trained no-ocean
+    # ERDM and let only the added ocean parameters begin at init. Applied
+    # after the resume check and only when the resume found nothing, so this
+    # run's own checkpoints always win: otherwise every restart of a
+    # long-running job would silently rewind to the warm-start weights.
+    partial_ckpt = cfg_train.get("partial_checkpoint", None)
+    if partial_ckpt:
+        if resumed_epoch > 0:
+            logger.info(
+                f"training.partial_checkpoint ignored — resumed this run's own "
+                f"checkpoint at epoch {resumed_epoch}"
+            )
+        else:
+            load_partial_weights(
+                inner_model, _resolve_path(partial_ckpt), log=logger
+            )
 
     # --- Per-batch loss TSV (benchmarking, F3) -----------------------------
     # Mirrors train.py's ``cfg.bench.per_batch_tsv`` wiring — every
@@ -562,12 +628,20 @@ def main(cfg: DictConfig) -> None:
                 window_size=window_size,
                 rank=dist.rank,
                 world_size=dist.world_size,
+                # Phase 12f: both come from the model's channel contract, so
+                # the loader cannot be aligned differently from the pack.
+                forcing_lag=int(getattr(inner_model, "forcing_lag", 0) or 0),
+                emit_boundary_next=bool(
+                    getattr(inner_model, "num_ocean", 0) or 0
+                ),
             )
 
         steps_per_epoch = max(1, len(loader))
 
         # (Re)build the diffusion scheduler with this stage's overrides.
-        scheduler_loss = _build_scheduler_loss(cfg, stage, dist.device)
+        scheduler_loss = _build_scheduler_loss(
+            cfg, stage, dist.device, model=inner_model
+        )
 
         # The validator shares the (stage-scoped) scheduler instance —
         # the inference sampler num_steps is overridden inside the
@@ -648,9 +722,16 @@ def main(cfg: DictConfig) -> None:
                     dist.rank == 0
                     and (batch_idx % int(cfg.log_every_n_steps) == 0)
                 ):
+                    # ``loss_ocean`` (Phase 12f) is the predicted-ocean part of
+                    # the same total, reported next to it rather than folded in.
+                    extra = (
+                        f" loss_ocean={losses['loss_ocean']:.4e}"
+                        if "loss_ocean" in losses
+                        else ""
+                    )
                     logger.info(
                         f"epoch {global_epoch} batch {batch_idx}/{steps_per_epoch} "
-                        f"loss={losses['loss']:.4e}"
+                        f"loss={losses['loss']:.4e}{extra}"
                     )
 
             if dist.rank == 0:

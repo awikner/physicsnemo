@@ -642,7 +642,17 @@ class DiffusionRolloutValidator:
         # forcings at each emitted frame's input slot, i.e. across
         # [t - W + 1, t + horizon - 1] inclusive — same W-frame window
         # shifted right by k for the k-th emit).
-        traj_len = self.window_size + self.horizon - 1
+        # Phase 12f: predicted ocean channels are imposed from the boundary at
+        # each window slot's OWN time, which reaches one step past the last
+        # forcing the model is conditioned on. Without this extra frame
+        # ``_gather_window`` would clamp and the final roll would be imposed
+        # from a stale SST — silently, since the shapes still line up.
+        traj_len = (
+            self.window_size
+            + self.horizon
+            - 1
+            + int(bool(getattr(self.scheduler, "nocean", 0)))
+        )
         traj_frames = [
             self._to_device(
                 self._stack(
