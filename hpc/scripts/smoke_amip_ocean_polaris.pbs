@@ -15,6 +15,12 @@
 #   3. same ocean run from scratch under 2-rank DDP, so the DistributedSampler
 #      path over the shifted (forcing_lag=1) SequenceDataset is exercised too.
 #
+# Since 2026-08-13 this also covers the model-step stride: amip_dailyavg_coarse
+# is 6-hourly and the config now says `forecast_lead_times: [4]` /
+# `timedelta_hours: 24` (every upstream AMIP config, v1 and v2), so each run
+# logs "model step: 4 store row(s) (24 h)" and every window frame is 4 rows
+# apart. Step 2 asserts that line.
+#
 # Runs on Polaris because that is where the data is: amip_dailyavg_coarse
 # (45x90 state) + amip_dailyavg_boundary (1 degree forcings) are staged under
 # /eagle/lighthouse-uchicago. Delta holds neither — see hpc/data_registry.yaml.
@@ -125,7 +131,11 @@ grep -q "ocean contract: nocean=2, c_grid indices=\[1, 2\]" "$STEP2_LOG" || {
     echo "FAIL: scheduler did not adopt the ocean contract"; exit 1; }
 grep -q "loss_ocean=" "$STEP2_LOG" || {
     echo "FAIL: train/loss_ocean was never reported"; exit 1; }
-echo "warm start OK: zero skipped keys, ocean contract adopted, loss_ocean logged"
+grep -q "model step: 4 store row(s) (24 h)" "$STEP2_LOG" || {
+    echo "FAIL: the 24-hour model step did not reach the loader"
+    grep -n "model step" "$STEP2_LOG" || true
+    exit 1; }
+echo "warm start OK: zero skipped keys, ocean contract adopted, loss_ocean logged, 24-hour step"
 grep "loss_ocean=" "$STEP2_LOG" | tail -3
 
 echo
