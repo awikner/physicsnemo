@@ -9,7 +9,7 @@ max_epochs: 10
 
 # Rollout schedule
 max_rollout_steps: 10
-rollout_step_interval: 2000
+rollout_step_interval: 1000
 initial_rollout_steps: 1
 
 # Fine-tune LR (usually smaller than base lr)

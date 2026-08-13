@@ -38,7 +38,7 @@ class RolloutFinetuner(Trainer):
         params,
         dist_mgr: DistributedManager,
         max_rollout_steps: int = 10,
-        rollout_step_interval: int = 2000,
+        rollout_step_interval: int = 1000,
         initial_rollout_steps: int = 1,
     ):
         super().__init__(params, dist_mgr)
@@ -338,6 +338,21 @@ class RolloutFinetuner(Trainer):
 
         return {"train_crps_loss": loss_val, "epoch": self.epoch}
 
+    def _resume(self, ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=f"cuda:{self.dist.local_rank}", weights_only=False)
+        state = ckpt["model_state"]
+        if any(k.startswith("module.") for k in state):
+            state = OrderedDict((k[7:], v) for k, v in state.items())
+        self.diff_model.load_state_dict(state, strict=True)
+        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        target_lr = float(self.params.get("finetune_lr", self.params.lr))
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = target_lr
+        self.epoch = ckpt.get("epoch", 0)
+        self.iters = ckpt.get("iters", 0)
+        logging.info("Resumed from %s (epoch=%d, iters=%d, lr=%g)",
+                     ckpt_path, self.epoch, self.iters, target_lr)
+
     def _save(self, name):
         if self.world_rank != 0:
             return
@@ -375,7 +390,7 @@ def main(cfg: DictConfig) -> None:
     trainer = RolloutFinetuner(
         cfg, dist_mgr,
         max_rollout_steps=cfg.get("max_rollout_steps", 10),
-        rollout_step_interval=cfg.get("rollout_step_interval", 2000),
+        rollout_step_interval=cfg.get("rollout_step_interval", 1000),
         initial_rollout_steps=cfg.get("initial_rollout_steps", 1),
     )
 
