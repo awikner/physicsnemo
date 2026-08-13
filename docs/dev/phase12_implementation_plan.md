@@ -797,6 +797,15 @@ hours statement moves to the **model** config with a cross-check.
 - **`ClimateDatapipe`** resolves the step itself (it owns dataset construction)
   and exposes `.step_stride`, which `train.py` hands to `RolloutValidator`.
 
+**Verified on real data.** The 12f Polaris smoke was re-run twice against
+`amip_dailyavg_coarse` + `amip_dailyavg_boundary`: job `7446896` (dataset-level
+resolution) and `7447934` (model-level, after the decision above). All three steps
+green in both, every run logging `model step: 4 store row(s) (24 h)` and
+`steps_per_epoch=1436` — that is `1460 - 6 x 4` for the 7-frame window, where it
+was `1454 = 1460 - 6` before the fix — and 718 under 2-rank DDP, warm start zero
+skipped keys. The two runs are **bit-identical on every logged loss**, which is
+the evidence that moving the step's home changed only where the number comes from.
+
 **Re-measure before trusting 12c's chunking.** `--time-chunk 8` on the coarse
 store was measured with an *unstrided* window: a W=7 window at stride 4 spans 25
 rows and touches ~4 chunks instead of 1. `bench_amip_dailyavg_coarse.py` gained
