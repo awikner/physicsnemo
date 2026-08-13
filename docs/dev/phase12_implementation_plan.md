@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12f complete + GPU-smoked (2026-08-12); 12g+ planned. ⚠ one blocking gap found for real training runs — see 12f's 6-hourly-store note** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12f complete + GPU-smoked (2026-08-12); 12g+ planned. ⚠ one blocking gap found for real training runs — see the model-step / store-row note under 12f** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -696,36 +696,59 @@ defaults to it. `_make_muon_optimizer` now refuses to build outside a process
 group with the `torchrun` invocation in the message, instead of dying on the
 first optimizer step inside `distributed_c10d`.
 
-### ⚠ Gap found by the 12f smoke: the store is 6-hourly, the model steps daily
+### ⚠ Model step vs store row spacing (found by the 12f smoke; corrected 2026-08-13)
 
-Not a 12f regression — a 12c/12d loader-semantics gap, and it invalidates any
-real training run on this store, so it belongs to whoever starts one.
+Not a 12f regression, and **not a missing mechanism** — the fork already has two
+names for "a model step is more than one store row", and the first version of
+this note wrongly claimed it had none. The real defects are narrower.
 
-`amip_dailyavg_*/1981.zarr` has **1460 rows spaced 6 hours apart** (verified on
-Polaris: `unique spacing (hours): [6]`) — upstream's `h5_dailyavg` files are
-24-hour means/accumulations *sampled every 6 hours*, not one row per day.
-Upstream handles this explicitly:
+The facts. Both AMIP stores are `data_timedelta_hours: 6`
+(`tools/data/amip/configs/amip_default.yaml`, `amip_dailyavg.yaml`; the daily-avg
+store measures 1460 rows/year, `unique spacing (hours): [6]` — upstream's
+`h5_dailyavg` files are 24-hour means *sampled 4x daily*). Every upstream AMIP
+config, v1 (`configs/old/*.yaml`) and v2 alike, pairs that with
+`timedelta_hours: 24`, i.e. `step_stride = 4`. The fork expresses the same thing
+two ways:
 
-```yaml
-data_timedelta_hours: 6     # store row spacing
-timedelta_hours: 24         # model step
-```
-```python
-self.step_stride = self.timedelta_hours // self.data_timedelta_hours   # = 4
-```
+| Surface | Mechanism | State |
+|---|---|---|
+| single-step training pair | `forecast_lead_times` (**in store rows**) | ✅ `era5_multiyear.yaml` / `era5_archesweather.yaml` set `[4]` — "4 x 6h = 24-hour forecast" |
+| deterministic inference rollout | `step_size` (rows per model step), `inference.py` | ✅ documented "24 h = 4 x 6 h"; defaults to `prev_state_steps` for ArchesWeather |
+| deterministic rollout **validation** (`train.py` `RolloutValidator`) | none | ❌ steps `t+k` in rows |
+| multistep training (`unroll_steps > 1`) | none — `SequenceDataset` | ❌ one row per frame |
+| rolling diffusion training (`train_diffusion.py`) | none — `SequenceDataset` | ❌ one row per frame |
+| diffusion rollout validation + inference | none | ❌ one row per step |
+| AMIP dataset configs | would be `forecast_lead_times` | ❌ `amip_1981.yaml` (Phase 8b), `amip_dailyavg.yaml`, `amip_dailyavg_coarse.yaml` all say `[1]` |
 
-Every upstream read is `index + step_stride * step`. Our `ClimateZarrDataset` /
-`SequenceDataset` walk **consecutive rows**, so a model step is 6 hours, not
-24: `W=6` spans 36 hours rather than 6 days, and consecutive frames are
-overlapping 24-hour accumulations. Shapes and losses look entirely healthy —
-the 12f smoke trains fine — which is why this needs to be fixed deliberately
-rather than noticed later.
+So this class of problem *was* encountered and solved for ERA5 — the SFNO-ERA5
+and ArchesWeather-ERA5 production configs are correct at 24 h. What is broken:
 
-Fix shape (needs a decision, since it touches the dataset contract every
-recipe shares): a `step_stride` / `timedelta_hours` pair on
-`ClimateZarrDataset` threaded through `SequenceDataset` (window frames and the
-`forcing_lag` offset both stride), defaulting to 1 so PLASIM / ERA5 / E3SM
-recipes are unchanged, with the AMIP daily-avg dataset configs setting 4.
+1. **The AMIP configs never set the lead.** Single-step AMIP families (SI /
+   SI_X / EDM / x_DDC) therefore train 6-hour steps against 24-hour
+   accumulations. Pre-existing since Phase 8b; 12c copied it forward.
+2. **The sequence path cannot express a stride at all.** `SequenceDataset` takes
+   consecutive rows and never sees `forecast_lead_times` (`ClimateDatapipe`
+   passes it only to the single-step `LeadTimePairSampler`), so setting `[4]`
+   would not fix an ERDM window. This is the one 12f's rolling path sits on.
+3. **`RolloutValidator` has no `step_size`** although `inference.py`'s
+   deterministic driver does — so rollout-validating a 24-hour SFNO-ERA5 model
+   would score it against truth 6 hours ahead. Latent only because validation
+   defaults to `off` and no ERA5 rollout config exists.
+4. The **diffusion** rollout driver
+   (`run_diffusion_inference_streaming_per_ic`) has no `step_size` either,
+   unlike its deterministic sibling in the same file.
+
+Why nothing broke: PLASIM (`sim52`, 6-hourly) and E3SM step one row per model
+step, so `lead=[1]` is correct there, and every rolling/multistep config in the
+repo today is PLASIM.
+
+Fix shape — extend the existing names, do **not** invent a third: a stride on
+`SequenceDataset` (window frames *and* the `forcing_lag` offset both stride),
+fed from `cfg.dataset.forecast_lead_times`; `step_size` on `RolloutValidator`
+and on the diffusion rollout driver, matching `inference.py`'s deterministic
+path; and `forecast_lead_times: [4]` in the AMIP dataset configs. Needs a
+decision on whether to touch the frozen v1-family AMIP configs, since changing
+their lead changes what those recipes train.
 
 > **Alignment note for anyone reading a v1-translated checkpoint's metrics
 > from before 12f:** they were produced with `forcing_lag=0`. Nothing about
