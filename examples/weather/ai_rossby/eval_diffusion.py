@@ -540,7 +540,10 @@ def main(cfg) -> None:
         warnings.filterwarnings(
             "ignore", category=Warning, module=r"physicsnemo\.experimental.*"
         )
-        from physicsnemo.experimental.datapipes.climate import ClimateNormalizer
+        from physicsnemo.experimental.datapipes.climate import (
+            ClimateNormalizer,
+            resolve_step_stride,
+        )
 
     from train import _resolve_path, build_model  # noqa: E402
     from train_diffusion import _build_dataset  # noqa: E402
@@ -610,6 +613,13 @@ def main(cfg) -> None:
         has_diagnostic=has_diagnostic,
         max_initial_conditions=int(eval_cfg.get("max_initial_conditions", 1)),
         ic_stride=int(eval_cfg.get("ic_stride", 1)),
+        # The model step in store rows, from the dataset contract — the eval
+        # suite must roll at the timestep the checkpoint was trained on.
+        step_size=resolve_step_stride(
+            raw_ds,
+            forecast_lead_times=list(cfg.dataset.forecast_lead_times),
+            timedelta_hours=cfg.dataset.get("timedelta_hours", None),
+        ),
         batch_size=int(eval_cfg.get("batch_size", 1)),
         normalizer=normalizer,
         sampler_num_steps=sampler_num_steps,

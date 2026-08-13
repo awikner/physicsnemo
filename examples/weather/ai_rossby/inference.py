@@ -57,6 +57,7 @@ with warnings.catch_warnings():
         NanFillTransform,
         PlasimClimateDataset,
         PlasimNormalizer,
+        resolve_step_stride,
     )
 
 from physicsnemo import Module
@@ -1081,17 +1082,24 @@ def _build_inference_scheduler(
 
 
 def _stack_window_initial(
-    dataset, ic: int, W: int, device: torch.device
+    dataset, ic: int, W: int, device: torch.device, step_size: int = 1
 ) -> dict:
-    """Stack ``W`` consecutive frames ending at ``ic`` into ``(1, W, …)``.
+    """Stack ``W`` frames ending at ``ic`` into ``(1, W, …)``.
 
     Pairs with the rolling wrappers' ``pack_window_state`` —
     ``surface_in`` ends up shaped ``(1, W, C_s, H, W)`` and
     ``upper_air_in`` ends up shaped ``(1, W, C_u, L, H, W)``.
+
+    Frames are ``step_size`` store rows apart, so the oracle window spans W
+    *model* steps back from the IC (24 h apart on the 6-hourly AMIP archives),
+    matching what the rolling window means during training.
     """
     if W <= 0:
         raise ValueError(f"window size must be > 0, got {W}")
-    frames = [dataset[(int(ic - W + 1 + i), 1)] for i in range(W)]
+    step_size = max(1, int(step_size))
+    frames = [
+        dataset[(int(ic + (i - W + 1) * step_size), 1)] for i in range(W)
+    ]
     out: dict[str, torch.Tensor] = {}
     for k, v0 in frames[0].items():
         if isinstance(v0, torch.Tensor) and v0.dim() >= 1:
@@ -1144,6 +1152,7 @@ def run_diffusion_inference_streaming_per_ic(
     save_variables: Optional[dict] = None,
     ensemble_save_mode: str = "members",
     logger=None,
+    step_size: Optional[int] = None,
 ) -> list[str]:
     r"""Diffusion rollout — per-IC streaming, ensemble-aware.
 
@@ -1181,25 +1190,33 @@ def run_diffusion_inference_streaming_per_ic(
         int(getattr(scheduler, "window_size", 0)) if window_mode else 0
     )
 
+    # Store rows per MODEL step. The deterministic driver above has carried
+    # this since the ArchesWeather port ("24 h = 4 x 6 h"); the diffusion driver
+    # needs it for the same reason — the AMIP archives are 6-hourly under a
+    # 24-hour model step, so rolling one row per step would advance the forcings
+    # 4x too fast and stamp every frame with the wrong valid time.
+    step_size = max(1, int(step_size if step_size is not None else 1))
+
     layout = _extract_layout(dataset)
     paths: list[str] = []
 
     for ic in ic_indices:
         ic = int(ic)
         n_frames = max_step + 1
+        last_row = ic + max_step * step_size
 
         if layout["time"] is not None:
-            t_slice = layout["time"][ic : ic + n_frames]
+            t_slice = layout["time"][ic : last_row + 1 : step_size]
             t_start = layout["time"][ic]
             t_end = (
-                layout["time"][ic + max_step]
-                if (ic + max_step) < len(layout["time"])
+                layout["time"][last_row]
+                if last_row < len(layout["time"])
                 else None
             )
         else:
             t_slice = None
             t_start = ic
-            t_end = ic + max_step
+            t_end = last_row
 
         ds = _build_per_ic_dataset(
             ic_index=ic,
@@ -1259,7 +1276,8 @@ def run_diffusion_inference_streaming_per_ic(
             # Build the oracle initial window [ic - W + 1 .. ic], normalize,
             # replicate across the ensemble, pack.
             init_window = _maybe_normalize(
-                normalizer, _stack_window_initial(dataset, ic, window_size, device)
+                normalizer,
+                _stack_window_initial(dataset, ic, window_size, device, step_size),
             )
             init_window = perturber(init_window, ensemble_size, generator=rng)
             init_y = inner_model.pack_window_state(init_window)
@@ -1273,14 +1291,18 @@ def run_diffusion_inference_streaming_per_ic(
             # clamp is the only option anyway.
             ocean_lookahead = int(bool(getattr(scheduler, "nocean", 0)))
             n_archive = int(getattr(dataset, "n_time", 0) or 0)
-            if ocean_lookahead and n_archive and ic + max_step >= n_archive:
+            if ocean_lookahead and n_archive and (
+                ic + (max_step + 1) * step_size >= n_archive
+            ):
                 ocean_lookahead = 0
             traj_len = window_size + max_step - 1 + ocean_lookahead
             traj_frames = [
                 _maybe_normalize(
                     normalizer,
                     _stack_at_step(
-                        dataset, [ic - window_size + 1 + j], device
+                        dataset,
+                        [ic + (j - window_size + 1) * step_size],
+                        device,
                     ),
                 )
                 for j in range(traj_len)
@@ -1382,7 +1404,7 @@ def run_diffusion_inference_streaming_per_ic(
                 if k < max_step:
                     next_step = _maybe_normalize(
                         normalizer,
-                        _stack_at_step(dataset, [ic + k], device),
+                        _stack_at_step(dataset, [ic + k * step_size], device),
                     )
                     next_var_boundary = next_step["varying_boundary"]
                     next_calendar = next_step["calendar"]
@@ -1419,7 +1441,7 @@ def run_diffusion_inference_streaming_per_ic(
             run_name=run_name,
             start_time=format_time_for_filename(t_start),
             end_time=format_time_for_filename(
-                t_end if t_end is not None else (ic + max_step)
+                t_end if t_end is not None else (ic + max_step * step_size)
             ),
             extension=output_format,
         )
@@ -1849,8 +1871,26 @@ def main(cfg: DictConfig) -> None:
     prev_state_steps = int(
         inf_cfg.get("prev_state_steps", data.get("prev_state_steps", 0))
     )
+    # Rollout step size, in store rows. Precedence: an explicit
+    # ``inference.step_size`` wins; otherwise it comes from the dataset's own
+    # contract, because the model step is a property of how the model was
+    # TRAINED, not of the inference run — the AMIP and ERA5 archives are
+    # 6-hourly under a 24-hour step, so rolling one row per step would advance
+    # the forcings 4x too fast and mislabel every frame's valid time. For
+    # ArchesWeather this agrees with the old prev_state_steps default (lead 4 =
+    # prev 4); that default survives as a fallback for a dataset config with no
+    # lead information.
     step_size_raw = inf_cfg.get("step_size", None)
-    step_size = int(step_size_raw) if step_size_raw is not None else None
+    if step_size_raw is not None:
+        step_size = int(step_size_raw)
+    else:
+        step_size = resolve_step_stride(
+            base_ds,
+            forecast_lead_times=list(data.forecast_lead_times)
+            if data.get("forecast_lead_times", None)
+            else None,
+            timedelta_hours=data.get("timedelta_hours", None),
+        )
     # ``perturber_scales`` may be absent (deterministic rollouts don't need it).
     # ``inf_cfg.get(key, {})`` would return a *plain* ``{}`` in that case, which
     # ``OmegaConf.to_container`` rejects ("Input cfg is not an OmegaConf config
@@ -1938,6 +1978,7 @@ def main(cfg: DictConfig) -> None:
                 seed=int(cfg.seed) + 1009,
                 save_variables=save_variables,
                 ensemble_save_mode=ensemble_save_mode,
+                step_size=step_size,
                 logger=logger,
             )
         else:

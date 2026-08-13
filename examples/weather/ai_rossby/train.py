@@ -54,6 +54,7 @@ with warnings.catch_warnings():
         PlasimClimateDatapipe,
         PlasimClimateDataset,
         PlasimNormalizer,
+        resolve_step_stride,
     )
     # Model classes are imported by name at runtime via Module.instantiate
     # — no direct import needed here, but we keep the namespace warning
@@ -860,6 +861,14 @@ def main(cfg: DictConfig) -> None:
                     cfg_rollout.get("max_initial_conditions", 4)
                 ),
                 ic_stride=int(cfg_rollout.get("ic_stride", 1)),
+                # One MODEL step in store rows — the same number the training
+                # datapipe strides by, so validation scores the model at the
+                # timestep it was trained on.
+                step_size=resolve_step_stride(
+                    val_datapipe.dataset,
+                    forecast_lead_times=list(cfg.dataset.forecast_lead_times),
+                    timedelta_hours=cfg.dataset.get("timedelta_hours", None),
+                ),
                 normalizer=val_datapipe.normalizer,
                 seed=int(cfg.seed) + 17,
             )

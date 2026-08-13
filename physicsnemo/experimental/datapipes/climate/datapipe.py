@@ -197,9 +197,23 @@ class ClimateDatapipe(Datapipe):
             # Multi-step rollout — wrap with SequenceDataset and use a plain
             # int sampler. Each batch carries a leading time axis of size
             # unroll_steps+1; the trainer consumes the ``_seq`` keys.
+            from .dataset import resolve_step_stride
             from .sequence import IntSampler, SequenceDataset
 
-            self.dataset = SequenceDataset(base_dataset, unroll_steps=self.unroll_steps)
+            # The multistep window must advance one MODEL step per frame, which
+            # is ``forecast_lead_times`` rows — not one row. Same number the
+            # single-step branch hands the sampler above; PLASIM / E3SM read 1,
+            # the 6-hourly AMIP / ERA5 archives read 4 (24 h). Without this a
+            # curriculum's rollout stages silently train a different timestep
+            # from its single-step stages.
+            step_stride = resolve_step_stride(
+                base_dataset, forecast_lead_times=list(forecast_lead_times)
+            )
+            self.dataset = SequenceDataset(
+                base_dataset,
+                unroll_steps=self.unroll_steps,
+                step_stride=step_stride,
+            )
             self.sampler = IntSampler(
                 dataset_length=len(self.dataset),
                 num_samples=num_samples_per_epoch,

@@ -22,6 +22,14 @@ yearly_repeating_boundary: False
 leap_boundary_zarr_path: null
 non_leap_boundary_zarr_path: null
 
+# Model timestep: one store row. NOT cross-checked against a source config —
+# `dataset=e3sm` pairs with `model=sfno_e3sm`, whose authority is the
+# PanguWeather repo, which was not reachable when the 2026-08-13 stride audit
+# ran. The AMIP-family E3SM configs (amip v1 `SI_E3SM.yaml` / `DDC_E3SM.yaml`)
+# use a 24-hour step over 6-hourly rows; if SFNO-E3SM is meant to match them,
+# this needs `forecast_lead_times: [4]` + `timedelta_hours: 24`. Left as-is
+# rather than changed on a guess — see the stride table in
+# docs/dev/phase12_implementation_plan.md.
 forecast_lead_times: [1]
 num_samples_per_epoch: null
 batch_size: 4

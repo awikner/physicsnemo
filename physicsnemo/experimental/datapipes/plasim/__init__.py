@@ -29,6 +29,7 @@ from ..climate import (
     LeadTimePairSampler,
     NanFillTransform,
     SequenceDataset,
+    resolve_step_stride,
 )
 
 # Legacy ``Plasim*`` aliases — every name the old sub-package exported.
@@ -51,6 +52,7 @@ __all__ = [
     "LeadTimePairSampler",
     "NanFillTransform",
     "SequenceDataset",
+    "resolve_step_stride",
     # Legacy PLASIM-prefixed aliases (kept indefinitely as no-op rebrands).
     "PLASIM_ZARR_SCHEMA_VERSION",
     "PlasimClimateDatapipe",

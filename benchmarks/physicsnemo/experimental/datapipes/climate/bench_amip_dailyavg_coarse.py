@@ -25,16 +25,24 @@ import time
 import numpy as np
 
 
-def _build_dataset(path: str, windowed: int):
+def _build_dataset(path: str, windowed: int, step_stride: int = 1):
     from physicsnemo.experimental.datapipes.climate import ClimateZarrDataset
 
     ds = ClimateZarrDataset(zarr_path=path)
     if windowed > 1:
         from physicsnemo.experimental.datapipes.climate import SequenceDataset
 
-        # W frames = unroll_steps + 1 — the ERDM rolling-window read the
-        # coarse store's --time-chunk 8 was sized for.
-        return SequenceDataset(ds, unroll_steps=windowed - 1)
+        # W frames = unroll_steps + 1 — the ERDM rolling-window read.
+        #
+        # ``step_stride`` matters a lot here and defaults to 1 only to keep the
+        # recorded numbers comparable: the AMIP store is 6-hourly under a
+        # 24-hour model step, so a real W=7 window spans 25 rows rather than 7
+        # and touches ~4 of the store's 8-row chunks instead of 1. The
+        # ``--time-chunk 8`` choice in 12c was measured unstrided, so re-run
+        # this with ``--step-stride 4`` before trusting it.
+        return SequenceDataset(
+            ds, unroll_steps=windowed - 1, step_stride=step_stride
+        )
     return ds
 
 
@@ -44,9 +52,10 @@ def bench_store(
     *,
     seed: int = 0,
     windowed: int = 0,
+    step_stride: int = 1,
     num_workers: int = 0,
 ) -> dict:
-    ds = _build_dataset(path, windowed)
+    ds = _build_dataset(path, windowed, step_stride)
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(ds) - 1, size=n_samples)
 
@@ -103,6 +112,13 @@ def main() -> None:
     p.add_argument("--coarse", required=True)
     p.add_argument("--n-samples", type=int, default=100)
     p.add_argument(
+        "--step-stride",
+        type=int,
+        default=1,
+        help="store rows per model step (4 for the 6-hourly AMIP archives "
+             "under their 24-hour model step); only affects --windowed reads",
+    )
+    p.add_argument(
         "--windowed",
         type=int,
         default=0,
@@ -129,7 +145,11 @@ def main() -> None:
     for name, path in targets:
         for nw in workers:
             r = bench_store(
-                path, args.n_samples, windowed=args.windowed, num_workers=nw
+                path,
+                args.n_samples,
+                windowed=args.windowed,
+                step_stride=args.step_stride,
+                num_workers=nw
             )
             rates[f"{name}@{nw}"] = r["samples_per_s"]
             print(

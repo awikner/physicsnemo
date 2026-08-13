@@ -384,6 +384,7 @@ class RolloutValidator:
         batch_size: int = 1,
         max_initial_conditions: int = 4,
         ic_stride: int = 1,
+        step_size: int = 1,
         climatology_surface: Optional[torch.Tensor] = None,
         climatology_upper_air: Optional[torch.Tensor] = None,
         climatology_diagnostic: Optional[torch.Tensor] = None,
@@ -409,6 +410,14 @@ class RolloutValidator:
         self.batch_size = max(1, int(batch_size))
         self.max_initial_conditions = max(1, int(max_initial_conditions))
         self.ic_stride = max(1, int(ic_stride))
+        # Store rows advanced per MODEL step. The archive's row spacing is not
+        # always the model's timestep — the ERA5 recipes step 24 h over
+        # 6-hourly rows (``forecast_lead_times: [4]``), and every upstream AMIP
+        # config does too. Scoring a 24-hour model against the row at t+k would
+        # compare its 1-step forecast with truth 6 hours ahead; nothing about
+        # the shapes would object. ``inference.py``'s deterministic driver has
+        # carried the same knob all along — this brings validation in line.
+        self.step_size = max(1, int(step_size))
         self.seed = int(seed)
         self.log_to_wandb = log_to_wandb
         self.normalizer = normalizer
@@ -500,7 +509,7 @@ class RolloutValidator:
         ``max_initial_conditions`` are split round-robin across ranks so
         each rank gets a disjoint subset (deterministic, no shuffling).
         """
-        max_idx = self.dataset.n_time - self.max_step - 1
+        max_idx = self.dataset.n_time - self.max_step * self.step_size - 1
         candidates = list(range(0, max_idx + 1, self.ic_stride))
         candidates = candidates[: self.max_initial_conditions]
         # Round-robin so each rank gets ~equal load.
@@ -636,7 +645,7 @@ class RolloutValidator:
         # varying boundary at the current input time and the truth at the
         # next time to score the prediction.
         for k in range(1, self.max_step + 1):
-            target_times = [t + k for t in batch_ics]
+            target_times = [t + k * self.step_size for t in batch_ics]
             target_batch = self._to_device(self._stack_at_step(target_times))
 
             # Use the varying boundary AT THE INPUT TIME (matches train).
@@ -723,7 +732,7 @@ class RolloutValidator:
 
             # Advance: the next iteration's state is this step's prediction.
             # `varying_boundary` for the next step is the boundary AT time
-            # t+k, which is the `varying_boundary` of the sample at start=t+k.
+            # t + k*step_size, i.e. the `varying_boundary` of that sample.
             # In ensemble mode the boundary needs to march along with each
             # member (E identical copies per IC, contiguous in the batch dim
             # to match the perturber's repeat_interleave layout).

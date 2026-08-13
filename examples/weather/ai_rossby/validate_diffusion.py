@@ -240,6 +240,7 @@ class DiffusionRolloutValidator:
         batch_size: int = 1,
         max_initial_conditions: int = 4,
         ic_stride: int = 1,
+        step_size: int = 1,
         climatology_surface: Optional[torch.Tensor] = None,
         climatology_upper_air: Optional[torch.Tensor] = None,
         climatology_diagnostic: Optional[torch.Tensor] = None,
@@ -266,6 +267,14 @@ class DiffusionRolloutValidator:
         self.batch_size = max(1, int(batch_size))
         self.max_initial_conditions = max(1, int(max_initial_conditions))
         self.ic_stride = max(1, int(ic_stride))
+        # Store rows per MODEL step (see validate.py's RolloutValidator and
+        # datapipes.climate.resolve_step_stride). Every index below — the IC
+        # bound, the oracle window's past frames, the forcing trajectory and
+        # the scoring targets — is in model steps, not rows: the AMIP archives
+        # are 6-hourly under a 24-hour step, so a stride of 1 would score a
+        # 1-step forecast against truth 6 hours out and roll the model through
+        # forcings 4x too fast.
+        self.step_size = max(1, int(step_size))
         self.normalizer = normalizer
         self.sampler_num_steps = sampler_num_steps
         self.seed = int(seed)
@@ -381,8 +390,8 @@ class DiffusionRolloutValidator:
         # single-step needs ``horizon`` future frames after the IC;
         # window mode needs ``W - 1`` past frames before *and* ``horizon``
         # future frames after.
-        last_future = self.horizon
-        first_past = self.window_size - 1 if self.window_mode else 0
+        last_future = self.horizon * self.step_size
+        first_past = (self.window_size - 1) * self.step_size if self.window_mode else 0
         max_idx = self.dataset.n_time - last_future - 1
         candidates = list(range(first_past, max_idx + 1, self.ic_stride))
         candidates = candidates[: self.max_initial_conditions]
@@ -543,7 +552,7 @@ class DiffusionRolloutValidator:
             # Score this step (if requested) against the dataset's frame at t+k.
             if k in log_step_to_idx:
                 m_idx = log_step_to_idx[k]
-                target_times = [t + k for t in batch_ics]
+                target_times = [t + k * self.step_size for t in batch_ics]
                 target = self._to_device(self._stack(target_times))
                 unpacked = wrapper.unpack_state(x_next)
                 self._score_step(m_idx, unpacked["surface_in"], target["surface_in"], "surface")
@@ -563,7 +572,7 @@ class DiffusionRolloutValidator:
             # diffusion sample. Boundary + calendar march to the next step
             # using the dataset sample at t+k.
             if k < self.horizon:
-                next_times = [t + k for t in batch_ics]
+                next_times = [t + k * self.step_size for t in batch_ics]
                 next_step = self._to_device(self._stack(next_times))
                 next_var_boundary = next_step["varying_boundary"]
                 next_calendar = next_step["calendar"]
@@ -594,11 +603,18 @@ class DiffusionRolloutValidator:
     def _stack_window(
         self, batch_ics: list[int], w_offset: int
     ) -> dict[str, torch.Tensor]:
-        """Stack a (B, W, ...) window batch ending at (t + w_offset)."""
+        """Stack a (B, W, ...) window batch ending at ``t + w_offset`` steps.
+
+        ``w_offset`` and the intra-window spacing are both in MODEL steps, so
+        the frames land ``step_size`` store rows apart — the oracle window spans
+        W model steps back from the IC, matching the training window.
+        """
         per_batch_windows = []
         for t in batch_ics:
             frames = [
-                self._fetch(t + w_offset - self.window_size + 1 + i)
+                self._fetch(
+                    t + (w_offset - self.window_size + 1 + i) * self.step_size
+                )
                 for i in range(self.window_size)
             ]
             # Stack frames into a (W, ...) per-batch dict.
@@ -656,7 +672,10 @@ class DiffusionRolloutValidator:
         traj_frames = [
             self._to_device(
                 self._stack(
-                    [t - self.window_size + 1 + i for t in batch_ics]
+                    [
+                        t + (i - self.window_size + 1) * self.step_size
+                        for t in batch_ics
+                    ]
                 )
             )
             for i in range(traj_len)
@@ -699,7 +718,7 @@ class DiffusionRolloutValidator:
             x_k = traj[:, k - 1]
             unpacked = wrapper.unpack_state(x_k)
             target = self._to_device(
-                self._stack([t + k for t in batch_ics])
+                self._stack([t + k * self.step_size for t in batch_ics])
             )
             self._score_step(m_idx, unpacked["surface_in"], target["surface_in"], "surface")
             if self.has_upper_air and "upper_air_in" in unpacked:

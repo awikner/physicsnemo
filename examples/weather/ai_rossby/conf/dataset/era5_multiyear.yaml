@@ -32,7 +32,13 @@ yearly_repeating_boundary: False
 leap_boundary_zarr_path: null
 non_leap_boundary_zarr_path: null
 
+# Model timestep: 4 x 6h rows = 24 h, matching the ArchesWeather / SFNO-ERA5
+# source configs (and `prev_state_steps: 4`, one model step back). The hours
+# statement below is cross-checked against the store's own
+# `data_timedelta_hours` by `resolve_step_stride`, so the row count and the hour
+# count cannot drift apart.
 forecast_lead_times: [4]          # 4 x 6h = 24-hour forecast
+timedelta_hours: 24
 num_samples_per_epoch: 8760       # ~1 year of 6-hourly steps per epoch
 batch_size: 1                     # PER-GPU (per rank). embed_dim=512 @ 180x360
                                   # fits 1/GPU on 40 GB A100 w/ checkpointing=2;

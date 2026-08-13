@@ -52,6 +52,7 @@ with warnings.catch_warnings():
         ClimateNormalizer,
         ClimateZarrDataset,
         NanFillTransform,
+        resolve_step_stride,
     )
     from physicsnemo.experimental.datapipes.climate.samplers import (
         LeadTimePairSampler,
@@ -153,6 +154,7 @@ def _build_loader(
     world_size: int = 1,
     forcing_lag: int = 0,
     emit_boundary_next: bool = False,
+    step_stride: int = 1,
 ) -> tuple[DataLoader, bool]:
     """Build the per-stage DataLoader.
 
@@ -166,7 +168,9 @@ def _build_loader(
 
     ``forcing_lag`` / ``emit_boundary_next`` (Phase 12f) come from the
     model's channel contract, not from a config knob — see
-    ``RollingDiTWrapper.forcing_lag``.
+    ``RollingDiTWrapper.forcing_lag``. ``step_stride`` is the model step in
+    store rows (``resolve_step_stride``); the rolling window advances one model
+    step per frame, which on the 6-hourly AMIP archives is 4 rows, not 1.
     """
     window_mode = window_size > 1
     if window_mode:
@@ -177,6 +181,7 @@ def _build_loader(
             unroll_steps=window_size - 1,
             forcing_lag=forcing_lag,
             emit_boundary_next=emit_boundary_next,
+            step_stride=step_stride,
         )
     else:
         dataset = raw_ds
@@ -239,6 +244,7 @@ def _build_validator(
     inference_scheduler,
     *,
     device,
+    step_size: int = 1,
 ) -> DiffusionRolloutValidator | None:
     """Build the :class:`DiffusionRolloutValidator` from cfg.validation.
 
@@ -308,6 +314,9 @@ def _build_validator(
         batch_size=int(rollout_cfg.get("batch_size", 1)),
         max_initial_conditions=int(rollout_cfg.get("max_initial_conditions", 4)),
         ic_stride=int(rollout_cfg.get("ic_stride", 1)),
+        # The model step, in store rows — the same number the training loader
+        # strides by, so validation rolls the model at its trained timestep.
+        step_size=step_size,
         normalizer=normalizer,
         sampler_num_steps=sampler_num_steps,
         seed=int(cfg.seed),
@@ -583,6 +592,23 @@ def main(cfg: DictConfig) -> None:
                 inner_model, _resolve_path(partial_ckpt), log=logger
             )
 
+    # --- Model step (in store rows) ---------------------------------------
+    # The archives are stored at ``data_timedelta_hours`` spacing, which is not
+    # always the model's timestep: every upstream AMIP config (v1 and v2) and
+    # the ERA5 recipes step 24 h over 6-hourly rows. ``resolve_step_stride``
+    # cross-checks the config's row-level ``forecast_lead_times`` against the
+    # optional hours-level ``timedelta_hours`` and the store's own attribute, so
+    # the two spellings cannot disagree silently.
+    step_stride = resolve_step_stride(
+        raw_ds,
+        forecast_lead_times=list(cfg.dataset.forecast_lead_times),
+        timedelta_hours=cfg.dataset.get("timedelta_hours", None),
+    )
+    logger.info(
+        f"model step: {step_stride} store row(s) "
+        f"({step_stride * int(getattr(raw_ds.layout, 'data_timedelta_hours', 0) or 0)} h)"
+    )
+
     # --- Per-batch loss TSV (benchmarking, F3) -----------------------------
     # Mirrors train.py's ``cfg.bench.per_batch_tsv`` wiring — every
     # minibatch's wall-clock time + loss is appended to a TSV for the
@@ -628,6 +654,7 @@ def main(cfg: DictConfig) -> None:
                 window_size=window_size,
                 rank=dist.rank,
                 world_size=dist.world_size,
+                step_stride=step_stride,
                 # Phase 12f: both come from the model's channel contract, so
                 # the loader cannot be aligned differently from the pack.
                 forcing_lag=int(getattr(inner_model, "forcing_lag", 0) or 0),
@@ -647,7 +674,8 @@ def main(cfg: DictConfig) -> None:
         # the inference sampler num_steps is overridden inside the
         # validator. Rebuilt at the same boundaries as ``scheduler_loss``.
         validator = _build_validator(
-            cfg, raw_ds, inner_model, scheduler_loss, device=dist.device
+            cfg, raw_ds, inner_model, scheduler_loss,
+            device=dist.device, step_size=step_stride,
         )
         if validator is not None and dist.rank == 0:
             logger.info(

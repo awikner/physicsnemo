@@ -39,7 +39,19 @@ yearly_repeating_boundary: False
 leap_boundary_zarr_path: null
 non_leap_boundary_zarr_path: null
 
-forecast_lead_times: [1]
+# Model timestep. Upstream amip pairs the store's 6-hourly rows with a 24-hour
+# model step — every config in BOTH source repos says so (v1 `configs/*.yaml`
+# incl. SI/EDM/RFM/ERDM-UNet/DDC, v2 `configs/*.yaml`):
+#     data_timedelta_hours: 6      # store row spacing (this store's attr)
+#     timedelta_hours: 24          # model step  ->  step_stride = 4 rows
+# `forecast_lead_times` is this fork's row-level spelling of the same number, so
+# it must be [4], not [1]. `timedelta_hours` below is the hours-level statement;
+# `resolve_step_stride` divides it by the store's own attribute and fails if the
+# two disagree. Every consumer (single-step pair, rolling window, rollout
+# validation, inference) strides by it — before 2026-08-13 they walked single
+# rows, i.e. trained and scored a 6-hour step against 24-hour accumulations.
+forecast_lead_times: [4]
+timedelta_hours: 24
 num_samples_per_epoch: null
 batch_size: 1
 num_workers: 4

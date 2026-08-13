@@ -35,6 +35,7 @@ from .dataset import (
     CLIMATE_ZARR_SCHEMA_VERSION,
     ClimateZarrDataset,
     ClimateZarrStoreLayout,
+    resolve_step_stride,
 )
 from .forcing import ForcingAssembler
 from .multiyear import ClimateZarrMultiYearDataset
@@ -60,5 +61,6 @@ __all__ = [
     "LeadTimePairSampler",
     "NanFillTransform",
     "SequenceDataset",
+    "resolve_step_stride",
     "smooth_masked_boundary",
 ]

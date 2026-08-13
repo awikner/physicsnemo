@@ -60,7 +60,10 @@ class SequenceDataset(Dataset):
     * ``upper_air_in_seq``:      ``(T+1, C_u, L, H, W)`` (when single-coord layout)
     * ``upper_air_sigma_in_seq`` / ``upper_air_pressure_in_seq``: same when the
                                    dataset emits separated sigma + pressure keys
-    * ``varying_boundary_seq``:  ``(T+1, C_b, H, W)`` — the forcing window
+    Frames are ``step_stride`` store rows apart (default 1); see the parameter
+notes — a 6-hourly archive under a 24-hour model step needs ``step_stride=4``.
+
+* ``varying_boundary_seq``:  ``(T+1, C_b, H, W)`` — the forcing window
       (one step behind the state under ``forcing_lag=1``)
     * ``varying_boundary_next_seq``: ``(T+1, C_b, H, W)`` — same channels at
       the *state* frames' own times, when ``emit_boundary_next=True``
@@ -102,6 +105,17 @@ class SequenceDataset(Dataset):
         Frames by which the exogenous keys (``varying_boundary``,
         ``calendar``) lag the state keys — see the note above. Each sample
         reads ``unroll_steps + 1 + forcing_lag`` base frames.
+    step_stride
+        Store rows advanced per model step (upstream's
+        ``timedelta_hours // data_timedelta_hours``). ``1`` — one row per step —
+        is right for PLASIM / E3SM, whose archives are stored at the model's own
+        timestep; the AMIP and ERA5 archives are 6-hourly under a 24-hour model
+        step, so they need ``4``. Derive it with
+        :func:`~physicsnemo.experimental.datapipes.climate.resolve_step_stride`
+        rather than hardcoding, so it is cross-checked against the store's own
+        ``data_timedelta_hours``. Both the window frames *and* the
+        ``forcing_lag`` offset stride: "one step back" is one model step, not
+        one row.
     emit_boundary_next
         Also emit ``varying_boundary_next_seq``: the boundary at each state
         frame's *own* time, the ocean-channel training target (upstream's
@@ -118,11 +132,14 @@ class SequenceDataset(Dataset):
         *,
         forcing_lag: int = 0,
         emit_boundary_next: bool = False,
+        step_stride: int = 1,
     ):
         if unroll_steps < 0:
             raise ValueError(f"unroll_steps must be ≥ 0, got {unroll_steps}")
         if forcing_lag < 0:
             raise ValueError(f"forcing_lag must be ≥ 0, got {forcing_lag}")
+        if step_stride < 1:
+            raise ValueError(f"step_stride must be ≥ 1, got {step_stride}")
         if emit_boundary_next and forcing_lag == 0:
             raise ValueError(
                 "emit_boundary_next=True with forcing_lag=0 would emit "
@@ -134,6 +151,7 @@ class SequenceDataset(Dataset):
         self.unroll_steps = int(unroll_steps)
         self.forcing_lag = int(forcing_lag)
         self.emit_boundary_next = bool(emit_boundary_next)
+        self.step_stride = int(step_stride)
         self.layout = getattr(base, "layout", None)
 
     @property
@@ -145,9 +163,18 @@ class SequenceDataset(Dataset):
         """Base-dataset frames read per sample: ``W + forcing_lag``."""
         return self.unroll_steps + 1 + self.forcing_lag
 
+    @property
+    def row_span(self) -> int:
+        """Store rows between the first and last frame of a sample.
+
+        ``(frames - 1) * step_stride`` — the frames are ``step_stride`` rows
+        apart, so a W-frame window covers more of the archive than W rows.
+        """
+        return (self.frames_per_sample - 1) * self.step_stride
+
     def __len__(self) -> int:
-        # We need ``W + forcing_lag`` consecutive frames starting at idx.
-        return max(0, self.n_time - self.unroll_steps - self.forcing_lag)
+        # A sample needs ``row_span`` rows of headroom past its start index.
+        return max(0, self.n_time - self.row_span)
 
     @property
     def transform(self):
@@ -166,21 +193,21 @@ class SequenceDataset(Dataset):
             start_idx = int(index[0])
         else:
             start_idx = int(index)
-        span = self.unroll_steps + self.forcing_lag
+        span = self.row_span
         if start_idx < 0 or start_idx + span >= self.n_time:
             raise IndexError(
                 f"sequence index {start_idx} (+{span}) out of "
                 f"range [0, {self.n_time})"
             )
 
-        # Fetch ``W + forcing_lag`` consecutive frames.
+        # Fetch ``W + forcing_lag`` frames, ``step_stride`` rows apart.
         # Each lookup with lead=1 gives surface_in/upper_air_in at start
         # (and a target at start+1 we ignore). We just want the input
         # frame at each successive start; reading lead=1 also pulls the
         # next frame which we discard.
         frames = []
         for k in range(self.frames_per_sample):
-            t = start_idx + k
+            t = start_idx + k * self.step_stride
             # Use lead=1 for k<T (so the dataset can build target_*) and
             # lead=1 also at the last frame — the target is never used in
             # sequence mode but the base requires lead>=1 + (start+lead) in

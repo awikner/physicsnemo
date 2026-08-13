@@ -64,6 +64,92 @@ async def _group_has_all(group, names) -> bool:
     return True
 
 
+def resolve_step_stride(
+    dataset,
+    forecast_lead_times=None,
+    timedelta_hours: Optional[int] = None,
+) -> int:
+    r"""Store rows advanced per model step.
+
+    A store's rows are ``data_timedelta_hours`` apart (a store attribute), but a
+    model may step further than one row: ERA5 archives are 6-hourly while every
+    upstream AMIP and ArchesWeather config steps 24 h, i.e. 4 rows. Upstream
+    writes that as a pair and divides::
+
+        data_timedelta_hours: 6      # store row spacing
+        timedelta_hours: 24          # model step
+        step_stride = timedelta_hours // data_timedelta_hours     # = 4
+
+    This fork's row-level spelling of the same number is
+    ``dataset.forecast_lead_times`` (the lead of the single-step training pair,
+    **in rows**). Both are accepted here and, when both are given, they are
+    *cross-checked* — the whole reason this function exists is that a stride
+    disagreement is invisible: every tensor keeps its shape, the loss looks
+    healthy, and the model simply learns the wrong timestep.
+
+    Parameters
+    ----------
+    dataset
+        Anything exposing ``.layout.data_timedelta_hours`` (both
+        :class:`ClimateZarrDataset` and ``ClimateZarrMultiYearDataset`` do).
+    forecast_lead_times
+        The config's lead list, in rows. Must carry a single distinct value:
+        rolling / multistep training has one timestep, so a lead-conditioned
+        multi-lead setup cannot be expressed and raises instead of silently
+        picking one.
+    timedelta_hours
+        Optional model step in hours — upstream's spelling. Divided by the
+        store's own ``data_timedelta_hours``, so it cannot drift from the data.
+
+    Returns
+    -------
+    int
+        Rows per model step (``1`` when neither argument is given).
+    """
+    data_dt = int(getattr(getattr(dataset, "layout", None), "data_timedelta_hours", 0) or 0)
+
+    from_hours = None
+    if timedelta_hours is not None:
+        if not data_dt:
+            raise ValueError(
+                f"timedelta_hours={timedelta_hours} needs the store's "
+                f"data_timedelta_hours attribute to convert to rows, but the "
+                f"store does not declare one"
+            )
+        if int(timedelta_hours) % data_dt:
+            raise ValueError(
+                f"timedelta_hours={timedelta_hours} is not a whole number of "
+                f"{data_dt}-hour store rows"
+            )
+        from_hours = int(timedelta_hours) // data_dt
+
+    from_leads = None
+    if forecast_lead_times is not None:
+        leads = {int(v) for v in forecast_lead_times}
+        if not leads:
+            raise ValueError("forecast_lead_times is empty")
+        if len(leads) > 1:
+            raise ValueError(
+                f"forecast_lead_times={sorted(leads)} has several distinct "
+                f"leads, so there is no single model step to stride by. "
+                f"Multi-lead training is single-step only."
+            )
+        from_leads = leads.pop()
+        if from_leads < 1:
+            raise ValueError(f"forecast_lead_times must be >= 1, got {from_leads}")
+
+    if from_hours is not None and from_leads is not None and from_hours != from_leads:
+        raise ValueError(
+            f"model step disagreement: timedelta_hours={timedelta_hours} over "
+            f"{data_dt}-hour rows = {from_hours} row(s), but "
+            f"forecast_lead_times says {from_leads}. These are two spellings of "
+            f"one number — fix the dataset config."
+        )
+
+    stride = from_hours if from_hours is not None else from_leads
+    return 1 if stride is None else int(stride)
+
+
 @dataclass
 class ClimateZarrStoreLayout:
     """Channel-group bookkeeping read from the Zarr store's ``attrs``.

@@ -19,7 +19,13 @@ yearly_repeating_boundary: False
 leap_boundary_zarr_path: null
 non_leap_boundary_zarr_path: null
 
+# Model timestep = one store row: PLASIM sim52 is archived at 6-hourly spacing
+# and the model steps 6 h (its precip diagnostic is `pr_6h`), so lead 1 is
+# correct here — unlike the AMIP / ERA5 archives, which are also 6-hourly but
+# carry a 24-hour model step. Stated in hours as well so `resolve_step_stride`
+# can cross-check it against the store's `data_timedelta_hours` attribute.
 forecast_lead_times: [1]
+timedelta_hours: 6
 num_samples_per_epoch: null
 batch_size: 8
 num_workers: 8
