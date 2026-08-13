@@ -806,10 +806,16 @@ was `1454 = 1460 - 6` before the fix — and 718 under 2-rank DDP, warm start ze
 skipped keys. The two runs are **bit-identical on every logged loss**, which is
 the evidence that moving the step's home changed only where the number comes from.
 
-**Re-measure before trusting 12c's chunking.** `--time-chunk 8` on the coarse
-store was measured with an *unstrided* window: a W=7 window at stride 4 spans 25
-rows and touches ~4 chunks instead of 1. `bench_amip_dailyavg_coarse.py` gained
-`--step-stride` for exactly this; the number is cluster-bound and unmeasured.
+**12c's chunking re-measured (Polaris job 7448391) — keep `--time-chunk 8`.**
+Full table in `benchmarks/.../climate/RESULTS_amip_dailyavg.md`. Striding turns
+out to be **free** (chunk 8: 14.59 windows/s at stride 4 vs 14.32 at stride 1),
+so the cost is per-request latency rather than chunk bytes. The
+window-alignment rationale was backwards: chunk 32, which covers a whole strided
+window, is the *slowest* (9.58); chunk 1 is fastest (15.51, ~21% over chunk 8)
+but at 8x the files — ~2.0M vs 250k for 45 years, which is the kind of inode
+load that pushed this data off Derecho scratch to begin with. The 21% buys
+nothing while the loader already runs ~3.5x faster than a dim-1024 W=6 step
+consumes.
 
 > **Alignment note for anyone reading a v1-translated checkpoint's metrics
 > from before 12f:** they were produced with `forcing_lag=0`. Nothing about
