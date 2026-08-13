@@ -33,7 +33,7 @@ from torch.utils.data import DataLoader
 from physicsnemo.datapipes.datapipe import Datapipe
 from physicsnemo.datapipes.meta import DatapipeMetaData
 
-from .dataset import ClimateZarrDataset
+from .dataset import ClimateZarrDataset, resolve_step_stride
 from .samplers import LeadTimePairSampler
 from .transforms import ClimateNormalizer
 
@@ -107,7 +107,7 @@ class ClimateDatapipe(Datapipe):
     def __init__(
         self,
         zarr_path: str | Path,
-        forecast_lead_times: Sequence[int] = (1,),
+        forecast_lead_times: Optional[Sequence[int]] = (1,),
         *,
         normalizer: Optional[ClimateNormalizer] = None,
         nan_fill: Optional[float] = 0.0,
@@ -126,6 +126,7 @@ class ClimateDatapipe(Datapipe):
         leap_boundary_zarr_path: Optional[str | Path] = None,
         non_leap_boundary_zarr_path: Optional[str | Path] = None,
         unroll_steps: int = 1,
+        model_timedelta_hours: Optional[int] = None,
         prev_state_steps: int = 0,
         emit_calendar: bool = False,
         calendar_encoding: str = "second_doy",
@@ -179,6 +180,23 @@ class ClimateDatapipe(Datapipe):
         else:
             rank, world_size = 0, 1
 
+        # Model step, in store rows. The step is a MODEL-family property (the
+        # PLASIM archive feeds a 24-hour Pangu and a 6-hour SFNO from the same
+        # rows), so ``model_timedelta_hours`` is authoritative and
+        # ``forecast_lead_times`` — this fork's row-level spelling — is
+        # cross-checked against it. A store shared by families with different
+        # steps passes ``forecast_lead_times=None`` and lets the model decide.
+        self.step_stride = resolve_step_stride(
+            base_dataset,
+            forecast_lead_times=list(forecast_lead_times)
+            if forecast_lead_times
+            else None,
+            model_timedelta_hours=model_timedelta_hours,
+        )
+        forecast_lead_times = (
+            list(forecast_lead_times) if forecast_lead_times else [self.step_stride]
+        )
+
         self.unroll_steps = int(unroll_steps)
         if self.unroll_steps <= 1:
             # Single-step mode — emit (init, target_at_t+lead) pairs.
@@ -197,22 +215,16 @@ class ClimateDatapipe(Datapipe):
             # Multi-step rollout — wrap with SequenceDataset and use a plain
             # int sampler. Each batch carries a leading time axis of size
             # unroll_steps+1; the trainer consumes the ``_seq`` keys.
-            from .dataset import resolve_step_stride
             from .sequence import IntSampler, SequenceDataset
 
-            # The multistep window must advance one MODEL step per frame, which
-            # is ``forecast_lead_times`` rows — not one row. Same number the
-            # single-step branch hands the sampler above; PLASIM / E3SM read 1,
-            # the 6-hourly AMIP / ERA5 archives read 4 (24 h). Without this a
-            # curriculum's rollout stages silently train a different timestep
-            # from its single-step stages.
-            step_stride = resolve_step_stride(
-                base_dataset, forecast_lead_times=list(forecast_lead_times)
-            )
+            # The multistep window advances one MODEL step per frame — the same
+            # ``self.step_stride`` the single-step branch hands its sampler.
+            # Without it a curriculum's rollout stages would silently train a
+            # different timestep from its single-step stages.
             self.dataset = SequenceDataset(
                 base_dataset,
                 unroll_steps=self.unroll_steps,
-                step_stride=step_stride,
+                step_stride=self.step_stride,
             )
             self.sampler = IntSampler(
                 dataset_length=len(self.dataset),

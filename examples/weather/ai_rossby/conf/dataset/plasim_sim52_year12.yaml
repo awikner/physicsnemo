@@ -18,13 +18,15 @@ yearly_repeating_boundary: False
 leap_boundary_zarr_path: null
 non_leap_boundary_zarr_path: null
 
-# Model timestep = one store row: PLASIM sim52 is archived at 6-hourly spacing
-# and the model steps 6 h (its precip diagnostic is `pr_6h`), so lead 1 is
-# correct here — unlike the AMIP / ERA5 archives, which are also 6-hourly but
-# carry a 24-hour model step. Stated in hours as well so `resolve_step_stride`
-# can cross-check it against the store's `data_timedelta_hours` attribute.
-forecast_lead_times: [1]
-timedelta_hours: 6
+# Model timestep: NOT stated here. This store is shared by two model families
+# with different steps — `pangu_plasim*` steps 24 h (upstream
+# `PANGU_PLASIM_H5_DERECHO_0514.yaml`) and `sfno_plasim*` steps 6 h
+# (`SFNO_PLASIM_H5_DERECHO_5412.yaml`) over the same 6-hourly rows — so any
+# value here would be wrong for one of them. `null` means "ask the model":
+# `train_loop.model_step_rows` reads `model.timedelta_hours` and divides by this
+# store's `data_timedelta_hours`, and `lead_times_for_sampler` uses the result as
+# the single-step pair's lead. Set it explicitly only to override.
+forecast_lead_times: null
 num_samples_per_epoch: null     # null → len(dataset)
 batch_size: 8                   # PanguWeather SFNO_PLASIM_5412 default
 num_workers: 8

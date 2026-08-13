@@ -985,7 +985,7 @@ def main(cfg: DictConfig) -> None:
     flat = OmegaConf.to_container(cfg.model, resolve=True) or {}
     name = str(flat["name"])
     module_path = str(flat["module"])
-    args = {k: v for k, v in flat.items() if k not in {"name", "module", "target", "model_type"}}
+    args = {k: v for k, v in flat.items() if k not in {"name", "module", "target", "model_type", "timedelta_hours"}}
     model = Module.instantiate(
         {"__name__": name, "__module__": module_path, "__args__": args}
     ).to(dist.device)

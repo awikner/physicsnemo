@@ -233,7 +233,117 @@ def test_amip_configs_carry_the_upstream_24_hour_step(name):
 
     cfg = OmegaConf.load(_AI_ROSSBY_DIR / "conf" / "dataset" / f"{name}.yaml")
     assert list(cfg.forecast_lead_times) == [4]
-    assert int(cfg.timedelta_hours) == 24
+    # The hours live in the model config now (the step is a model property);
+    # every AMIP model config states 24.
+    for model_name in ("amip_si", "amip_erdm_v2", "amip_rfm", "amip_x_ddc"):
+        model = OmegaConf.load(
+            _AI_ROSSBY_DIR / "conf" / "model" / f"{model_name}.yaml"
+        )
+        assert int(model.timedelta_hours) == 24, model_name
+
+
+# (model config, dataset config, expected rows/step) — every pairing the repo
+# ships, each verified against the model's named upstream config on 2026-08-13.
+_PAIRINGS = [
+    ("amip_si", "amip_1981", 4),
+    ("amip_erdm_v2", "amip_dailyavg_coarse", 4),
+    ("amip_erdm_v2_ocean", "amip_dailyavg_coarse", 4),
+    ("amip_rfm", "amip_1981", 4),
+    ("sfno_era5", "era5_multiyear", 4),
+    ("archesweather_era5", "era5_archesweather", 4),
+    ("sfno_plasim_s2s", "era5_sfno_s2s_1981", 4),
+    ("sfno_e3sm", "e3sm", 1),
+    # The shared store: same rows, two different steps.
+    ("pangu_plasim_legacy", "plasim_sim52_year12", 4),
+    ("sfno_plasim_5412", "plasim_sim52_year12", 1),
+]
+
+
+@pytest.mark.parametrize("model_name,data_name,expected", _PAIRINGS)
+def test_every_shipped_pairing_resolves_to_its_upstream_step(
+    model_name, data_name, expected
+):
+    """The model owns the step; the dataset's lead is a cross-check.
+
+    PLASIM is the case that forced this: ``pangu_plasim_legacy`` (24 h, upstream
+    ``PANGU_PLASIM_H5_DERECHO_0514.yaml``) and ``sfno_plasim_5412`` (6 h,
+    ``SFNO_PLASIM_H5_DERECHO_5412_test.yaml``) read the *same* 6-hourly store,
+    so no dataset-level number can serve both — its lead is ``null`` and the
+    model supplies it.
+    """
+    from omegaconf import OmegaConf
+
+    from train_loop import lead_times_for_sampler, model_step_rows
+
+    cfg = OmegaConf.create(
+        {
+            "model": OmegaConf.load(
+                _AI_ROSSBY_DIR / "conf" / "model" / f"{model_name}.yaml"
+            ),
+            "dataset": OmegaConf.load(
+                _AI_ROSSBY_DIR / "conf" / "dataset" / f"{data_name}.yaml"
+            ),
+        }
+    )
+
+    class _Store:
+        class layout:
+            data_timedelta_hours = 6
+
+    stride = model_step_rows(cfg, _Store())
+    assert stride == expected
+    # And the single-step sampler gets the same number in rows.
+    assert lead_times_for_sampler(cfg, stride) == [expected]
+
+
+def test_a_mismatched_pairing_fails_loudly():
+    # Pointing a 24-hour model at a dataset config that insists on 1 row must
+    # raise, not train quietly at the wrong step.
+    from omegaconf import OmegaConf
+
+    from train_loop import model_step_rows
+
+    cfg = OmegaConf.create(
+        {
+            "model": {"timedelta_hours": 24},
+            "dataset": {"forecast_lead_times": [1]},
+        }
+    )
+
+    class _Store:
+        class layout:
+            data_timedelta_hours = 6
+
+    with pytest.raises(ValueError, match="model step disagreement"):
+        model_step_rows(cfg, _Store())
+
+
+def test_the_step_is_not_passed_to_model_constructors():
+    """``timedelta_hours`` is recipe metadata, not a wrapper argument.
+
+    Model configs are forwarded to the constructor key-by-key, so a new
+    top-level key becomes a keyword argument unless it is excluded — this is how
+    the audit first broke ``amip_x_ddc``.
+    """
+    from train import _MODEL_CONFIG_ONLY_KEYS
+
+    assert "timedelta_hours" in _MODEL_CONFIG_ONLY_KEYS
+
+
+def test_every_model_config_declares_its_step():
+    """No model config may leave the step implicit.
+
+    A missing ``timedelta_hours`` falls back to the dataset's lead, which is
+    exactly the ambiguity this audit removed.
+    """
+    from omegaconf import OmegaConf
+
+    skip = {"amip_combined"}  # composes two checkpoints; states it separately
+    for path in sorted((_AI_ROSSBY_DIR / "conf" / "model").glob("*.yaml")):
+        cfg = OmegaConf.load(path)
+        assert "timedelta_hours" in cfg or path.stem in skip, path.name
+        if "timedelta_hours" in cfg:
+            assert int(cfg.timedelta_hours) in (6, 24), path.name
 
 
 @pytest.mark.parametrize(
@@ -243,32 +353,18 @@ def test_amip_configs_carry_the_upstream_24_hour_step(name):
         "era5_archesweather",
         "era5_sfno_s2s_1981",
         "e3sm",
-        "plasim_sim52_year12",
-        "plasim_sim52_train_val",
     ],
 )
-def test_hours_and_rows_agree_in_every_config_that_states_both(name):
-    """The cross-check must actually pass for the configs that opt into it.
+def test_single_family_stores_keep_an_explicit_row_lead(name):
+    """Stores used by one family keep their lead as a redundant cross-check.
 
-    All these stores are 6-hourly. Verified against the source configs on
-    2026-08-13: ERA5 / SFNO-S2S step 24 h (4 rows, PanguWeather
-    ``SFNO_S2S_0003_test.yaml``), SFNO-E3SM steps 6 h (1 row,
-    ``E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml``), PLASIM-SFNO steps 6 h
-    (``SFNO_PLASIM_H5_DERECHO_5412_test.yaml``).
+    Only the shared PLASIM configs are ``null``; everything else states the row
+    count so a model/dataset mismatch is caught rather than assumed.
     """
     from omegaconf import OmegaConf
 
-    from physicsnemo.experimental.datapipes.climate import resolve_step_stride
-
     cfg = OmegaConf.load(_AI_ROSSBY_DIR / "conf" / "dataset" / f"{name}.yaml")
-
-    class _Store:
-        class layout:
-            data_timedelta_hours = 6
-
-    stride = resolve_step_stride(
-        _Store(),
-        forecast_lead_times=list(cfg.forecast_lead_times),
-        timedelta_hours=cfg.timedelta_hours,
+    assert cfg.forecast_lead_times, name
+    assert "timedelta_hours" not in cfg, (
+        f"{name} restates the step in hours; the model config owns that"
     )
-    assert stride == int(cfg.timedelta_hours) // 6

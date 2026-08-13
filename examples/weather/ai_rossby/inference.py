@@ -57,7 +57,6 @@ with warnings.catch_warnings():
         NanFillTransform,
         PlasimClimateDataset,
         PlasimNormalizer,
-        resolve_step_stride,
     )
 
 from physicsnemo import Module
@@ -1680,7 +1679,7 @@ def main(cfg: DictConfig) -> None:
     flat = OmegaConf.to_container(cfg.model, resolve=True) or {}
     name = str(flat["name"])
     module_path = str(flat["module"])
-    args = {k: v for k, v in flat.items() if k not in {"name", "module", "target", "model_type"}}
+    args = {k: v for k, v in flat.items() if k not in {"name", "module", "target", "model_type", "timedelta_hours"}}
     model = Module.instantiate(
         {"__name__": name, "__module__": module_path, "__args__": args}
     ).to(dist.device)
@@ -1884,13 +1883,9 @@ def main(cfg: DictConfig) -> None:
     if step_size_raw is not None:
         step_size = int(step_size_raw)
     else:
-        step_size = resolve_step_stride(
-            base_ds,
-            forecast_lead_times=list(data.forecast_lead_times)
-            if data.get("forecast_lead_times", None)
-            else None,
-            timedelta_hours=data.get("timedelta_hours", None),
-        )
+        from train_loop import model_step_rows
+
+        step_size = model_step_rows(cfg, base_ds)
     # ``perturber_scales`` may be absent (deterministic rollouts don't need it).
     # ``inf_cfg.get(key, {})`` would return a *plain* ``{}`` in that case, which
     # ``OmegaConf.to_container`` rejects ("Input cfg is not an OmegaConf config

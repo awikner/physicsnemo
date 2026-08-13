@@ -771,38 +771,31 @@ with `timedelta_hours / data_timedelta_hours` doing the row conversion. This for
 folded both into one row-level number. Same information, different units — worth
 knowing when reading a source config's `[1, 12, 20, 40, 60]`.
 
-### ⚠ Open: the PLASIM store serves two families with different timesteps
+### Resolved (user decision, 2026-08-13): the step lives in the model config
 
-`plasim_sim52_year12` / `plasim_sim52_train_val` are used by **both**
-`pangu_plasim*` (source `PANGU_PLASIM_H5_DERECHO_0514.yaml`, **24 h**) and
-`sfno_plasim*` (source `SFNO_PLASIM_H5_DERECHO_5412.yaml`, **6 h**), so no single
-`forecast_lead_times` in the dataset config can be right for both. The fork has
-always said `[1]` — correct for SFNO-PLASIM, a 4x-too-short step for
-Pangu-PLASIM if 0514 is the intended authority.
+The PLASIM store settled it. `plasim_sim52_*` is read by **both**
+`pangu_plasim*` (24 h, `PANGU_PLASIM_H5_DERECHO_0514.yaml`) and `sfno_plasim*`
+(6 h, `SFNO_PLASIM_H5_DERECHO_5412.yaml`), so the step provably is **not** a
+property of the store. User decisions: **0514 = 24 h, 5412/0515 = 6 h**, and the
+hours statement moves to the **model** config with a cross-check.
 
-Complicating the reading: `PANGU_PLASIM_H5_DERECHO_**0515**.yaml` — one day later
-in the same series — says **6 h**, and `conf/model/pangu_plasim_legacy.yaml` cites
-0514 only for "backbone defaults". So this is an intent question, not a lookup.
-
-Two ways out, both needing a decision:
-
-1. **Model-level `timedelta_hours`** — move the hours statement into the *model*
-   configs (where the family lives), have the recipes prefer it over the
-   dataset's, and let `resolve_step_stride` fail loudly on a mismatched
-   model/dataset pairing. Smaller change; a mismatched pairing needs a CLI
-   override (the SFNO-PLASIM benches already pass
-   `dataset.forecast_lead_times=[1]` explicitly, so only the Pangu paths pick up
-   the default).
-2. **Adopt upstream's units** — make `forecast_lead_times` count model steps and
-   let the model's `timedelta_hours` supply the stride. Most faithful to both
-   source repos and removes the shared-store conflict entirely, but it silently
-   reinterprets every existing lead number and every `dataset.forecast_lead_times=`
-   override in the scripts.
-
-**Verified on real data** — Polaris job `7446896`, the 12f smoke re-run after the
-fix: all three steps green, every run logging `model step: 4 store row(s) (24 h)`
-and `steps_per_epoch=1436` (= 1460 rows - 6 x 4 for the 7-frame window; it was
-1454 = 1460 - 6 before), 718 under 2-rank DDP. Warm start still zero skipped keys.
+- **`model.timedelta_hours`** — every one of the 21 model configs now declares
+  its step, each with the upstream config it was read from in a comment. It is
+  in `_MODEL_CONFIG_ONLY_KEYS`, so it never reaches a wrapper constructor
+  (model configs are forwarded key-by-key; this is what first broke
+  `amip_x_ddc`).
+- **`train_loop.model_step_rows(cfg, dataset)`** — the one resolution point for
+  every driver. The model's hours win; the dataset's `forecast_lead_times`
+  (rows) and any dataset-level hours are cross-checked and a disagreement
+  raises.
+- **`train_loop.lead_times_for_sampler(cfg, step_rows)`** — the single-step
+  pair's lead: the dataset's list when set, else the model's own step.
+- **Dataset configs** keep `forecast_lead_times` as a redundant row-level
+  cross-check, and no longer restate the hours. The two shared PLASIM configs
+  set it to **`null`** ("ask the model") — the only way one config can serve a
+  24-hour and a 6-hour family.
+- **`ClimateDatapipe`** resolves the step itself (it owns dataset construction)
+  and exposes `.step_stride`, which `train.py` hands to `RolloutValidator`.
 
 **Re-measure before trusting 12c's chunking.** `--time-chunk 8` on the coarse
 store was measured with an *unstrided* window: a W=7 window at stride 4 spans 25

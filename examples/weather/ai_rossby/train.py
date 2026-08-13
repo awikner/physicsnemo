@@ -54,7 +54,6 @@ with warnings.catch_warnings():
         PlasimClimateDatapipe,
         PlasimClimateDataset,
         PlasimNormalizer,
-        resolve_step_stride,
     )
     # Model classes are imported by name at runtime via Module.instantiate
     # — no direct import needed here, but we keep the namespace warning
@@ -516,6 +515,12 @@ _MODEL_CONFIG_ONLY_KEYS = frozenset(
         "module",
         "target",
         "model_type",
+        # Recipe metadata: the model's timestep in hours (2026-08-13 stride
+        # audit). It belongs with the model because the step is a family
+        # property, but the wrappers take channel/geometry arguments only —
+        # ``train_loop.model_step_rows`` reads it from the config, not from the
+        # constructed module.
+        "timedelta_hours",
     }
 )
 
@@ -669,7 +674,16 @@ def build_datapipe(
     effective_batch = int(batch_size_override) if batch_size_override else int(data.batch_size)
     pipe = PlasimClimateDatapipe(
         zarr_path,
-        forecast_lead_times=list(data.forecast_lead_times),
+        # Row-level lead (may be null when the store is shared by model
+        # families with different steps — PLASIM is), plus the model's own step
+        # in hours, which is authoritative. The datapipe resolves and
+        # cross-checks them and exposes the result as ``.step_stride``.
+        forecast_lead_times=(
+            list(data.forecast_lead_times)
+            if data.get("forecast_lead_times", None)
+            else None
+        ),
+        model_timedelta_hours=model.get("timedelta_hours", None),
         normalizer=normalizer,
         nan_fill=None,  # per-variable NaN fill runs CPU-side via dataset.transform below.
         batch_size=effective_batch,
@@ -864,11 +878,7 @@ def main(cfg: DictConfig) -> None:
                 # One MODEL step in store rows — the same number the training
                 # datapipe strides by, so validation scores the model at the
                 # timestep it was trained on.
-                step_size=resolve_step_stride(
-                    val_datapipe.dataset,
-                    forecast_lead_times=list(cfg.dataset.forecast_lead_times),
-                    timedelta_hours=cfg.dataset.get("timedelta_hours", None),
-                ),
+                step_size=val_datapipe.step_stride,
                 normalizer=val_datapipe.normalizer,
                 seed=int(cfg.seed) + 17,
             )

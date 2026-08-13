@@ -51,7 +51,6 @@ non_leap_boundary_zarr_path: null
 # validation, inference) strides by it — before 2026-08-13 they walked single
 # rows, i.e. trained and scored a 6-hour step against 24-hour accumulations.
 forecast_lead_times: [4]
-timedelta_hours: 24
 num_samples_per_epoch: null
 batch_size: 1
 num_workers: 4

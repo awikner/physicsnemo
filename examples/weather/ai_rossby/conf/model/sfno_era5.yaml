@@ -20,6 +20,15 @@
 name: SfnoPlasim
 module: physicsnemo.experimental.models.sfno_plasim
 
+# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
+# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
+# a 6-hour model. Source of truth for this one: SFNO_S2S_0003_test.yaml
+# (this file's architecture source).
+# `train_loop.model_step_rows` divides it by the store's own
+# `data_timedelta_hours` to get the row stride, and raises if the dataset
+# config's `forecast_lead_times` disagrees.
+timedelta_hours: 24
+
 # Variable groups — match the `era5/` archive attrs (full Pangu-S2S feature set:
 # 9 prognostic surface + 5 upper-air x 17 levels + 2 diagnostics). SST is now a
 # prognostic surface variable (matching the Pangu-Weather S2S set); only sea-ice

@@ -17,6 +17,15 @@
 name: ArchesWeather
 module: physicsnemo.experimental.models.archesweather
 
+# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
+# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
+# a 6-hour model. Source of truth for this one: geoarches ArchesWeather-M
+# (one model step = prev_state_steps = 4 x 6 h).
+# `train_loop.model_step_rows` divides it by the store's own
+# `data_timedelta_hours` to get the row stride, and raises if the dataset
+# config's `forecast_lead_times` disagrees.
+timedelta_hours: 24
+
 # Variable groups — surface + upper-air match the (re-augmented) `era5/` archive
 # attrs: 9 prognostic surface vars, matching the Pangu-Weather S2S set. SST is now
 # a prognostic surface variable (was varying boundary). NOTE: OLR

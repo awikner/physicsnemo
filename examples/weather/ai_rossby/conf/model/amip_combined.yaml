@@ -28,6 +28,12 @@
 #       downscaler_scheduler=hydra.utils.instantiate(<downscaler.sampler>),
 #   )
 
+# Model timestep, in hours (2026-08-13 stride audit) — the forecaster's step,
+# since that is what advances time (the downscaler is a same-time
+# super-resolution cascade). Every amip config, v1 and v2, steps 24 h over
+# 6-hourly rows; `train_loop.model_step_rows` converts it to a row stride.
+timedelta_hours: 24
+
 forecaster:
   # Which low-res forecaster family produced the checkpoint below.
   model: amip_si_x               # conf/model/amip_si_x.yaml

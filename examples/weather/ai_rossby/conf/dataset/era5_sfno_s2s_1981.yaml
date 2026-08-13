@@ -23,7 +23,6 @@ non_leap_boundary_zarr_path: null
 # mirrors) says `data_timedelta_hours: 6` / `timedelta_hours: 24`. Was [1] (a
 # 6-hour step) until the 2026-08-13 stride audit reached the PanguWeather repo.
 forecast_lead_times: [4]
-timedelta_hours: 24
 num_samples_per_epoch: null
 batch_size: 4
 num_workers: 4

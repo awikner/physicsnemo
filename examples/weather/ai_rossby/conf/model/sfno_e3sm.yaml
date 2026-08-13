@@ -12,6 +12,15 @@
 name: SfnoPlasim
 module: physicsnemo.experimental.models.sfno_plasim
 
+# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
+# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
+# a 6-hour model. Source of truth for this one: E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml
+# (the config this file is converted from).
+# `train_loop.model_step_rows` divides it by the store's own
+# `data_timedelta_hours` to get the row stride, and raises if the dataset
+# config's `forecast_lead_times` disagrees.
+timedelta_hours: 6
+
 # Variable groups — must match the ai-rossby E3SM Zarr store's attrs
 # (tools/data/e3sm/pangu_h5_to_zarr.py PANGU_E3SM_CHANNELS). Land variables
 # (SOILWATER_10CM, TSOI_10CM) are NOT written by the per-year converter (soil

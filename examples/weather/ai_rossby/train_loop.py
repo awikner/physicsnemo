@@ -33,6 +33,55 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Model step in store rows (2026-08-13 stride audit) — one resolution point.
+# ---------------------------------------------------------------------------
+
+
+def model_step_rows(cfg: Any, dataset: Any) -> int:
+    """Store rows advanced per model step, for this cfg's model/dataset pair.
+
+    The step is a property of the **model family**, not of the store — the
+    PLASIM ``sim52`` archive feeds ``pangu_plasim*`` (24 h, upstream
+    ``PANGU_PLASIM_H5_DERECHO_0514.yaml``) and ``sfno_plasim*`` (6 h,
+    ``SFNO_PLASIM_H5_DERECHO_5412.yaml``) from the same 6-hourly rows. So
+    ``cfg.model.timedelta_hours`` is authoritative; the dataset's
+    ``forecast_lead_times`` (rows) and optional ``timedelta_hours`` are
+    cross-checked against it and a disagreement raises.
+
+    Every driver — training loaders, rollout validation, inference, eval —
+    resolves the step through here, because a stride mismatch changes no shape
+    and yields a healthy-looking loss.
+    """
+    from physicsnemo.experimental.datapipes.climate import resolve_step_stride
+
+    data_cfg = cfg.get("dataset", None)
+    model_cfg = cfg.get("model", None)
+    leads = data_cfg.get("forecast_lead_times", None) if data_cfg else None
+    return resolve_step_stride(
+        dataset,
+        forecast_lead_times=list(leads) if leads else None,
+        timedelta_hours=data_cfg.get("timedelta_hours", None) if data_cfg else None,
+        model_timedelta_hours=(
+            model_cfg.get("timedelta_hours", None) if model_cfg else None
+        ),
+    )
+
+
+def lead_times_for_sampler(cfg: Any, step_rows: int) -> list[int]:
+    """The single-step pair's lead list, in store rows.
+
+    ``cfg.dataset.forecast_lead_times`` when it is set; otherwise the model's
+    own step. Stores shared by families with different steps leave it null so
+    the model supplies it — that is what keeps a shared PLASIM config from
+    having to be wrong for one of them.
+    """
+    data_cfg = cfg.get("dataset", None)
+    leads = data_cfg.get("forecast_lead_times", None) if data_cfg else None
+    return [int(v) for v in leads] if leads else [int(step_rows)]
+
+
+
+# ---------------------------------------------------------------------------
 # Predicted ocean channels (Phase 12f) — one injection point.
 # ---------------------------------------------------------------------------
 

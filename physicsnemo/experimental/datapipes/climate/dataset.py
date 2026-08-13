@@ -68,6 +68,7 @@ def resolve_step_stride(
     dataset,
     forecast_lead_times=None,
     timedelta_hours: Optional[int] = None,
+    model_timedelta_hours: Optional[int] = None,
 ) -> int:
     r"""Store rows advanced per model step.
 
@@ -98,15 +99,37 @@ def resolve_step_stride(
         multi-lead setup cannot be expressed and raises instead of silently
         picking one.
     timedelta_hours
-        Optional model step in hours — upstream's spelling. Divided by the
-        store's own ``data_timedelta_hours``, so it cannot drift from the data.
+        Optional model step in hours declared by the *dataset* config —
+        upstream's spelling. Divided by the store's own
+        ``data_timedelta_hours``, so it cannot drift from the data.
+    model_timedelta_hours
+        The step in hours declared by the *model* config, which **wins**. The
+        step is a property of the model family, not of the store: the PLASIM
+        ``sim52`` archive serves ``pangu_plasim*`` (24 h, upstream
+        ``PANGU_PLASIM_H5_DERECHO_0514.yaml``) and ``sfno_plasim*`` (6 h,
+        ``SFNO_PLASIM_H5_DERECHO_5412.yaml``) from the same rows, so no
+        dataset-level number can be right for both.
 
     Returns
     -------
     int
-        Rows per model step (``1`` when neither argument is given).
+        Rows per model step (``1`` when nothing is given).
     """
     data_dt = int(getattr(getattr(dataset, "layout", None), "data_timedelta_hours", 0) or 0)
+
+    if (
+        model_timedelta_hours is not None
+        and timedelta_hours is not None
+        and int(model_timedelta_hours) != int(timedelta_hours)
+    ):
+        raise ValueError(
+            f"model timedelta_hours={model_timedelta_hours} but the dataset "
+            f"config says {timedelta_hours}. The model's step wins, so delete "
+            f"the dataset's (or fix the pairing) rather than leaving two "
+            f"different answers in the tree."
+        )
+    if model_timedelta_hours is not None:
+        timedelta_hours = model_timedelta_hours
 
     from_hours = None
     if timedelta_hours is not None:
@@ -143,7 +166,10 @@ def resolve_step_stride(
             f"model step disagreement: timedelta_hours={timedelta_hours} over "
             f"{data_dt}-hour rows = {from_hours} row(s), but "
             f"forecast_lead_times says {from_leads}. These are two spellings of "
-            f"one number — fix the dataset config."
+            f"one number. If this store is shared by model families with "
+            f"different steps (PLASIM is), set the dataset's "
+            f"forecast_lead_times to null and let the model's timedelta_hours "
+            f"supply it; otherwise set forecast_lead_times: [{from_hours}]."
         )
 
     stride = from_hours if from_hours is not None else from_leads

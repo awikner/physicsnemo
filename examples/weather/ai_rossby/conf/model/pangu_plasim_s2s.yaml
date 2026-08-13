@@ -18,6 +18,15 @@
 name: PanguPlasimLegacy
 module: physicsnemo.experimental.models.pangu_plasim
 
+# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
+# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
+# a 6-hour model. Source of truth for this one: PANGU_S2S_infer_mar_aug_multigpu.yaml
+# (the config this file mirrors).
+# `train_loop.model_step_rows` divides it by the store's own
+# `data_timedelta_hours` to get the row stride, and raises if the dataset
+# config's `forecast_lead_times` disagrees.
+timedelta_hours: 24
+
 # Variable groups — ERA5 S2S channel set.
 surface_variables: ['2m_temperature', '10m_u_component_of_wind', '10m_v_component_of_wind',
                     'mean_sea_level_pressure', 'surface_pressure']

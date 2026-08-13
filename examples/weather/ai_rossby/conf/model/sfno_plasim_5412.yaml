@@ -13,6 +13,15 @@
 name: SfnoPlasim
 module: physicsnemo.experimental.models.sfno_plasim
 
+# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
+# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
+# a 6-hour model. Source of truth for this one: SFNO_PLASIM_H5_DERECHO_5412_test.yaml
+# (the config this file mirrors).
+# `train_loop.model_step_rows` divides it by the store's own
+# `data_timedelta_hours` to get the row stride, and raises if the dataset
+# config's `forecast_lead_times` disagrees.
+timedelta_hours: 6
+
 # Variable groups (sim52 channel order; sigma+pressure concat for SfnoPlasim).
 surface_variables: [pl, tas]
 upper_air_variables: [ta, ua, va, hus, zg]

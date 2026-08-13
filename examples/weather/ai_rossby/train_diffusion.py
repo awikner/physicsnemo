@@ -52,7 +52,6 @@ with warnings.catch_warnings():
         ClimateNormalizer,
         ClimateZarrDataset,
         NanFillTransform,
-        resolve_step_stride,
     )
     from physicsnemo.experimental.datapipes.climate.samplers import (
         LeadTimePairSampler,
@@ -71,9 +70,11 @@ from train import (  # noqa: E402
 )
 from train_loop import (  # noqa: E402
     adopt_ocean_contract,
+    lead_times_for_sampler,
     load_partial_weights,
     make_optimizer,
     make_scheduler,
+    model_step_rows,
 )
 from validate import Deterministic, GaussianIC, ReplicateOnly  # noqa: E402
 from validate_diffusion import DiffusionRolloutValidator  # noqa: E402
@@ -189,7 +190,7 @@ def _build_loader(
     if not window_mode:
         sampler = LeadTimePairSampler(
             dataset_length=len(dataset),
-            forecast_lead_times=list(cfg.dataset.forecast_lead_times),
+            forecast_lead_times=lead_times_for_sampler(cfg, step_stride),
             shuffle=bool(cfg.dataset.shuffle),
             seed=int(cfg.seed) + rank,
         )
@@ -593,17 +594,12 @@ def main(cfg: DictConfig) -> None:
             )
 
     # --- Model step (in store rows) ---------------------------------------
-    # The archives are stored at ``data_timedelta_hours`` spacing, which is not
-    # always the model's timestep: every upstream AMIP config (v1 and v2) and
-    # the ERA5 recipes step 24 h over 6-hourly rows. ``resolve_step_stride``
-    # cross-checks the config's row-level ``forecast_lead_times`` against the
-    # optional hours-level ``timedelta_hours`` and the store's own attribute, so
-    # the two spellings cannot disagree silently.
-    step_stride = resolve_step_stride(
-        raw_ds,
-        forecast_lead_times=list(cfg.dataset.forecast_lead_times),
-        timedelta_hours=cfg.dataset.get("timedelta_hours", None),
-    )
+    # ``cfg.model.timedelta_hours`` is authoritative (the step is a model-family
+    # property — the PLASIM archive feeds a 24-hour Pangu and a 6-hour SFNO from
+    # the same rows); the dataset's row-level ``forecast_lead_times`` is
+    # cross-checked against it and a disagreement raises. See
+    # ``train_loop.model_step_rows``.
+    step_stride = model_step_rows(cfg, raw_ds)
     logger.info(
         f"model step: {step_stride} store row(s) "
         f"({step_stride * int(getattr(raw_ds.layout, 'data_timedelta_hours', 0) or 0)} h)"

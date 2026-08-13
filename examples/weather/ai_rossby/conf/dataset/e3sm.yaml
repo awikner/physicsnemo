@@ -29,7 +29,6 @@ non_leap_boundary_zarr_path: null
 # 6 h and lead 1 is correct. (amip v1's *own* E3SM configs, `SI_E3SM.yaml` /
 # `DDC_E3SM.yaml`, step 24 h — but those are amip-family models, not this one.)
 forecast_lead_times: [1]
-timedelta_hours: 6
 num_samples_per_epoch: null
 batch_size: 4
 num_workers: 8
