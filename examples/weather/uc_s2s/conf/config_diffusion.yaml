@@ -1,0 +1,25 @@
+# UC S2S — Stochastic Interpolant / diffusion training config
+# Used by: train_diffusion.py
+# Inherits most settings from config.yaml via Hydra defaults
+
+defaults:
+  - config
+
+# Override / extend for diffusion training
+name: S2S-diffusion
+
+# Diffusion model
+diffusion_model_type: SI   # 'SI' or 'diffusion'
+
+# Checkpoints for frozen backbone (required)
+checkpoint_path_vae_c1: null   # path to VAE checkpoint
+checkpoint_path_det: null       # path to deterministic Pangu checkpoint
+checkpoint_path_diff: null      # path to SI/diffusion checkpoint to resume (optional)
+
+# Diffusion-specific hyperparameters
+source_sigma: 1.0
+temperature: 1.5
+
+# Diffusion training uses per-iter wandb logging; keep epoch wandb off
+log_to_wandb: true
+valid_max_batches: 30

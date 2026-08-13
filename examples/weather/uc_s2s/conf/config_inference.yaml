@@ -1,0 +1,20 @@
+# UC S2S — Inference config
+# Used by: inference.py
+
+defaults:
+  - config_diffusion
+
+name: S2S-inference
+
+# Output directory for NetCDF predictions
+output_dir: ./inference_output
+
+# Number of autoregressive steps to run
+inference_steps: 35
+
+# Ensemble members
+num_ensemble_members: 10
+temperature: 1.5
+
+# Checkpoint for fine-tuned decoder (optional)
+checkpoint_path_finetune: null

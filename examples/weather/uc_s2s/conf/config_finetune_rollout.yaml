@@ -1,0 +1,26 @@
+# UC S2S — Rollout CRPS fine-tuning config
+# Used by: train_finetune_rollout.py
+
+defaults:
+  - config_diffusion
+
+name: S2S-rollout-finetune
+max_epochs: 10
+
+# Rollout schedule
+max_rollout_steps: 10
+rollout_step_interval: 2000
+initial_rollout_steps: 1
+
+# Fine-tune LR (usually smaller than base lr)
+finetune_lr: 1.0e-5
+
+# Ensemble size for CRPS
+crps_ensemble_size: 2
+
+# Path to a pre-trained rollout checkpoint to resume (optional)
+finetune_ckpt: null
+
+# Dataset must return multi-step targets
+sel_dates: false
+forecast_lead_times: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
