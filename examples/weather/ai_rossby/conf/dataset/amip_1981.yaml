@@ -56,3 +56,21 @@ normalize_constant_boundary: False
 # Diagnostic radiation/fluxes/precip have large dynamic ranges — flip this
 # on once the model wiring's verified.
 normalize_diagnostic: False
+
+# --- SST forcing suite (Phase 12g) ------------------------------------------
+# Inert as shipped. `sst_anomaly_channel: append|replace` derives an SST anomaly
+# channel against a day-of-year climatology and divides by the ~0.6 K residual
+# std instead of the ~12.3 K absolute-SST std, which is what makes the ocean
+# warming trend legible (+0.40 K goes from 0.03 sigma to ~0.7 sigma).
+# `scalar_forcing: global_mean_sst` routes the ocean-mean anomaly into the
+# calendar row's third slot — the slot CO2 uses, so the two are mutually
+# exclusive and asking for both raises.
+#
+# `append` adds a channel the model must list in varying_boundary_variables
+# (right after SST) or ForcingPipeline.assert_matches fails on c_grid_dim.
+# Build the artifact once with tools/data/amip/make_sst_climatology.py.
+sst_anomaly_channel: none        # none | append | replace
+scalar_forcing: auto             # auto | none | co2 | global_mean_sst
+sst_anomaly_scale: anom_std      # anom_std | gm_std | kelvin (for +DT runs)
+sst_scalar_scale: gm_std
+sst_climatology_path: null

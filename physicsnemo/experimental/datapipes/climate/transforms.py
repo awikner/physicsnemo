@@ -148,6 +148,10 @@ class ClimateNormalizer:
         self.varying_mean, self.varying_std = self._stack_scalars(
             mean, std, varying_boundary_variables
         )
+        # Kept so a consumer can find one channel's stats by NAME rather than by
+        # re-deriving the order from a config (Phase 12g: the SST rescaler
+        # inverts this channel's z-score to recover kelvin).
+        self.varying_boundary_variables = list(varying_boundary_variables)
         # Skip constant-boundary stats lookup unless we'll actually normalize
         # them — the SFNO_S2S stats zarr doesn't ship stats for land_sea_mask
         # / geopotential_at_surface (they're truly constant).

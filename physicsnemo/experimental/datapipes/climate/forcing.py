@@ -178,17 +178,29 @@ class ForcingAssembler:
 
         # Channel bookkeeping, derived once (never restated by a config —
         # the amip_v2 ``state_layout`` lesson).
+        #
+        # Indices are taken against the order the pop actually SEES, which is
+        # after the SST rescaler has run (upstream's step 2 before step 3): with
+        # ``sst_anomaly_channel: append`` the derived channel is inserted right
+        # after SST, so every stored channel beyond SST shifts by one. Indexing
+        # the stored order instead silently drops the last channel — sea ice, in
+        # the shipped AMIP list — with no shape error, because the widths still
+        # add up.
+        self._input_names = list(self.varying_boundary_variables)
+        if self.sst_rescaler is not None:
+            derived = getattr(self.sst_rescaler, "grid_forcing_names", None)
+            if derived:
+                self._input_names = list(derived)
         self._routed_idx = [
-            self.varying_boundary_variables.index(v)
-            for v in self.scalar_routed_variables
+            self._input_names.index(v) for v in self.scalar_routed_variables
         ]
         self._keep_idx = [
             i
-            for i in range(len(self.varying_boundary_variables))
+            for i in range(len(self._input_names))
             if i not in set(self._routed_idx)
         ]
         self.varying_boundary_variables_out = [
-            self.varying_boundary_variables[i] for i in self._keep_idx
+            self._input_names[i] for i in self._keep_idx
         ]
         self._warned_no_calendar = False
 
@@ -203,15 +215,33 @@ class ForcingAssembler:
 
     @property
     def c_grid_dim(self) -> int:
-        """Packed boundary width after routing (constant + kept varying)."""
+        """Packed boundary width after routing (constant + kept varying).
+
+        Includes the Phase-12g SST anomaly channel when the rescaler appends one
+        — it is derived, not stored, but it *is* a channel the model sees, so a
+        model config using ``sst_anomaly_channel: append`` must list it (see
+        ``SSTForcing.grid_forcing_names``). ``ForcingPipeline.assert_matches``
+        compares this against the wrapper's own count, so a config that lists it
+        in one place and not the other fails at construction.
+        """
         return len(self.constant_boundary_variables) + len(
             self.varying_boundary_variables_out
         )
 
     @property
     def scalar_dim(self) -> int:
-        """Calendar-row width after routing."""
-        return self.calendar_dim + len(self.scalar_routed_variables)
+        """Calendar-row width after routing.
+
+        The Phase-12g ``global_mean_sst`` scalar occupies the same third slot the
+        CO2 route uses, so it adds one exactly when CO2 does not — the two are
+        mutually exclusive by construction (``resolve_scalar_forcing``).
+        """
+        emits_sst_scalar = bool(getattr(self.sst_rescaler, "emit_scalar", False))
+        return (
+            self.calendar_dim
+            + len(self.scalar_routed_variables)
+            + int(emits_sst_scalar)
+        )
 
     # ------------------------------------------------------------------ #
 
@@ -236,6 +266,9 @@ class ForcingAssembler:
         if self.sst_rescaler is not None:
             sample = self.sst_rescaler(sample)
         if not self.active:
+            # No CO2-style routing: the rescaler (which may already have
+            # appended the SST trend scalar to the calendar itself) is all there
+            # was to do.
             return sample
 
         out = dict(sample)

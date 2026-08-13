@@ -52,6 +52,16 @@ from typing import Any, Callable, Optional, Sequence
 
 from omegaconf import DictConfig, OmegaConf
 
+
+def _abs_path(p):
+    """Resolve a config path against the ORIGINAL cwd (hydra chdirs into the run
+    dir), matching the recipes' ``_resolve_path``. ``None`` passes through."""
+    if not p:
+        return None
+    from hydra.utils import to_absolute_path
+
+    return to_absolute_path(str(p))
+
 logger = logging.getLogger("ai_rossby.dataset_setup")
 
 
@@ -89,7 +99,8 @@ def build_nan_fill(cfg: DictConfig, *, strict: bool = False):
     )
 
 
-def build_forcing_assembler(cfg: DictConfig, *, strict: bool = True):
+def build_forcing_assembler(cfg: DictConfig, *, strict: bool = True,
+                            sst_rescaler=None):
     """The one :class:`ForcingAssembler` definition (CO₂-style scalar routing).
 
     Reads ``cfg.model.scalar_routed_boundary_variables`` — the *same* config
@@ -105,7 +116,106 @@ def build_forcing_assembler(cfg: DictConfig, *, strict: bool = True):
         scalar_routed_variables=_cfg_list(model, "scalar_routed_boundary_variables"),
         calendar_dim=2,
         strict=strict,
+        sst_rescaler=sst_rescaler,
     )
+
+
+def resolve_scalar_forcing(cfg: DictConfig) -> Optional[str]:
+    """Which trend scalar occupies the calendar row's third slot, or ``None``.
+
+    Mirrors upstream ``AMIPDataset._resolve_scalar_forcing``. In this fork the
+    CO₂ route is spelled ``model.scalar_routed_boundary_variables`` (12d), so
+    that list is what ``auto`` inspects and what ``global_mean_sst`` conflicts
+    with: **both claim the same slot**, so asking for the SST scalar while CO₂
+    is still routed is an error rather than a silent overwrite.
+    """
+    from physicsnemo.experimental.datapipes.climate import SST_VARIABLE_NAMES
+
+    data = cfg.dataset
+    routed = _cfg_list(cfg.model, "scalar_routed_boundary_variables")
+    has_co2 = "global_mean_co2" in routed
+
+    choice = str(data.get("scalar_forcing", "auto") or "auto").lower()
+    valid = ("auto", "none", "co2", "global_mean_sst")
+    if choice not in valid:
+        raise ValueError(f"scalar_forcing must be one of {valid}, got {choice!r}")
+
+    if choice == "auto":
+        return "co2" if has_co2 else None
+    if choice == "none":
+        return None
+    if choice == "co2":
+        if not has_co2:
+            raise ValueError(
+                "scalar_forcing: co2 needs 'global_mean_co2' in "
+                f"model.scalar_routed_boundary_variables, got {routed}"
+            )
+        return "co2"
+    # global_mean_sst
+    if has_co2:
+        raise ValueError(
+            "scalar_forcing: global_mean_sst conflicts with the routed "
+            "'global_mean_co2' channel — both occupy the calendar row's third "
+            "slot. Drop global_mean_co2 from "
+            "model.scalar_routed_boundary_variables (and from the model's "
+            "varying_boundary_variables) to use the SST scalar."
+        )
+    varying = _cfg_list(cfg.model, "varying_boundary_variables")
+    if not any(v in SST_VARIABLE_NAMES for v in varying):
+        raise ValueError(
+            f"scalar_forcing: global_mean_sst needs an SST channel in "
+            f"varying_boundary_variables, got {varying}"
+        )
+    return "global_mean_sst"
+
+
+def build_sst_rescaler(cfg: DictConfig, *, normalizer):
+    """The Phase 12g ``sst_rescaler`` hook, or ``None`` when unused.
+
+    Needs the normalizer: the rescaler recovers physical kelvin by inverting the
+    z-score of the SST channel, so it reads that channel's ``(mean, std)`` from
+    the same statistics the pipeline normalizes with — by NAME, not by position.
+    """
+    from physicsnemo.experimental.datapipes.climate import (
+        SSTForcing,
+        SSTRescaler,
+    )
+
+    data = cfg.dataset
+    scalar = resolve_scalar_forcing(cfg)
+    forcing = SSTForcing.from_config(
+        data,
+        requires_scalar=(scalar == "global_mean_sst"),
+        path=_abs_path(data.get("sst_climatology_path", None)),
+    )
+    if forcing is None:
+        return None
+    if normalizer is None:
+        raise ValueError(
+            "sst_anomaly_channel / scalar_forcing: global_mean_sst need the "
+            "normalizer's SST statistics to recover kelvin; build the pipeline "
+            "with normalizer=..."
+        )
+
+    names = getattr(normalizer, "varying_boundary_variables", None) or _cfg_list(
+        cfg.model, "varying_boundary_variables"
+    )
+    idx = SSTForcing.sst_index(names)
+    rescaler = SSTRescaler(
+        forcing,
+        names,
+        sst_mean=float(normalizer.varying_mean.reshape(-1)[idx]),
+        sst_std=float(normalizer.varying_std.reshape(-1)[idx]),
+        emit_scalar=(scalar == "global_mean_sst"),
+    )
+    logger.info("%s", forcing.describe())
+    logger.info(
+        "SST rescaler: channel %d of %s -> grid names %s",
+        idx,
+        list(names),
+        rescaler.grid_forcing_names,
+    )
+    return rescaler
 
 
 class _NormalizeAndRoute:
@@ -233,9 +343,14 @@ def build_forcing_pipeline(
     nan_fill_strict: bool = False,
 ) -> ForcingPipeline:
     """Build the recipe's :class:`ForcingPipeline` (see module docstring)."""
+    # Phase 12g: the SST rescaler runs inside the assembler, before the CO2 pop
+    # (upstream's step-2 ordering), and is a no-op unless the dataset config asks
+    # for the anomaly channel or the global_mean_sst scalar.
     return ForcingPipeline(
         nan_fill=build_nan_fill(cfg, strict=nan_fill_strict),
-        assembler=build_forcing_assembler(cfg),
+        assembler=build_forcing_assembler(
+            cfg, sst_rescaler=build_sst_rescaler(cfg, normalizer=normalizer)
+        ),
         normalizer=normalizer,
         normalize_in_dataset=normalize_in_dataset,
         extra_transforms=tuple(extra_transforms),
