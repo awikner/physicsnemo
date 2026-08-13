@@ -30,6 +30,7 @@ from .wrappers import (
     RollingDiTWrapper,
     XDDCWrapper,
 )
+from .dit_ae import DiTAE
 from .x_ddc import XDDCUNet
 
 # Back-compat alias — upstream amip used the bare name ``DiT``. Use
@@ -50,6 +51,7 @@ __all__ = [
     "ERDMWrapper",
     "RollingDiT",
     "RollingDiTWrapper",
+    "DiTAE",
     "XDDCUNet",
     "XDDCWrapper",
 ]

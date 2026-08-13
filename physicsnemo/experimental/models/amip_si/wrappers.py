@@ -53,6 +53,7 @@ from .dit import AmipDiT
 from .erdm_unet import ERDM
 from .layers.bilinear import BilinearDecoder, BilinearEncoder
 from .rolling_dit import RollingDiT
+from .dit_ae import DiTAE
 from .x_ddc import XDDCUNet
 
 
@@ -1132,7 +1133,9 @@ class XDDCWrapper(_PNeMoModule):
         horizontal_resolution: Sequence[int],
         downsample_factor: int = 4,
         channel_layout: str = "v2",
+        decoder_type: str = "unet",
         unet_kwargs: dict | None = None,
+        dit_kwargs: dict | None = None,
     ):
         super().__init__(meta=MetaData())
         # x_DDC's group order always matched upstream ([surface | diag |
@@ -1160,14 +1163,45 @@ class XDDCWrapper(_PNeMoModule):
             + self.num_diagnostic
         )
 
-        unet_kwargs = dict(unet_kwargs or {})
-        # Upstream's ``in_channels`` is the concat(x_noised, cond) count
-        # (twice the state channel count); ``out_channels`` is the bare
-        # state channel count — same convention as AmipDiTWrapper's
-        # dit_kwargs.setdefault for in_channels/out_channels.
-        unet_kwargs.setdefault("in_channels", 2 * self.in_channels)
-        unet_kwargs.setdefault("out_channels", self.in_channels)
-        self.backbone = XDDCUNet(**unet_kwargs)
+        # Which denoiser backbone (Phase 12h). ``unet`` is the v1 convolutional
+        # one this fork ported in Phase 8f and the frozen v1 family loads;
+        # ``dit`` is :class:`DiTAE`, the ONLY x_DDC denoiser amip_v2 still has
+        # (upstream's ``ae_module.py`` raises NotImplementedError for anything
+        # else), so v2-trained x_DDC checkpoints need it. Both take the same
+        # in/out convention: ``in_channels`` is the concat(x_noised, cond) count
+        # (twice the state width), ``out_channels`` the bare state width.
+        if decoder_type not in ("unet", "dit"):
+            raise ValueError(
+                f"decoder_type must be 'unet' or 'dit', got {decoder_type!r}"
+            )
+        self.decoder_type = decoder_type
+        if decoder_type == "unet":
+            if dit_kwargs:
+                raise ValueError(
+                    "dit_kwargs given with decoder_type='unet'; pick one "
+                    "backbone so the checkpoint's key layout is unambiguous"
+                )
+            backbone_kwargs = dict(unet_kwargs or {})
+        else:
+            if unet_kwargs:
+                raise ValueError(
+                    "unet_kwargs given with decoder_type='dit'; pick one "
+                    "backbone so the checkpoint's key layout is unambiguous"
+                )
+            backbone_kwargs = dict(dit_kwargs or {})
+        backbone_kwargs.setdefault("in_channels", 2 * self.in_channels)
+        backbone_kwargs.setdefault("out_channels", self.in_channels)
+        if decoder_type == "dit":
+            # DiTAE emits the FULL-resolution grid, so it needs it explicitly —
+            # unlike the UNet, which infers spatial size from its input.
+            nlat, nlon = self.horizontal_resolution
+            backbone_kwargs.setdefault("nlat", nlat)
+            backbone_kwargs.setdefault("nlon", nlon)
+        self.backbone = (
+            XDDCUNet(**backbone_kwargs)
+            if decoder_type == "unet"
+            else DiTAE(**backbone_kwargs)
+        )
 
         self.downsampler = BilinearEncoder(downsample_factor=self.downsample_factor)
         self.upsampler = BilinearDecoder(downsample_factor=self.downsample_factor)
