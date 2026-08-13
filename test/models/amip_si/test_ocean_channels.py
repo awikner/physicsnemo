@@ -262,6 +262,29 @@ def test_unpack_window_state_drops_the_ocean_tail():
     assert total == w.num_state_channels
 
 
+def test_unpack_state_works_on_a_single_frame():
+    """The name the rolling drivers actually call.
+
+    ``validate_diffusion.py`` / ``inference.py`` score one emitted frame at a
+    time via ``unpack_state``; the rolling wrappers only defined
+    ``unpack_window_state``, so any rolling validation or inference run died
+    with an AttributeError on its first scored frame. The two are the same
+    code — every block is read at ``narrow(-3, ...)`` — which also means the
+    ocean tail falls off here exactly as it does for a window.
+    """
+    w = _wrapper(ocean=_OCEAN)
+    B = 3
+    frame = torch.randn(B, w.in_channels, _H, _W)
+    out = w.unpack_state(frame)
+    assert out["surface_in"].shape == (B, len(_SURFACE), _H, _W)
+    assert out["diagnostic"].shape == (B, len(_DIAG), _H, _W)
+    assert out["upper_air_in"].shape == (B, len(_UA), len(_LEVELS), _H, _W)
+    # And it agrees with the window path on the same data.
+    win = w.unpack_window_state(frame.unsqueeze(1))
+    for key in out:
+        assert torch.equal(out[key], win[key].squeeze(1))
+
+
 def test_pack_unpack_state_round_trip_ignores_ocean():
     w = _wrapper(ocean=_OCEAN)
     B, W = 2, 3

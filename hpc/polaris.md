@@ -302,6 +302,16 @@ but **not** PALS, and without the shim `initialize_env()` raises on `int(None)`.
 ## Gotchas
 
 - **Missing `--cpu-bind` ⇒ 9.1× slower inter-node.** Silent. See above.
+- **The venv has no `pip`** — it was built by `uv`. Install into it with
+  `~/.local/bin/uv pip install --python .venv/bin/python <pkg>`, and export
+  `http_proxy=https_proxy=http://proxy.alcf.anl.gov:3128` first (needed for
+  git/PyPI reachability). `muon` in particular is **not** pulled in by
+  `uv sync` and every AMIP diffusion recipe defaults to `optimizer.type: Muon`
+  — installed here 2026-08-12 (`muon-optimizer==0.1.0`) after job 7438477
+  died on the ImportError.
+- **`/eagle` resolves to `/lus/eagle/projects`** — a string prefix check
+  against a `/eagle/...` path fails on a correct import (job 7438445).
+  Compare `Path(...).resolve()`.
 - **`-l filesystems=` is mandatory**; jobs without it are rejected.
 - **`prod` has a 10-node minimum** — 3–9-node runs need `debug-scaling` or `preemptable`.
 - **Login nodes have no usable GPU** (`nvidia-smi` → `Failed to initialize NVML`).

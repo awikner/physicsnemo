@@ -599,6 +599,16 @@ class _RollingPackUnpackMixin:
                 idx += n_ua
         return out
 
+    #: Frameless alias: every block is read at ``narrow(-3, ...)`` and the
+    #: upper-air unflatten keys off ``shape[:-3]``, so the same code unpacks a
+    #: single ``(B, C, H, W)`` frame. The rolling drivers
+    #: (``validate_diffusion.py``, ``inference.py``) score one emitted frame at
+    #: a time and call it under this name, which the rolling wrappers did not
+    #: previously define — an ``AttributeError`` on the first scored frame of
+    #: any rolling validation or inference run (fixed alongside Phase 12f,
+    #: whose ocean tail this call is also what drops).
+    unpack_state = unpack_window_state
+
     def pack_window_c_grid(
         self, window_sample: dict[str, torch.Tensor]
     ) -> torch.Tensor:
