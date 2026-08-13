@@ -46,10 +46,13 @@ torch._dynamo.config.optimize_ddp = False
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
+# H100-friendly: disable cuDNN RNN fallback to avoid unnecessary kernel selection overhead
+torch.backends.cudnn.allow_cudnn_rnn_fallback = False
 
 
 def to_ensemble_batch(data, ens_members):
-    return data.repeat(ens_members, 1, 1, 1)
+    # expand+reshape avoids allocating a temporary broadcast tensor (vs unsqueeze * torch.ones)
+    return data.unsqueeze(1).expand(-1, ens_members, *data.shape[1:]).reshape(-1, *data.shape[1:])
 
 
 def latitude_weighting_factor_torch(latitudes):
@@ -80,6 +83,7 @@ class Trainer:
         self.iters = 0
         self.startEpoch = 0
         self.epoch = 0
+        self.latitudes = torch.from_numpy(np.array(params.lat)).to(self.device)
         self.early_stop_epoch = params.get("early_stop_epoch", None)
         if self.early_stop_epoch is not None:
             self.early_stop_epoch -= 1
@@ -420,6 +424,7 @@ class Trainer:
                                  f"ckpt_det_ep{epoch}.tar"),
                 )
 
+        torch.cuda.profiler.stop()
         logger.info("Training finished.")
 
     def train_one_epoch(self):
@@ -428,6 +433,7 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
         scaler = GradScaler()
+        latitudes = self.latitudes  # pre-cached; avoids numpy→tensor conversion each iter
 
         for loader in self.train_data_loaders:
             for data in loader:
@@ -455,6 +461,22 @@ class Trainer:
                 total_loss += loss.item()
                 n_batches += 1
                 self.iters += 1
+
+                # Log every 20 iters to reduce per-step overhead
+                if self.iters % 20 == 0 and self.world_rank == 0:
+                    with torch.no_grad():
+                        sfc_rmse = weighted_rmse_torch_channels(pred_sfc, tgt_sfc, latitudes)
+                        ua_rmse = weighted_rmse_torch_channels(
+                            pred_ua.flatten(2, 3), tgt_ua.flatten(2, 3), latitudes
+                        ) if pred_ua.ndim > 4 else weighted_rmse_torch_channels(pred_ua, tgt_ua, latitudes)
+                    if self.params.get("log_to_wandb", False) and wandb.run is not None:
+                        wandb.log({
+                            "train_loss": loss.item(),
+                            "train_sfc_rmse": sfc_rmse.mean().item(),
+                            "iter": self.iters,
+                        })
+                # empty_cache() intentionally removed from inner loop:
+                # it forces cudaDeviceSynchronize + cudaMemGetInfo and stalls the GPU pipeline.
 
         return {"loss": total_loss / max(n_batches, 1)}
 
