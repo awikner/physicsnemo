@@ -44,8 +44,11 @@ LOGDIR="$REPO/hpc/scripts/logs"
 mkdir -p "$LOGDIR"
 JOB=${PBS_JOBID:-local}
 
-.venv/bin/python -c "import physicsnemo, pathlib; p = pathlib.Path(physicsnemo.__file__); \
-assert str(p).startswith('$REPO'), f'wrong physicsnemo on path: {p}'; \
+# resolve() on both sides: /eagle is a symlink to /lus/eagle/projects, so a
+# plain prefix match on $REPO fails even when the import is correct.
+.venv/bin/python -c "import physicsnemo, pathlib; p = pathlib.Path(physicsnemo.__file__).resolve(); \
+root = pathlib.Path('$REPO').resolve(); \
+assert root in p.parents, f'wrong physicsnemo on path: {p} (want under {root})'; \
 print('physicsnemo from', p)"
 
 for store in amip_dailyavg_coarse/1981.zarr amip_dailyavg_boundary/1981.zarr; do
