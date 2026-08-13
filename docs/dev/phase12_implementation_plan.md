@@ -886,6 +886,26 @@ consumes.
   +0.151 sigma/decade through the channel, whose divisor is the *local*
   residual and still contains ENSO — which is why upstream ships both
   switches. Registered as `amip_sst_climatology`.
+- **Bit-identical to upstream's committed artifact (2026-08-13).** ``amip_v2``
+  ships ``norm_stats/sst_climatology.npz`` in the public repo, so the port could
+  be checked directly rather than by statistics: ``harmonic_coeffs``,
+  ``ocean_weight``, ``ocean_mask``, ``anom_std_map`` and all 13,149 entries of
+  ``gm_series`` are **bitwise equal** (``array_equal`` True, max |diff| exactly
+  0), and ``anom_std`` / ``gm_std`` agree to every digit
+  (0.5752863884 / 0.1256771386). Only ``gm_mean`` differs, at ~1e-17 — it is
+  zero by construction, since the intercept absorbs the mean.
+
+  This is stronger than parity of numbers. Our fit read a *different storage
+  backend* (per-year Zarr vs their single memmap), derived the ocean mask a
+  *different way* (the boundary store's NaN vs probing the original HDF5),
+  re-applied the loader's fill itself, and ran an independently written fitting
+  loop. Agreeing to the bit therefore exercises the 12c HDF5→Zarr conversion,
+  12d's NaN fill + coast smoothing, the fitting math, **and the day-of-year
+  phase** — the last being the subtle one, since a one-day error in
+  ``year_fraction_from_calendar`` would shift the design-matrix rows and perturb
+  coefficients 1..6, which are exactly zero. Pinned by
+  ``test/tools/data/test_sst_climatology_parity.py`` (scalars unconditionally,
+  the array comparison when both artifacts are reachable).
 - **Tests**: 53 new CPU cases —
   `test/datapipes/climate/test_sst_forcing.py` (30: the sigma arithmetic that
   motivates the feature, the phase trap, land continuity across a synthetic
