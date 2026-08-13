@@ -180,6 +180,32 @@ datasets:
       - {cluster: stampede3, years: "1978-2022"}   # extracted 2026-08-11 (job 3395216)
       - {cluster: polaris, years: "1978-2022"}     # tar-shipped 2026-08-11 (Globus 7ecfdcb3, 20 GB)
 
+  amip_sst_climatology:                        # SST forcing artifact (Phase 12g)
+    subdir: norm_stats
+    target_years: ""                            # one file, not a per-year archive
+    note: "sst_climatology.npz (~2 MB): per-gridpoint harmonic fit of the SST
+      day-of-year cycle over the TRAINING years only, plus the residual std that
+      replaces the ~12.3 K absolute-SST std and the ocean-area weights for the
+      global_mean_sst trend scalar. Read by
+      physicsnemo.experimental.datapipes.climate.SSTForcing when a dataset config
+      sets sst_anomaly_channel or scalar_forcing: global_mean_sst; inert
+      otherwise. Key set is amip_v2's exactly, so artifacts are interchangeable
+      with the upstream repo in both directions.
+      Build (Polaris, where the source lives):
+        python tools/data/amip/make_sst_climatology.py
+          --zarr $AI_ROSSBY_DATA/amip_dailyavg_boundary
+          --year-start 1979 --year-end 2015
+          --out $AI_ROSSBY_DATA/norm_stats/sst_climatology.npz
+      Fit it on amip_dailyavg_boundary, NOT the coarse store: the boundary store
+      preserves NaN, which is where the ocean mask comes from (the tool refuses a
+      NaN-filled store rather than treating the globe as ocean). Refit whenever
+      the training window changes — fitting across the full record would put part
+      of the warming into the reference climatology."
+    raw_source:
+      cluster: polaris                          # derived from amip_dailyavg_boundary
+      path: derived://amip_dailyavg_boundary
+    copies: []                                  # not built yet
+
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg
     target_years: "2000-2025"                   # 2000 partial (from 06-01), 2025 partial (to 04-30)

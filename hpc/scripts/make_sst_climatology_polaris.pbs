@@ -1,0 +1,74 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Phase 12g — build the SST day-of-year climatology artifact.
+#
+# Fits per-gridpoint harmonics to the served SST field over the TRAINING years
+# only (1979-2015, matching upstream's ERDM configs), and writes the ~2 MB
+# sst_climatology.npz that SSTForcing reads back. Fitting across the full record
+# would put part of the ocean warming into the reference climatology and shrink
+# the signal the artifact exists to expose.
+#
+# Source is amip_dailyavg_boundary, NOT the coarse store: the boundary store
+# preserves NaN, which is where the ocean mask comes from. The tool refuses a
+# NaN-filled store rather than treating the whole globe as ocean.
+#
+# CPU-only and single-threaded; it reads ~3.4 GB (one channel per daily frame)
+# and does one pass of normal equations.
+#
+# Submit:  qsub hpc/scripts/make_sst_climatology_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=00:50:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-sst-clim
+
+set -euo pipefail
+
+REPO=/eagle/lighthouse-uchicago/members/awikner/physicsnemo
+ZARR=/eagle/lighthouse-uchicago/physicsnemo-zarr
+cd "$REPO"
+
+export OMP_NUM_THREADS=1        # login/compute nodes trip libgomp thread limits
+
+YS=${YS:-1979}
+YE=${YE:-2015}                  # exclusive, as upstream
+OUT=$ZARR/norm_stats/sst_climatology.npz
+
+[[ -d "$ZARR/amip_dailyavg_boundary/$YS.zarr" ]] || {
+    echo "ERROR: $ZARR/amip_dailyavg_boundary/$YS.zarr missing"; exit 1; }
+mkdir -p "$ZARR/norm_stats"
+
+# --stride 4 = one 24-hour model step over the store's 6-hourly rows, i.e. one
+# frame per day. The NaN-fill flags mirror conf/dataset/amip_dailyavg_coarse.yaml
+# so the fit sees the field training sees; they are recorded in the artifact.
+.venv/bin/python tools/data/amip/make_sst_climatology.py \
+    --zarr "$ZARR/amip_dailyavg_boundary" \
+    --year-start "$YS" --year-end "$YE" \
+    --harmonics 3 \
+    --stride 4 \
+    --nan-fill 270.0 \
+    --smooth-sigma 1.5 --smooth-kernel-size 5 --smooth-n-iters 10 \
+    --out "$OUT"
+
+echo
+ls -la "$OUT"
+echo "=== sanity: read it back through SSTForcing ==="
+.venv/bin/python - <<PYEOF
+import warnings
+warnings.filterwarnings("ignore")
+from physicsnemo.experimental.datapipes.climate import SSTForcing
+
+f = SSTForcing("$OUT", anomaly_mode="append", global_mean_scalar=True)
+print(f.describe())
+print("coeff grid:", tuple(f.coeffs.shape))
+print("ocean fraction (weighted cells):", float((f.ocean_weight > 0).float().mean()))
+PYEOF
+
+echo
+echo "=== SST climatology built for $YS-$YE ==="
