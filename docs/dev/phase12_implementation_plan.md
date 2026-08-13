@@ -663,6 +663,13 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   the zero-skipped-keys warm start). **5049 green** across
   `test/{diffusion,models/amip_si,datapipes/climate,recipes/ai_rossby}`.
 
+- **Also fixed in passing** (found while tracing where the ocean tail is
+  dropped): the rolling wrappers had no `unpack_state`, but
+  `validate_diffusion.py` and `inference.py` both call it to score one emitted
+  frame — an `AttributeError` on the first scored frame of *any* rolling
+  validation or inference run. `unpack_window_state` is frameless
+  (`narrow(-3, ...)` + a `shape[:-3]` unflatten), so it is aliased.
+
 **Outstanding:** the GPU mini-epoch smoke. Item 23 says "Delta A40", but
 `amip_dailyavg_coarse` + `amip_dailyavg_boundary` exist only on **Stampede3
 and Polaris** (see `hpc/data_registry.yaml`) — Delta holds neither, so the
