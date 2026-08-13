@@ -121,9 +121,18 @@ override removed (guard covers it), ``sfno-ddp-requirements.md`` §2 +
 CLAUDE.md gotcha updated. 232 recipe/amip tests green.
 **Live-validated on the exact hang-repro config** (Delta job 20921623,
 2×A40, no manual wandb override): guard warning logged, DDP init
-cleared in ~14 s, smoke passed end-to-end. **Item 7 (palooza heads-up)
-is on the user** — the guard lands with this branch's merge, not
-before.
+cleared in ~14 s, smoke passed end-to-end.
+
+**Item 7 (palooza heads-up) — CLOSED 2026-08-13, no action needed.** It existed
+because W1's guard *disabled* multi-GPU wandb by default, which would have taken
+the palooza team's dashboards away silently. W2 found the real root cause
+(rank-0-only ``_maybe_init_wandb``), W3/W4 fixed it, and the default went back to
+``allow_multigpu: True`` after the 93-minute validation — so nothing is taken
+away. Checked at close: ``examples/weather/ai_rossbypalooza/train.py`` already
+initializes wandb on **every** rank (``mode="disabled"`` on non-zero ranks rather
+than skipping the init), i.e. the team independently has the correct pattern. The
+only thing worth mentioning at merge is that ``wandb.allow_multigpu=false``
+exists as an escape hatch if a DDP-init hang ever reappears.
 
 ### W2 — Root-cause isolation matrix (Delta, one sbatch, ~1 GPU-hour)
 
