@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12f complete + GPU-smoked (2026-08-12); 12g+ planned. model-step/store-row stride audited + fixed 2026-08-13** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12g complete (12g 2026-08-13, artifact built); 12h remaining. model-step/store-row stride audited + fixed 2026-08-13** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -842,6 +842,57 @@ consumes.
     historical behavior; scale-override arithmetic.
 
 **Effort**: ~1 day.
+
+**Delivered (2026-08-13).**
+
+- **Library**: `physicsnemo/experimental/datapipes/climate/sst_forcing.py` —
+  `SSTForcing` (harmonic day-of-year climatology, `append`/`replace` anomaly
+  channel, ocean-mean trend scalar, `anom_std`/`gm_std`/kelvin scale
+  resolution) + `SSTRescaler`, the adapter for 12d's `sst_rescaler` hook. The
+  `.npz` key set is upstream's exactly, so artifacts interchange in both
+  directions.
+- **Two fork differences, both integration-only.** (a) Upstream computes the
+  anomaly while it still holds raw kelvin; our chain normalizes before the
+  assembler, so `apply()` inverts the SST channel's z-score — exact to ~2e-5 K
+  in float32 against the ~0.6 K residual it must resolve. (b) **The
+  day-of-year base**: upstream's calendar is 1-indexed, ours is 0-indexed
+  (`_decompose_time` returns `dayofyr - 1`). `year_fraction` keeps upstream's
+  semantics bit-identical and `year_fraction_from_calendar` is the single
+  conversion point — passing a fork calendar row in raw shifts every
+  evaluation one day in phase, and `allclose`'s rtol against a ~300 K field
+  swallows it, so the test asserts an absolute difference.
+- **Tool**: `tools/data/amip/make_sst_climatology.py` reads our per-year Zarr,
+  takes the ocean mask straight from the NaN-preserving boundary store
+  (upstream had to probe its HDF5 originals) and **refuses a NaN-filled store**
+  rather than treating the globe as ocean, and applies the loader's own
+  `NanFillTransform` so the fit sees the field training sees.
+- **Recipe wiring**: `dataset_setup.resolve_scalar_forcing`
+  (`auto|none|co2|global_mean_sst`, with CO2 spelled as this fork's
+  `scalar_routed_boundary_variables`) + `build_sst_rescaler`, which reads the
+  SST channel's normalizer statistics **by name**. Five config keys ship inert
+  on all three AMIP dataset configs.
+- **A fork-only bug this surfaced**: appending the anomaly dropped sea ice.
+  `ForcingAssembler` took its CO2-pop indices against the *stored* varying
+  order, but the rescaler inserts the derived channel right after SST. Not an
+  upstream bug — amip_v2 pins CO2 to index 0 and pops it positionally with
+  `boundary[1:]`, so an insertion can never disturb it; the exposure is the
+  price of 12d's generalization to arbitrary named channels, which is worth
+  keeping. Indices now come from the post-rescaler order.
+- **Artifact built** (Polaris job `7448676`, 1979–2015, 13,149 daily frames,
+  2.5 MB): `anom_std` **0.5753 K** against the ~12.3 K absolute std — a 21x
+  amplitude gain, matching upstream's ~0.6 K, so the mechanism transfers.
+  `gm_std` 0.1257 K; trend +0.0869 K/decade = **+0.691 sigma/decade** through
+  the scalar (~2.5 sigma across the window, the same order as CO2's 3.56) and
+  +0.151 sigma/decade through the channel, whose divisor is the *local*
+  residual and still contains ENSO — which is why upstream ships both
+  switches. Registered as `amip_sst_climatology`.
+- **Tests**: 53 new CPU cases —
+  `test/datapipes/climate/test_sst_forcing.py` (30: the sigma arithmetic that
+  motivates the feature, the phase trap, land continuity across a synthetic
+  coastline, append-vs-replace widths, scale overrides, artifact validation)
+  and `test/recipes/ai_rossby/test_sst_forcing_pipeline.py` (23: scalar
+  mutual-exclusion, `auto` matching historical behavior, stats-by-name, the
+  dropped-channel regression, inertness by default).
 
 ### 12h — Combined/rollout rewrite, translator, gates
 

@@ -204,7 +204,18 @@ datasets:
     raw_source:
       cluster: polaris                          # derived from amip_dailyavg_boundary
       path: derived://amip_dailyavg_boundary
-    copies: []                                  # not built yet
+    # Built 2026-08-13 (Polaris job 7448676, ~7 min): 1979-2015, 3 harmonics,
+    # 13,149 daily frames, 180x360, 2.5 MB. Fitted statistics —
+    #   anom_std 0.5753 K   (vs ~12.3 K absolute-SST std -> 21x amplitude gain)
+    #   gm_std   0.1257 K
+    #   trend    +0.0869 K/decade = +0.691 sigma/decade through the scalar,
+    #                              +0.151 sigma/decade through the channel
+    #   ocean    62.0% of cells carry SST in the source archive
+    # Matches upstream's ~0.6 K residual std, so the mechanism transfers to
+    # these stores. The scalar reaches ~2.5 sigma across the window, the same
+    # order as CO2's 3.56 sigma, which was the target.
+    copies:
+      - {cluster: polaris, years: ""}           # norm_stats/sst_climatology.npz
 
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg

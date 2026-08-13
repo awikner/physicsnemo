@@ -104,4 +104,7 @@ sst_anomaly_channel: none        # none | append | replace
 scalar_forcing: auto             # auto | none | co2 | global_mean_sst
 sst_anomaly_scale: anom_std      # anom_std | gm_std | kelvin (for +DT runs)
 sst_scalar_scale: gm_std
+# Built 2026-08-13 (Polaris job 7448676, 1979-2015, anom_std 0.5753 K). Set this
+# to enable either switch above:
+#   sst_climatology_path: ${oc.env:AI_ROSSBY_DATA,/eagle/lighthouse-uchicago/physicsnemo-zarr}/norm_stats/sst_climatology.npz
 sst_climatology_path: null
