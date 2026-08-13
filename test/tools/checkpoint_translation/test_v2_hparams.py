@@ -1,0 +1,300 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Phase 12h — deriving wrapper kwargs from amip_v2 checkpoint hparams.
+
+Built against the two real v2-trained checkpoints (``project: amip_v2``):
+
+    ERDM_fancy_42_2026-08-10T13-21-13   in/out 154, c_grid_dim 6, scalar_dim 3,
+                                        nocean 3 (SST + anomaly + ice)
+    x_DDC_42_2026-08-07T09-34-49        decoder_type dit, in 302 / out 151
+
+Their ``config.yml`` blocks are inlined below rather than read from disk, so the
+suite runs anywhere. Each states its channel widths by hand while this fork
+*derives* them, which is what makes these assertions worth anything.
+
+The bug this suite would have caught: the backbone kwargs live under the
+**backbone-named** key (``model.ERDM.DiT``), not ``model.ERDM.model``. Reading
+the latter yielded ``{}`` — so the wrapper was built with class-default geometry,
+``scalar_dim`` fell back to 2, and the ``c_grid_dim`` reconciliation was skipped
+for want of a target. It survived because the live sweeps pass
+``--model-config``, which bypasses this code path entirely.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+_TOOLS = Path(__file__).resolve().parents[3] / "tools" / "checkpoint_translation"
+sys.path.insert(0, str(_TOOLS))
+
+from amip_si import wrapper_kwargs_from_hparams  # noqa: E402
+
+_SURFACE = [
+    "skin_temperature", "surface_pressure", "2m_temperature",
+    "2m_specific_humidity", "10m_u_component_of_wind", "10m_v_component_of_wind",
+]
+_UPPER = [
+    "temperature", "u_component_of_wind", "v_component_of_wind",
+    "geopotential", "specific_humidity",
+]
+_DIAG = [
+    "USWRFtoa_24h", "ULWRFtoa_24h", "USWRFsfc_24h", "ULWRFsfc_24h",
+    "DSWRFsfc_24h", "DLWRFsfc_24h", "LHTFLsfc_24h", "SHTFLsfc_24h",
+    "PRATEsfc_24h", "hcc_24h", "lcc_24h", "mcc_24h", "mn2t_24h", "mx2t_24h",
+    "mxtpr_24h",
+]
+_LEVELS = [
+    5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400, 500,
+    600, 700, 800, 850, 875, 900, 925, 950, 975, 1000,
+]
+_SST = "sea_surface_temperature_monthly_interp"
+_ANOM = "sea_surface_temperature_anomaly"
+
+
+def _fancy_blob():
+    """``ERDM_fancy``'s hparams, as the Lightning ckpt carries them."""
+    return {
+        "hyper_parameters": {
+            "config": {
+                "model": {
+                    "model_name": "ERDM",
+                    "backbone": "DiT",
+                    "ERDM": {
+                        "DiT": {
+                            "in_channels": 154,
+                            "out_channels": 154,
+                            "c_grid_dim": 6,
+                            "scalar_dim": 3,
+                            "dim": 1024,
+                            "num_heads": 16,
+                            "temporal_num_heads": 8,
+                            "num_blocks": 20,
+                            "window_size": 6,
+                            "c_grid_downsample": 4,
+                            "c_grid_cross_layers": 4,
+                            "c_grid_cross_heads": 8,
+                            "global_cond": True,
+                            "input_embed": {
+                                "mode": "budget", "d_boundary": 256,
+                                "d_calendar": 128, "d_co2": 48,
+                                "state_encoder": "column", "d_level": 16,
+                                "boundary_encoder": "conv2",
+                                "boundary_pool_stats": True,
+                                "boundary_static_bias": True,
+                                "co2_linear": True, "source_norm": True,
+                            },
+                            "output_head": {
+                                "mode": "mix", "num_experts": 2,
+                                "decoder": "flat", "d_level": 16,
+                            },
+                        },
+                        "scheduler": {"window_size": 6, "sigma_data": 1.0},
+                    },
+                },
+                "data": {
+                    "surface_variables": _SURFACE,
+                    "upper_air_variables": _UPPER,
+                    "diagnostic_variables": _DIAG,
+                    "diagnostic_input": True,
+                    "constant_boundary_variables": [
+                        "geopotential_at_surface", "land_sea_mask",
+                    ],
+                    # STORED order: no anomaly (derived), no CO2 at all.
+                    "varying_boundary_variables": [
+                        "DSWRFtoa_24h_lead", _SST, "sea_ice_cover_monthly_interp",
+                    ],
+                    "ocean_state_variables": [
+                        _SST, _ANOM, "sea_ice_cover_monthly_interp",
+                    ],
+                    "sst_anomaly_channel": "append",
+                    "scalar_forcing": "global_mean_sst",
+                    "levels": _LEVELS,
+                    "horizontal_resolution": [180, 360],
+                    "multistep_rollout": 6,
+                },
+            }
+        }
+    }
+
+
+def _xddc_blob():
+    """``x_DDC``'s hparams (decoder_type: dit)."""
+    return {
+        "hyper_parameters": {
+            "config": {
+                "model": {
+                    "model_name": "x_DDC",
+                    "x_DDC": {
+                        "decoder_type": "dit",
+                        "dit": {
+                            "in_channels": 302, "out_channels": 151,
+                            "dim": 1024, "num_blocks": 20, "num_heads": 16,
+                            "patch_size": 4, "nlat": 180, "nlon": 360,
+                            "unpatch": "vanilla", "dropout": 0.0,
+                        },
+                        "encoder": {"downsample_factor": 4},
+                        "scheduler": {"num_steps": 5},
+                    },
+                },
+                "data": {
+                    "surface_variables": _SURFACE,
+                    "upper_air_variables": _UPPER,
+                    "diagnostic_variables": _DIAG,
+                    "levels": _LEVELS,
+                    "horizontal_resolution": [180, 360],
+                    "varying_boundary_variables": [],
+                },
+            }
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# The forecaster
+# ---------------------------------------------------------------------------
+
+
+def test_the_backbone_block_is_found_under_its_backbone_name():
+    """``model.ERDM.DiT``, not ``model.ERDM.model``.
+
+    An empty backbone dict is the silent failure: the wrapper would build at
+    class-default geometry and only a shape mismatch at load time — if any —
+    would reveal it.
+    """
+    kw = wrapper_kwargs_from_hparams(
+        _fancy_blob(), "RollingDiTWrapper", source_contract="v2"
+    )
+    rdk = kw["rolling_dit_kwargs"]
+    assert rdk, "backbone kwargs came back empty"
+    assert rdk["dim"] == 1024
+    assert rdk["num_blocks"] == 20
+    assert rdk["window_size"] == 6
+    assert rdk["global_cond"] is True
+    assert rdk["c_grid_cross_layers"] == 4
+    # The whole 12e feature set has to survive, nested dicts included.
+    assert rdk["input_embed"]["mode"] == "budget"
+    assert rdk["input_embed"]["state_encoder"] == "column"
+    assert rdk["output_head"]["mode"] == "mix"
+    # ...and the sibling scheduler block must NOT leak in as backbone kwargs.
+    assert "scheduler" not in rdk
+    assert "sigma_data" not in rdk
+
+
+def test_scalar_dim_comes_from_the_checkpoint_not_a_default():
+    kw = wrapper_kwargs_from_hparams(
+        _fancy_blob(), "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kw["scalar_dim"] == 3       # (sod, doy, global-mean SST anomaly)
+
+
+def test_the_derived_sst_anomaly_channel_is_spliced_in():
+    """``sst_anomaly_channel: append`` makes c_grid_dim 6 add up.
+
+    The store lists three varying channels; the model sees four because the
+    rescaler derives one. Without the splice the reconciliation reports
+    "requires 4 entries but only 3 are listed".
+    """
+    kw = wrapper_kwargs_from_hparams(
+        _fancy_blob(), "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kw["varying_boundary_variables"] == [
+        "DSWRFtoa_24h_lead", _SST, _ANOM, "sea_ice_cover_monthly_interp",
+    ]
+
+
+def test_ocean_state_variables_reach_the_wrapper():
+    kw = wrapper_kwargs_from_hparams(
+        _fancy_blob(), "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kw["ocean_state_variables"] == [
+        _SST, _ANOM, "sea_ice_cover_monthly_interp",
+    ]
+
+
+def test_ocean_channels_on_a_family_that_cannot_carry_them_is_refused():
+    with pytest.raises(NotImplementedError, match="no ocean-channel support"):
+        wrapper_kwargs_from_hparams(
+            _fancy_blob(), "ERDMWrapper", source_contract="v1"
+        )
+
+
+def test_the_derived_kwargs_rebuild_the_checkpoints_stated_contract():
+    """End to end: hparams -> wrapper, four widths vs their config.yml."""
+    from physicsnemo.experimental.models.amip_si import RollingDiTWrapper
+
+    kw = wrapper_kwargs_from_hparams(
+        _fancy_blob(), "RollingDiTWrapper", source_contract="v2"
+    )
+    rdk = kw["rolling_dit_kwargs"]
+    rdk.update(
+        dim=64, num_heads=2, num_blocks=1, temporal_num_heads=2,
+        c_grid_cross_layers=1, c_grid_cross_heads=2,
+    )
+    rdk["input_embed"].update(d_boundary=16, d_calendar=16, d_co2=8)
+    w = RollingDiTWrapper(**kw)
+
+    assert w.in_channels == 154
+    assert w.c_grid_dim == 6
+    assert w.scalar_dim == 3
+    assert w.num_ocean == 3
+    assert w.ocean_grid_indices == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# The downscaler
+# ---------------------------------------------------------------------------
+
+
+def test_the_dit_decoder_is_selected_and_its_kwargs_read():
+    kw = wrapper_kwargs_from_hparams(
+        _xddc_blob(), "XDDCWrapper", source_contract="v2"
+    )
+    assert kw["decoder_type"] == "dit"
+    assert "unet_kwargs" not in kw
+    dk = kw["dit_kwargs"]
+    assert dk["dim"] == 1024 and dk["num_blocks"] == 20
+    assert dk["patch_size"] == 4 and dk["unpatch"] == "vanilla"
+    # Auto-derived by the wrapper, so they must not be carried over — a stale
+    # copy here could disagree with horizontal_resolution.
+    for k in ("in_channels", "out_channels", "nlat", "nlon"):
+        assert k not in dk
+    assert kw["downsample_factor"] == 4
+
+
+def test_the_derived_xddc_kwargs_rebuild_their_stated_widths():
+    from physicsnemo.experimental.models.amip_si import DiTAE, XDDCWrapper
+
+    kw = wrapper_kwargs_from_hparams(
+        _xddc_blob(), "XDDCWrapper", source_contract="v2"
+    )
+    kw["dit_kwargs"].update(dim=32, num_heads=2, num_blocks=1)
+    w = XDDCWrapper(**kw)
+    assert isinstance(w.backbone, DiTAE)
+    assert w.backbone.in_channels == 302
+    assert w.backbone.out_channels == 151
+    assert (w.backbone.nlat, w.backbone.nlon) == (180, 360)
+
+
+def test_the_v1_unet_decoder_still_maps():
+    blob = _xddc_blob()
+    xddc = blob["hyper_parameters"]["config"]["model"]["x_DDC"]
+    xddc["decoder_type"] = "unet"
+    xddc.pop("dit")
+    xddc["decoder"] = {"model_channels": 384, "num_res_blocks": 3}
+    kw = wrapper_kwargs_from_hparams(blob, "XDDCWrapper", source_contract="v1")
+    assert kw["decoder_type"] == "unet"
+    assert kw["unet_kwargs"]["model_channels"] == 384
+    assert "dit_kwargs" not in kw
+
+
+def test_an_unknown_decoder_type_is_refused():
+    blob = _xddc_blob()
+    blob["hyper_parameters"]["config"]["model"]["x_DDC"]["decoder_type"] = "vqgan"
+    with pytest.raises(NotImplementedError, match="decoder_type"):
+        wrapper_kwargs_from_hparams(blob, "XDDCWrapper", source_contract="v2")

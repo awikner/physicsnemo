@@ -75,6 +75,7 @@ __all__ = [
     "SST_VARIABLE_NAMES",
     "SSTForcing",
     "YEAR_LENGTH_DAYS",
+    "grid_forcing_names",
     "harmonic_design_row",
     "year_fraction",
     "year_fraction_from_calendar",
@@ -148,6 +149,37 @@ def harmonic_design_row(year_frac, n_harmonics: int) -> np.ndarray:
         cols.append(np.cos(2 * np.pi * k * t))
         cols.append(np.sin(2 * np.pi * k * t))
     return np.stack(cols, axis=-1)
+
+
+def grid_forcing_names(
+    varying_names: Sequence[str], anomaly_mode: str = "none"
+) -> list[str]:
+    """``varying_names`` with the SST anomaly pseudo-channel inserted.
+
+    Upstream ``AMIPDataset.grid_forcing_names``. ``"append"`` puts the anomaly
+    immediately after the absolute SST channel — the pair reads as "SST, and how
+    anomalous it is" in every channel listing — and ``"replace"`` substitutes it
+    in place.
+
+    Module-level (rather than only a method) because two callers need it and must
+    not drift: the runtime rescaler, and the checkpoint translator, which has to
+    reconstruct this order from a source config's ``sst_anomaly_channel`` to make
+    the reported ``c_grid_dim`` add up. Pure — no artifact required.
+    """
+    if anomaly_mode not in ANOMALY_MODES:
+        raise ValueError(
+            f"sst_anomaly_channel must be one of {ANOMALY_MODES}, "
+            f"got {anomaly_mode!r}"
+        )
+    names = list(varying_names)
+    if anomaly_mode == "none":
+        return names
+    idx = SSTForcing.sst_index(names)
+    if anomaly_mode == "append":
+        names.insert(idx + 1, SST_ANOMALY_CHANNEL_NAME)
+    else:
+        names[idx] = SST_ANOMALY_CHANNEL_NAME
+    return names
 
 
 class SSTForcing:
@@ -308,23 +340,13 @@ class SSTForcing:
         return self.anomaly_mode == "append"
 
     def grid_forcing_names(self, varying_names: Sequence[str]) -> list[str]:
-        """``varying_names`` with the anomaly pseudo-channel inserted.
+        """``varying_names`` with this instance's anomaly channel inserted.
 
-        Mirrors upstream ``AMIPDataset.grid_forcing_names``: ``append`` puts the
-        anomaly immediately after the absolute channel — the pair reads as "SST,
-        and how anomalous it is" in every channel listing — and ``replace``
-        substitutes it in place. Model configs must list the result, since
-        that is what sizes ``c_grid_dim``.
+        Thin wrapper over the module-level :func:`grid_forcing_names`, which the
+        translator also uses. Model configs must list the result, since that is
+        what sizes ``c_grid_dim``.
         """
-        names = list(varying_names)
-        if self.anomaly_mode == "none":
-            return names
-        idx = self.sst_index(names)
-        if self.adds_channel:
-            names.insert(idx + 1, SST_ANOMALY_CHANNEL_NAME)
-        else:
-            names[idx] = SST_ANOMALY_CHANNEL_NAME
-        return names
+        return grid_forcing_names(varying_names, self.anomaly_mode)
 
     @staticmethod
     def sst_index(varying_names: Sequence[str]) -> int:

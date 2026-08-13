@@ -454,6 +454,7 @@ def test_xddc_wrapper_kwargs_from_hparams_drops_derived_keys():
     assert kwargs["levels"] == [1000.0, 850.0, 500.0]
     assert kwargs["horizontal_resolution"] == [16, 32]
     assert kwargs["downsample_factor"] == 4
+    assert kwargs["decoder_type"] == "unet"
     unet_kwargs = kwargs["unet_kwargs"]
     assert "in_channels" not in unet_kwargs
     assert "out_channels" not in unet_kwargs
@@ -461,8 +462,24 @@ def test_xddc_wrapper_kwargs_from_hparams_drops_derived_keys():
     assert unet_kwargs["channel_mult"] == [1, 2]
 
 
-def test_xddc_wrapper_kwargs_from_hparams_rejects_dit_decoder():
+def test_xddc_wrapper_kwargs_from_hparams_maps_the_dit_decoder():
+    """``decoder_type: dit`` is supported since Phase 12h.
+
+    It used to raise: the DiTAE denoiser was not vendored. It is now, because
+    amip_v2 deleted the convolutional path entirely, so a v2 x_DDC checkpoint has
+    no other backbone. Its kwargs live under ``x_DDC.dit`` rather than
+    ``x_DDC.decoder``.
+    """
     blob = _make_xddc_blob(decoder_type="dit")
+    kwargs = _xddc_wrapper_kwargs_from_hparams(blob)
+    assert kwargs["decoder_type"] == "dit"
+    assert kwargs["dit_kwargs"] == {"dim": 128, "num_heads": 4, "num_blocks": 2}
+    # The UNet block in the same config must not leak through.
+    assert "unet_kwargs" not in kwargs
+
+
+def test_xddc_wrapper_kwargs_from_hparams_rejects_an_unknown_decoder():
+    blob = _make_xddc_blob(decoder_type="vqgan")
     with pytest.raises(NotImplementedError, match="decoder_type"):
         _xddc_wrapper_kwargs_from_hparams(blob)
 

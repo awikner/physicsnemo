@@ -45,6 +45,7 @@ from .sst_forcing import (
     SST_VARIABLE_NAMES,
     SSTForcing,
     SSTRescaler,
+    grid_forcing_names,
 )
 from .sequence import IntSampler, SequenceDataset
 from .transforms import (
@@ -71,6 +72,7 @@ __all__ = [
     "SSTForcing",
     "SSTRescaler",
     "SequenceDataset",
+    "grid_forcing_names",
     "resolve_step_stride",
     "smooth_masked_boundary",
 ]

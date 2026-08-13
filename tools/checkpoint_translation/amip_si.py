@@ -54,9 +54,22 @@ Supported source ``model_name`` values:
 * ``EDM`` → :class:`AmipDiTWrapper` (no Phase 8c training wiring;
   inference-only; the translator still produces a valid ``.mdlus``
   that can be sampled with ``sampler=edm``)
-* ``x_DDC`` → :class:`XDDCWrapper` (:class:`DataDependentInterpolant`;
-  Phase 8f — only the ``decoder_type: unet`` denoiser is vendored,
-  ``decoder_type: dit`` raises ``NotImplementedError``)
+* ``x_DDC`` → :class:`XDDCWrapper` (:class:`DataDependentInterpolant`).
+  Both denoisers are supported since Phase 12h: ``decoder_type: unet``
+  (the v1 convolutional :class:`XDDCUNet`, kwargs under ``x_DDC.decoder``)
+  and ``decoder_type: dit`` (:class:`DiTAE`, kwargs under ``x_DDC.dit``) —
+  the latter being the only one amip_v2 kept.
+
+amip_v2 source configs additionally carry (Phase 12h):
+
+* ``data.ocean_state_variables`` → ``RollingDiTWrapper(ocean_state_variables=)``;
+  they widen ``in/out_channels`` by a tail block, so the wrapper has to know.
+* ``data.sst_anomaly_channel`` → the derived SST-anomaly channel is spliced into
+  ``varying_boundary_variables`` before the ``c_grid_dim`` reconciliation, since
+  the source's own count includes it.
+* the v2 backbone blocks (``input_embed`` / ``output_head`` / ``c_grid_cross_*``
+  / ``global_cond`` / ``window_size``) pass through as ``rolling_dit_kwargs``
+  untouched — the names already match this fork's.
 
 Not supported:
 
@@ -359,30 +372,40 @@ def _xddc_wrapper_kwargs_from_hparams(blob: dict) -> dict:
             "sub-block; cannot auto-derive backbone kwargs"
         )
 
-    decoder_type = xddc_cfg.get("decoder_type", "unet")
-    if decoder_type != "unet":
+    # Which denoiser backbone. ``unet`` is the v1 convolutional one; ``dit`` is
+    # DiTAE, the only x_DDC denoiser amip_v2 kept (Phase 12h). The kwargs live
+    # under a different sub-key per variant — ``decoder`` for the UNet, ``dit``
+    # for DiTAE — which is how upstream's own ``ae_module.py`` reads them.
+    decoder_type = str(xddc_cfg.get("decoder_type", "unet"))
+    if decoder_type not in ("unet", "dit"):
         raise NotImplementedError(
-            f"x_DDC decoder_type={decoder_type!r} is not supported by "
-            "this translator — only the convolutional UNet denoiser is "
-            "vendored (XDDCUNet). The DiT autoencoder denoiser "
-            "(decoder_type='dit') is deferred."
+            f"x_DDC decoder_type={decoder_type!r} is not supported; expected "
+            f"'unet' (v1 convolutional) or 'dit' (amip_v2 DiTAE)"
         )
-    unet_cfg = dict(xddc_cfg.get("decoder", {}))
+    sub_key = "decoder" if decoder_type == "unet" else "dit"
+    backbone_cfg = dict(xddc_cfg.get(sub_key, {}))
     for k in _BACKBONE_AUTO_KEYS:
-        unet_cfg.pop(k, None)
+        backbone_cfg.pop(k, None)
+    if decoder_type == "dit":
+        # The wrapper derives these from horizontal_resolution; keeping the
+        # source's copies would let a config and its data disagree silently.
+        for k in ("nlat", "nlon"):
+            backbone_cfg.pop(k, None)
 
     encoder_cfg = dict(xddc_cfg.get("encoder", {}))
     downsample_factor = int(encoder_cfg.get("downsample_factor", 4))
 
-    return {
+    kwargs = {
         "surface_variables": list(data.get("surface_variables", [])),
         "upper_air_variables": list(data.get("upper_air_variables", [])),
         "diagnostic_variables": list(data.get("diagnostic_variables", [])),
         "levels": list(data.get("levels", [])),
         "horizontal_resolution": list(data.get("horizontal_resolution", [])),
         "downsample_factor": downsample_factor,
-        "unet_kwargs": unet_cfg,
+        "decoder_type": decoder_type,
     }
+    kwargs["unet_kwargs" if decoder_type == "unet" else "dit_kwargs"] = backbone_cfg
+    return kwargs
 
 
 # All wrapper classes accept a ``channel_layout`` constructor kwarg
@@ -470,7 +493,36 @@ def wrapper_kwargs_from_hparams(
             f"hyper_parameters.config.model is missing the {source_model_name!r} "
             "sub-block; cannot auto-derive backbone kwargs"
         )
-    source_backbone_cfg = dict(model[source_model_name].get("model", {}))
+    # The backbone kwargs live under the BACKBONE-NAMED key, not "model":
+    # ``model.ERDM.DiT`` / ``model.ERDM.UNet``, with ``model.backbone`` naming
+    # which. That holds in both v1 (``configs/ERDM_Unet.yaml`` has DiT *and*
+    # UNet side by side) and v2. Reading ``.get("model", {})`` — as this did —
+    # silently yielded {}, so the wrapper was built with the CLASS DEFAULT
+    # geometry instead of the checkpoint's, scalar_dim fell back to 2, and the
+    # c_grid_dim reconciliation below was skipped for want of a target. It only
+    # went unnoticed because the live sweeps pass --model-config, which bypasses
+    # this function. Sibling keys like ``scheduler`` stay out by construction,
+    # since we select one named sub-block rather than the whole family.
+    family_cfg = model[source_model_name]
+    backbone_key = model.get("backbone", None)
+    if backbone_key and backbone_key in family_cfg:
+        source_backbone_cfg = dict(family_cfg[backbone_key])
+    elif "model" in family_cfg:
+        source_backbone_cfg = dict(family_cfg["model"])
+    else:
+        candidates = [k for k in family_cfg if k != "scheduler"]
+        raise KeyError(
+            f"cannot find the backbone kwargs for {source_model_name!r}: "
+            f"model.backbone={backbone_key!r} is not a key of "
+            f"model.{source_model_name} (has {sorted(family_cfg)}). Expected "
+            f"one of {candidates} or a legacy 'model' sub-block."
+        )
+    logger.info(
+        "backbone kwargs from model.%s.%s (%d keys)",
+        source_model_name,
+        backbone_key if backbone_key in family_cfg else "model",
+        len(source_backbone_cfg),
+    )
     backbone_cfg = dict(source_backbone_cfg)
     for k in _BACKBONE_AUTO_KEYS:
         backbone_cfg.pop(k, None)
@@ -496,6 +548,26 @@ def wrapper_kwargs_from_hparams(
     # logging which entries we dropped so the user can sanity-check.
     const_boundary = list(data.get("constant_boundary_variables", []))
     varying_boundary = list(data.get("varying_boundary_variables", []))
+
+    # Phase 12g/12h: with ``sst_anomaly_channel: append`` (or ``replace``) the
+    # rescaler DERIVES a channel that is not in the store's list but IS one the
+    # model sees, so the source's own ``c_grid_dim`` counts it. Reconstruct that
+    # order here, through the same helper the runtime uses, or the reconciliation
+    # below reports "c_grid_dim requires N entries but only N-1 are listed" for
+    # every v2 SST config.
+    anomaly_mode = str(data.get("sst_anomaly_channel", "none") or "none").lower()
+    if anomaly_mode != "none":
+        from physicsnemo.experimental.datapipes.climate import grid_forcing_names
+
+        derived = grid_forcing_names(varying_boundary, anomaly_mode)
+        logger.info(
+            "sst_anomaly_channel=%s: varying boundary %s -> %s",
+            anomaly_mode,
+            varying_boundary,
+            derived,
+        )
+        varying_boundary = derived
+
     target_c_grid_dim = source_backbone_cfg.get("c_grid_dim", None)
     if target_c_grid_dim is not None:
         target_c_grid_dim = int(target_c_grid_dim)
@@ -561,6 +633,21 @@ def wrapper_kwargs_from_hparams(
         # Pin the packing contract the checkpoint was trained on — it
         # travels with the .mdlus args so inference packs identically.
         kwargs["channel_layout"] = source_contract
+
+    # Phase 12f: predicted ocean channels widen in/out_channels by a tail block,
+    # so the wrapper must know about them or the translated weights will not fit.
+    # Only RollingDiTWrapper carries them (upstream's ERDM_ocean / ERDM_fancy);
+    # the frozen families have no such option.
+    ocean = list(data.get("ocean_state_variables", []) or [])
+    if ocean:
+        if target_class_name != "RollingDiTWrapper":
+            raise NotImplementedError(
+                f"source config sets ocean_state_variables={ocean} but the "
+                f"target wrapper {target_class_name} has no ocean-channel "
+                f"support; only RollingDiTWrapper does (Phase 12f)"
+            )
+        kwargs["ocean_state_variables"] = ocean
+        logger.info("predicted ocean channels: %s", ocean)
     return kwargs
 
 
