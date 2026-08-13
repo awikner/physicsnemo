@@ -1,0 +1,98 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Re-measure the coarse store's time-chunk length against the REAL rolling read
+# (2026-08-13 stride audit).
+#
+# 12c picked `--time-chunk 8` by benchmarking a W=7 window of *consecutive* rows,
+# so one chunk served a whole window. The model actually steps 24 h over 6-hourly
+# rows, so a W=7 window spans 1 + 6x4 = 25 rows and straddles ~4 chunks — the
+# measurement that chose 8 no longer describes the access pattern.
+#
+# Three chunkings, one year (1981), same reads:
+#   * the shipped store          (time-chunk 8)
+#   * a time-chunk 1 copy        (one row per chunk — no wasted bytes, 8x files)
+#   * a time-chunk 32 copy       (one chunk covers a whole strided window)
+# each at stride 1 (the 12c pattern, for continuity with the recorded numbers)
+# and stride 4 (what training does), single-worker and 4-worker.
+#
+# Submit:  qsub hpc/scripts/bench_amip_chunking_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=00:55:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-bench-chunk
+
+set -euo pipefail
+
+REPO=/eagle/lighthouse-uchicago/members/awikner/physicsnemo
+ZARR=/eagle/lighthouse-uchicago/physicsnemo-zarr
+WORK=$ZARR/_bench_rechunk
+cd "$REPO"
+
+export SRC=$ZARR/amip_dailyavg_coarse/1981.zarr
+export WORK
+BENCH=benchmarks/physicsnemo/experimental/datapipes/climate/bench_amip_dailyavg_coarse.py
+PY="$REPO/.venv/bin/python"
+
+[[ -d "$SRC" ]] || { echo "ERROR: $SRC missing"; exit 1; }
+mkdir -p "$WORK"
+
+# Login/compute nodes trip libgomp thread limits on big thread pools.
+export OMP_NUM_THREADS=1
+
+echo "=== rechunking 1981 to time-chunk 1 and 32 (source is 8) ==="
+"$PY" - <<'PYEOF'
+import os, shutil, time
+import xarray as xr
+
+SRC = os.environ.get("SRC", "/eagle/lighthouse-uchicago/physicsnemo-zarr/amip_dailyavg_coarse/1981.zarr")
+WORK = os.environ.get("WORK", "/eagle/lighthouse-uchicago/physicsnemo-zarr/_bench_rechunk")
+
+src = xr.open_zarr(SRC, consolidated=True)
+for n in (1, 32):
+    dst = f"{WORK}/chunk{n}.zarr"
+    partial = dst + ".partial"
+    if os.path.isdir(dst):
+        print(f"chunk{n}: already present, reusing")
+        continue
+    shutil.rmtree(partial, ignore_errors=True)
+    t0 = time.perf_counter()
+    # Drop the stored encoding so `chunk()` is what lands on disk, and keep the
+    # root attrs (the dataset class reads its whole channel layout from them).
+    ds = src.chunk({"time": n})
+    for v in ds.variables:
+        ds[v].encoding = {}
+    ds.to_zarr(partial, mode="w", consolidated=True, zarr_format=3)
+    os.rename(partial, dst)
+    print(f"chunk{n}: written in {time.perf_counter() - t0:.1f}s")
+PYEOF
+
+echo
+echo "=== reads: 3 chunkings x {stride 1, stride 4} x {0, 4} workers ==="
+for store in "$SRC" "$WORK/chunk1.zarr" "$WORK/chunk32.zarr"; do
+    for stride in 1 4; do
+        echo "--- $(basename $(dirname $store))/$(basename $store)  stride=$stride"
+        "$PY" "$BENCH" --coarse "$store" --n-samples 100 \
+            --windowed 7 --step-stride "$stride" --workers-sweep 0,4
+    done
+done
+
+echo
+echo "=== single-frame baseline (stride-independent) ==="
+"$PY" "$BENCH" --coarse "$SRC" --n-samples 100 --workers-sweep 0,4
+
+echo
+echo "=== on-disk cost ==="
+du -sh "$SRC" "$WORK/chunk1.zarr" "$WORK/chunk32.zarr"
+for d in "$SRC" "$WORK/chunk1.zarr" "$WORK/chunk32.zarr"; do
+    echo "$(find "$d" -type f | wc -l) files  $d"
+done
+
+echo
+echo "=== chunking bench done (rechunked copies left in $WORK; rm when finished) ==="
