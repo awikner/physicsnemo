@@ -186,6 +186,15 @@ class ForcingAssembler:
         # the stored order instead silently drops the last channel — sea ice, in
         # the shipped AMIP list — with no shape error, because the widths still
         # add up.
+        #
+        # Not an upstream bug: amip_v2 pins CO2 to index 0 (``has_co2`` only
+        # fires when it is the FIRST varying entry) and pops it positionally
+        # with ``boundary[1:]``, and the anomaly is inserted at ``sst_index + 1``
+        # with ``sst_index >= 1``, so an insertion can never disturb the channel
+        # its pop removes. The exposure here is the price of this class's
+        # generalization — routing *any* named channel from *any* position —
+        # which is worth keeping, so the fix is to resolve the names later
+        # rather than to pin the order.
         self._input_names = list(self.varying_boundary_variables)
         if self.sst_rescaler is not None:
             derived = getattr(self.sst_rescaler, "grid_forcing_names", None)
