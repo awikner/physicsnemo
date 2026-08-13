@@ -750,12 +750,54 @@ diagnostics) is genuinely 1 row = 6 h and gains `timedelta_hours: 6` as a live
 cross-check; that is why nothing broke before, since every rolling/multistep
 config in the repo was PLASIM.
 
-**Left alone, deliberately** (`dataset=e3sm` and `era5_sfno_s2s_1981`): both keep
-`forecast_lead_times: [1]` with a comment saying the step is *unverified*. Their
-paired models (`sfno_e3sm`, `sfno_plasim_s2s`) answer to the PanguWeather repo,
-which was not reachable during the audit — and amip v1's *own* E3SM configs
-(`SI_E3SM.yaml`, `DDC_E3SM.yaml`) use 24 h, so if SFNO-E3SM is meant to match
-them it needs `[4]` + `timedelta_hours: 24`. Not changed on a guess.
+**Every family, checked against its named source config** (Delta re-authed
+2026-08-13; PanguWeather lives at `/work/nvme/bdiu/awikner/PanguWeather{,-e3sm,-sfnos2s}`).
+All these stores are 6-hourly, so "rows/step" is `timedelta_hours / 6`:
+
+| Our model config | Named source config | model dt | rows/step | Our dataset config | Status |
+|---|---|---|---|---|---|
+| all AMIP families (SI/SI_X/EDM/RFM/ERDM/x_DDC/Combined) | amip v1 *all 24 configs* + v2 | 24 | **4** | `amip_1981`, `amip_dailyavg{,_coarse}` | fixed (was 1) |
+| `sfno_plasim_s2s` | `SFNO_S2S_0003_test.yaml` | 24 | **4** | `era5_sfno_s2s_1981` | **fixed (was 1)** |
+| `sfno_era5` | `SFNO_S2S_0003_test` architecture | 24 | **4** | `era5_multiyear` | already correct |
+| `archesweather_era5` | geoarches (`prev_state_steps: 4`) | 24 | **4** | `era5_archesweather` | already correct |
+| `sfno_e3sm` | `E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml` | **6** | **1** | `e3sm` | **confirmed correct** |
+| `sfno_plasim`, `sfno_plasim_5412` | `SFNO_PLASIM_H5_DERECHO_5412{,_test}.yaml` | **6** | **1** | `plasim_sim52_*` | correct |
+| `pangu_plasim{,_legacy}` | `PANGU_PLASIM_H5_DERECHO_0514.yaml` | **24** | **4** | `plasim_sim52_*` | ⚠ **open — see below** |
+| `pangu_plasim_s2s` | `PANGU_S2S_infer_mar_aug_multigpu.yaml` | **24** | **4** | (no dataset config pairs with it) | n/a |
+
+Note on upstream's own spelling: PanguWeather's `forecast_lead_times` counts
+**model steps** (`long_inference.py`: `timedelta(hours=lt * timedelta_hours)`),
+with `timedelta_hours / data_timedelta_hours` doing the row conversion. This fork
+folded both into one row-level number. Same information, different units — worth
+knowing when reading a source config's `[1, 12, 20, 40, 60]`.
+
+### ⚠ Open: the PLASIM store serves two families with different timesteps
+
+`plasim_sim52_year12` / `plasim_sim52_train_val` are used by **both**
+`pangu_plasim*` (source `PANGU_PLASIM_H5_DERECHO_0514.yaml`, **24 h**) and
+`sfno_plasim*` (source `SFNO_PLASIM_H5_DERECHO_5412.yaml`, **6 h**), so no single
+`forecast_lead_times` in the dataset config can be right for both. The fork has
+always said `[1]` — correct for SFNO-PLASIM, a 4x-too-short step for
+Pangu-PLASIM if 0514 is the intended authority.
+
+Complicating the reading: `PANGU_PLASIM_H5_DERECHO_**0515**.yaml` — one day later
+in the same series — says **6 h**, and `conf/model/pangu_plasim_legacy.yaml` cites
+0514 only for "backbone defaults". So this is an intent question, not a lookup.
+
+Two ways out, both needing a decision:
+
+1. **Model-level `timedelta_hours`** — move the hours statement into the *model*
+   configs (where the family lives), have the recipes prefer it over the
+   dataset's, and let `resolve_step_stride` fail loudly on a mismatched
+   model/dataset pairing. Smaller change; a mismatched pairing needs a CLI
+   override (the SFNO-PLASIM benches already pass
+   `dataset.forecast_lead_times=[1]` explicitly, so only the Pangu paths pick up
+   the default).
+2. **Adopt upstream's units** — make `forecast_lead_times` count model steps and
+   let the model's `timedelta_hours` supply the stride. Most faithful to both
+   source repos and removes the shared-store conflict entirely, but it silently
+   reinterprets every existing lead number and every `dataset.forecast_lead_times=`
+   override in the scripts.
 
 **Verified on real data** — Polaris job `7446896`, the 12f smoke re-run after the
 fix: all three steps green, every run logging `model step: 4 store row(s) (24 h)`

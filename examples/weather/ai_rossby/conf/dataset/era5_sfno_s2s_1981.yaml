@@ -17,12 +17,13 @@ yearly_repeating_boundary: False
 leap_boundary_zarr_path: null
 non_leap_boundary_zarr_path: null
 
-# Model timestep: one store row (6 h on this ERA5 store). Unverified against a
-# source config — this is a single-year test config pairing the PLASIM-channel
-# `sfno_plasim_s2s` model with ERA5 data, so neither the AMIP nor the
-# ArchesWeather/SFNO-ERA5 24-hour step necessarily applies. The production
-# ERA5 configs (`era5_multiyear`, `era5_archesweather`) do step 24 h.
-forecast_lead_times: [1]
+# Model timestep: 4 x 6h rows = 24 h. VERIFIED against the source config this
+# store's channel set is copied from — PanguWeather v2.0
+# `config/SFNO_S2S_0003_test.yaml` (the same file `conf/model/sfno_plasim_s2s.yaml`
+# mirrors) says `data_timedelta_hours: 6` / `timedelta_hours: 24`. Was [1] (a
+# 6-hour step) until the 2026-08-13 stride audit reached the PanguWeather repo.
+forecast_lead_times: [4]
+timedelta_hours: 24
 num_samples_per_epoch: null
 batch_size: 4
 num_workers: 4

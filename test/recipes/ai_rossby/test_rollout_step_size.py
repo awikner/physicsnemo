@@ -241,6 +241,8 @@ def test_amip_configs_carry_the_upstream_24_hour_step(name):
     [
         "era5_multiyear",
         "era5_archesweather",
+        "era5_sfno_s2s_1981",
+        "e3sm",
         "plasim_sim52_year12",
         "plasim_sim52_train_val",
     ],
@@ -248,8 +250,11 @@ def test_amip_configs_carry_the_upstream_24_hour_step(name):
 def test_hours_and_rows_agree_in_every_config_that_states_both(name):
     """The cross-check must actually pass for the configs that opt into it.
 
-    All these stores are 6-hourly: the ERA5 pair steps 24 h (4 rows), PLASIM
-    steps 6 h (1 row).
+    All these stores are 6-hourly. Verified against the source configs on
+    2026-08-13: ERA5 / SFNO-S2S step 24 h (4 rows, PanguWeather
+    ``SFNO_S2S_0003_test.yaml``), SFNO-E3SM steps 6 h (1 row,
+    ``E3SM_SFNO_H5_STAMPEDE_jsw_256.yaml``), PLASIM-SFNO steps 6 h
+    (``SFNO_PLASIM_H5_DERECHO_5412_test.yaml``).
     """
     from omegaconf import OmegaConf
 
