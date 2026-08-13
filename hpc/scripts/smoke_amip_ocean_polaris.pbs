@@ -56,8 +56,11 @@ for store in amip_dailyavg_coarse/1981.zarr amip_dailyavg_boundary/1981.zarr; do
 done
 
 cd examples/weather/ai_rossby
-PY="$REPO/.venv/bin/python"
 TORCHRUN="$REPO/.venv/bin/torchrun"
+# Even the single-process steps go through torchrun: the recipes default to
+# optimizer.type=Muon, and MuonWithAuxAdam.step() shards its parameter list
+# across dist.get_world_size(), so it needs a process group to exist.
+PY="$TORCHRUN --standalone --nproc-per-node=1"
 
 # Shared overrides: the shrunk backbone + a capped rolling stage.
 COMMON=(
@@ -90,7 +93,7 @@ STEP1_LOG="$LOGDIR/amip-ocean-smoke-$JOB-step1.log"
 STEP2_LOG="$LOGDIR/amip-ocean-smoke-$JOB-step2.log"
 
 echo "=== Step 1/3: no-ocean baseline (warm-start source) ==="
-"$PY" train_diffusion.py \
+$PY train_diffusion.py \
     model=amip_erdm_v2 \
     "${COMMON[@]}" \
     run_name="amip-ocean-smoke-base-$JOB" \
@@ -102,7 +105,7 @@ echo "warm-start source: $SRC"
 
 echo
 echo "=== Step 2/3: ocean variant, warm-started (expect ZERO skipped keys) ==="
-"$PY" train_diffusion.py \
+$PY train_diffusion.py \
     model=amip_erdm_v2_ocean \
     "${COMMON[@]}" \
     "training.partial_checkpoint=$SRC" \

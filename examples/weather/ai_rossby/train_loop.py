@@ -293,6 +293,20 @@ def _make_muon_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimi
             "`pip install git+https://github.com/KellerJordan/Muon` "
             "(or `pip install nvidia-physicsnemo[muon-optimizers]`)."
         ) from exc
+    # MuonWithAuxAdam.step() calls dist.get_world_size() unconditionally — it
+    # pads its parameter list to a multiple of the world size — so it cannot
+    # run outside a process group at all. Without this check the failure lands
+    # mid-training on the FIRST optimizer step, as a ValueError from
+    # distributed_c10d with no mention of Muon or of how to launch (hit on
+    # Polaris smoke job 7438576).
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "optimizer_type='Muon' needs an initialized torch.distributed "
+            "process group (MuonWithAuxAdam.step() shards its parameter list "
+            "across the world size). Launch under torchrun — "
+            "`torchrun --standalone --nproc-per-node=1 <script>` is enough for "
+            "a single-process run — or set optimizer.type=AdamW."
+        )
     param_groups = model.muon_param_groups(
         lr=float(cfg.lr),
         weight_decay=float(getattr(cfg, "weight_decay", 0.01)),
