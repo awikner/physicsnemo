@@ -153,7 +153,7 @@ def main() -> int:
 
     if args.synthetic:
         blob = _synthetic_blob(args.family)
-        state = None
+        state = "synthetic"      # filled in below, once ``theirs`` exists
     else:
         if not args.source:
             raise SystemExit("--source is required unless --synthetic")
@@ -186,15 +186,22 @@ def main() -> int:
         return 2
 
     # ---- give both the same weights --------------------------------------
-    if state is None:
-        # Synthetic: copy ours -> theirs so any diff is pure wiring.
-        theirs.load_state_dict(
-            {k: v.clone() for k, v in ours.backbone.state_dict().items()},
-            strict=True,
-        )
-    else:
+    # Synthetic mode fabricates an upstream-shaped state dict from ``theirs`` and
+    # then goes through the SAME path as a real checkpoint, so the translation
+    # itself is covered locally. (It was not, once: the harness unpacked
+    # ``translate_state_dict`` wrongly and only the Polaris run found out.)
+    if state == "synthetic":
+        state = {
+            f"model.{k}": v.clone() for k, v in theirs.state_dict().items()
+        }
+        state["scheduler.noise_scales"] = torch.zeros(3)   # must be dropped
+    if True:
         theirs.load_state_dict(_strip_model_prefix(state), strict=True)
-        translated = translate_state_dict(state)
+        # ``translate_state_dict`` returns (sd, stats) — the stats are how many
+        # keys were kept vs dropped as scheduler/unknown, worth logging here since
+        # a surprising drop count is itself a translation problem.
+        translated, stats = translate_state_dict(state)
+        logger.info("translated keys: %s", stats)
         missing, unexpected = ours.load_state_dict(translated, strict=False)
         if missing or unexpected:
             logger.error("key mismatch: %d missing, %d unexpected",
