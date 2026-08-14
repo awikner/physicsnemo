@@ -1366,24 +1366,126 @@ class CombinedModule(_PNeMoModule):
         # instead of a plain tensor — take the first element either way.
         if isinstance(forecast_lowres, tuple):
             forecast_lowres = forecast_lowres[0]
-        lowres_state = forecaster.unpack_state(forecast_lowres)
+        highres = self._downscale(
+            forecast_lowres, forecaster=forecaster, num_steps=downscaler_num_steps
+        )
+        return self.downscaler.unpack_state(highres)
 
-        surface = lowres_state["surface_in"]
-        upper_air = lowres_state.get("upper_air_in")
+    # ------------------------------------------------------------------
+    # Rolling-window streaming (Phase 12h) — upstream's windowed_init /
+    # windowed_step, for driving an ERDM forecaster frame by frame.
+    # ------------------------------------------------------------------
+
+    def _downscale(
+        self,
+        lowres_packed: torch.Tensor,
+        *,
+        forecaster=None,
+        num_steps: int | None = None,
+    ) -> torch.Tensor:
+        r"""One packed low-res state -> one packed full-res state.
+
+        Unpack at the forecaster's contract, bilinear-upsample, repack at the
+        downscaler's, and sample. Shared by :meth:`forward` and
+        :meth:`windowed_step` so the single-step and streaming paths cannot
+        drift in how they cross the resolution boundary.
+        """
+        if forecaster is None:
+            forecaster = (
+                self.forecaster.module
+                if hasattr(self.forecaster, "module")
+                else self.forecaster
+            )
+        lowres_state = forecaster.unpack_state(lowres_packed)
         diagnostic = (
-            lowres_state.get("diagnostic") if self.downscaler.num_diagnostic > 0 else None
+            lowres_state.get("diagnostic")
+            if self.downscaler.num_diagnostic > 0
+            else None
         )
         surface_up, upper_up, diag_up = self.downscaler.upsampler(
-            surface, upper_air, diagnostic
+            lowres_state["surface_in"], lowres_state.get("upper_air_in"), diagnostic
         )
         cond = self.downscaler.pack_state(
             {"surface_in": surface_up, "upper_air_in": upper_up, "diagnostic": diag_up}
         )
-
         highres = self.downscaler_scheduler.sample(
-            self.downscaler, cond, num_steps=downscaler_num_steps
+            self.downscaler, cond, num_steps=num_steps
         )
-        return self.downscaler.unpack_state(highres)
+        if isinstance(highres, tuple):
+            highres = highres[0]
+        return highres
+
+    @torch.no_grad()
+    def windowed_init(self, init_window: torch.Tensor):
+        r"""Prime the ERDM rolling window for a streaming rollout.
+
+        Schedule-matched noising of the oracle window at global diffusion time
+        ``t=0`` — the same warm-up
+        :meth:`~physicsnemo.experimental.diffusion.ERDMScheduler.sample_rollout`
+        does internally, exposed so a driver can emit frames one at a time (and
+        checkpoint between them) instead of materialising the whole horizon.
+
+        ``init_window`` is ``(b, W, C, h, w)`` at the forecaster's resolution.
+        Pass a **bare state** window under ``nocean > 0``: it is zero-padded
+        here and the first roll's imposition overwrites it, so a driver reading
+        a state store never has to invent SST / sea-ice values.
+
+        Returns ``(x_bar, eps_prev)`` — the noised window and the last frame's
+        noise latent, which seeds the AR(1) chain.
+        """
+        sch = self.forecaster_scheduler
+        b = init_window.shape[0]
+        init_window = sch.pad_state(init_window)
+        sigma0 = sch.sigma_schedule(torch.zeros(b, device=init_window.device))
+        eps_win = sch.temporal_noise(init_window)
+        x_bar = init_window + sch.w5(sigma0) * eps_win
+        return x_bar, eps_win[:, -1:]
+
+    @torch.no_grad()
+    def windowed_step(
+        self,
+        x_bar: torch.Tensor,
+        eps_prev: torch.Tensor,
+        c_grid_win: torch.Tensor | None,
+        c_scalar_win: torch.Tensor | None,
+        num_steps: int | None = None,
+        *,
+        ocean_win: torch.Tensor | None = None,
+        downscaler_num_steps: int | None = None,
+    ):
+        r"""Advance the window by one emitted frame and downscale it.
+
+        One inner ODE sweep (front frame -> clean), downscale the emitted
+        low-res frame, then shift the window forward and append a fresh
+        max-noise frame continuing the AR(1) chain.
+
+        ``ocean_win`` is the forcing window **shifted forward one step**, from
+        which the true ocean fields are imposed (Phase 12f); ``None`` disables
+        it. Returns ``(y_highres, x_bar, eps_prev)``.
+        """
+        sch = self.forecaster_scheduler
+        # A rolling state saved by a run with a different channel count would
+        # slice silently wrong, and a streaming driver may resume from disk.
+        expected = getattr(self.forecaster, "in_channels", None)
+        if expected is not None and x_bar.shape[2] != expected:
+            raise ValueError(
+                f"rolling-window state has {x_bar.shape[2]} channels but this "
+                f"forecaster emits {expected}: the state came from a run with a "
+                f"different ocean_state_variables. Start the rollout fresh "
+                f"rather than resuming."
+            )
+        x_bar = sch.sample_window(
+            self.forecaster, x_bar, c_grid_win, c_scalar_win, num_steps,
+            ocean_win=ocean_win,
+        )
+        # Strip the predicted ocean block before the downscaler: it is a
+        # pretrained, state-width model and must not see the extra channels.
+        emitted = sch.strip_ocean(x_bar[:, 0])
+        y_highres = self._downscale(emitted, num_steps=downscaler_num_steps)
+        # Shift forward, appending a fresh max-noise back frame.
+        eps_prev = sch.temporal_noise_next(eps_prev)
+        x_bar = torch.cat([x_bar[:, 1:], eps_prev * sch.sigma_max], dim=1)
+        return y_highres, x_bar, eps_prev
 
 
 __all__ = [
