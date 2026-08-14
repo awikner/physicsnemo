@@ -14,6 +14,14 @@ generic path is called out at each step.
 
 ---
 
+> **AMIP dual contract (2026-08-14).** This doc covers the PanguWeather →
+> PhysicsNeMo migration. The AMIP diffusion port additionally spans two upstream
+> generations with **different channel orders** — see the "Two channel contracts"
+> section of [`README.md`](README.md#two-channel-contracts-on-purpose). Loading a
+> checkpoint against the wrong `channel_layout` runs without error and produces
+> nonsense, so it is worth checking before any AMIP inference run.
+
+
 ## 0. Mental model: what changed and what didn't
 
 | Concern | PanguWeather | ai-rossby (this repo) |

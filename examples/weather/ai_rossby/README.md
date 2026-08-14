@@ -105,9 +105,51 @@ python validate_cli.py dataset=e3sm \
 
 The diffusion recipes (`train_diffusion.py`, `validate_diffusion.py`,
 `eval_diffusion.py`, `model=amip_*`) are **experimental** — derived from the
-`amip` codebase (see [`NOTICE`](../../../NOTICE)), partially complete, and not
-part of the supported path. Use the deterministic Pangu/SFNO recipes above
-unless you specifically need diffusion.
+`amip` codebase (see [`NOTICE`](../../../NOTICE)) and not part of the supported
+path. Use the deterministic Pangu/SFNO recipes above unless you specifically
+need diffusion.
+
+### Two channel contracts, on purpose
+
+The AMIP port spans two upstream generations, and **which one a config belongs to
+is not cosmetic** — the contracts differ in channel order, so loading a
+checkpoint against the wrong one runs happily and produces nonsense. Every
+wrapper takes `channel_layout`, and the translator sets it from
+`--source-contract`.
+
+| `channel_layout` | Meaning | Configs |
+|---|---|---|
+| `v2` | upstream **amip_v2**: state `[surface \| diag \| upper_air]`, upper-air level-major (1000 hPa first), c_grid `[varying \| constant]` | `amip_erdm_v2`, `amip_erdm_v2_ocean`, `amip_erdm_fancy`, `amip_x_ddc_dit` |
+| `v1` | upstream **amip v1**: same group order, upper-air variable-major in config level order | translated v1 checkpoints (`--source-contract v1`) |
+| `fork` | the Phase-8 fork order (`[surface \| upper_air \| diag]`, c_grid `[constant \| varying]`) — **no upstream checkpoint matches it** | pinned by the frozen `amip_rfm` / `amip_erdm` |
+
+The v1 families (SI, SI_X, EDM, RFM, ERDM-UNet) are **frozen**: kept working, not
+migrated, because amip_v2 deleted them. See
+[`docs/dev/phase12_implementation_plan.md`](../../../docs/dev/phase12_implementation_plan.md)
+for the seam.
+
+### Supported config set
+
+| Config | What it is |
+|---|---|
+| `amip_erdm_v2` | the v2 ERDM forecaster (full feature set, no predicted ocean) |
+| `amip_erdm_v2_ocean` | + 12f predicted ocean channels (SST, sea ice) |
+| `amip_erdm_fancy` | + 12g SST anomaly channel and `global_mean_sst` scalar; matches the real `ERDM_fancy` checkpoint |
+| `amip_x_ddc_dit` | the v2 downscaler (`DiTAE`) — **the only denoiser amip_v2 kept** |
+| `amip_x_ddc` | the v1 convolutional downscaler (`XDDCUNet`), frozen |
+| `amip_si`, `amip_si_x`, `amip_erdm`, `amip_rfm` | frozen v1 families |
+| `amip_combined` | forecaster + downscaler composition from two checkpoints |
+
+Two things worth knowing before running any of them:
+
+- **The model's timestep lives in the model config** (`timedelta_hours`), not the
+  dataset's, because the same store feeds families with different steps. All AMIP
+  configs are 24 h over 6-hourly rows, i.e. 4 store rows per step.
+- **Translating a v2 checkpoint**: use the auto-derive path (no `--model-config`)
+  and then verify numerically with
+  `tools/checkpoint_translation/verify_v2_numerical.py` — key parity cannot catch
+  a channel permutation. See
+  [`docs/dev/phase8e_midway3_checkpoint_inventory.md`](../../../docs/dev/phase8e_midway3_checkpoint_inventory.md#amip_v2-checkpoints-2026-08-14).
 
 ## Files
 

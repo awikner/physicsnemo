@@ -1,5 +1,11 @@
 # Phase 8e — Midway3 Checkpoint Inventory (predicted)
 
+> **Superseded in part (2026-08-14, Phase 12h).** This doc predicts where
+> upstream **amip v1** Lightning ckpts live. Real **amip_v2** checkpoints now
+> exist and are validated — see
+> [the v2 section below](#amip_v2-checkpoints-2026-08-14) — so for v2 work start
+> there. The v1 punch list stays valid for the frozen families.
+
 Reference doc for the Lightning `.ckpt` translator work. Derived from the
 configs vendored from upstream `amip` (commit `497827e`,
 `/work/nvme/bdiu/awikner/amip/configs/`), specifically by scraping every
@@ -170,3 +176,70 @@ print(ckpt["hyper_parameters"]["config"]["model"])
   the translator's output needs to hydrate.
 - `implementation_plan.md`, Phase 8e — translator design notes,
   including the prefix-stripping helper shared with `pangu_plasim.py`.
+
+## amip_v2 checkpoints (2026-08-14)
+
+The first real v2-trained checkpoints, both `project: amip_v2`. Fetched off
+retiring Derecho scratch by Globus (task `56188e3e`, 9.6 GB) to
+**`/eagle/lighthouse-uchicago/amip-checkpoints/`** on Polaris; their original
+Derecho paths were `ayz/AMIP_logs/` and `katyr/ai-models/CMU_model/`, and both
+were trained at TACC (`/scratch/10512/azhou4`, reading
+`/scratch/09979/awikner/ERA5/h5_dailyavg` for the downscaler).
+
+| | forecaster | downscaler |
+|---|---|---|
+| run | `ERDM_fancy_42_2026-08-10T13-21-13` | `x_DDC_42_2026-08-07T09-34-49` |
+| size / params | 5.1 GB / 561.61M | 4.5 GB / 389.62M |
+| source `model_name` | `ERDM` + `backbone: DiT` → **`RollingDiTWrapper`** | `x_DDC` + `decoder_type: dit` → **`XDDCWrapper(decoder_type="dit")`** |
+| our config | `conf/model/amip_erdm_fancy.yaml` | `conf/model/amip_x_ddc_dit.yaml` |
+| contract | 154 ch (151 state + **3 ocean**: SST, anomaly, ice), `c_grid_dim` 6, `scalar_dim` 3, 45×90 state / 180×360 forcings | 302 → 151 @ 180×360 |
+| features exercised | 12b packing, full 12e set, 12f ocean tail, 12g `sst_anomaly_channel: append` + `scalar_forcing: global_mean_sst` | 12h `DiTAE` |
+| translated | `--strict`: 373 kept, 1 scheduler dropped, **0 unknown / 0 missing** | 192 kept, **0 dropped / 0 missing** |
+| **numerical vs upstream** | **max │diff│ 0.0000e+00** | **max │diff│ 0.0000e+00** |
+
+Translated artifacts: `amip-checkpoints/translated/{erdm_fancy,x_ddc_dit}.mdlus`.
+Reproduce end to end with `hpc/scripts/translate_v2_checkpoints_polaris.pbs`
+(translate both, then compare against upstream's own forward).
+
+### Translating a v2 ckpt
+
+```bash
+python tools/checkpoint_translation/amip_si.py \
+    --source .../last.ckpt --source-contract v2 \
+    --target-class RollingDiTWrapper \
+    --output erdm_fancy.mdlus --strict
+```
+
+No `--model-config`: the auto-derive path reads the ckpt's own hparams. Prefer it
+for v2 — it is now the exercised path, and it derives the channel contract rather
+than trusting a hand-written YAML to agree with the weights.
+
+**Verify numerically, not just by key parity.** Every contract bug in this
+rebaseline was shape-preserving, so a clean `load_state_dict` says nothing about
+channel order:
+
+```bash
+python tools/checkpoint_translation/verify_v2_numerical.py \
+    --source .../last.ckpt --amip-v2-repo <amip_v2 checkout> --family erdm
+```
+
+It builds upstream's backbone and ours in one process (their `RollingDiT` /
+`DiTAE` import only torch + einops, so no Lightning or `norm_stats` needed), hands
+both the same weights, and compares the forward, localising any mismatch per
+channel block. `--synthetic` self-tests the harness without a checkpoint.
+
+### Gotchas the real v2 ckpts exposed
+
+- **Backbone kwargs live under the backbone-named key** — `model.ERDM.DiT`, not
+  `model.ERDM.model` (v1's `ERDM_Unet.yaml` carries `DiT` *and* `UNet`). Reading
+  the wrong key silently yields `{}`: class-default geometry, `scalar_dim` → 2.
+- **`nlat`/`nlon` are absent from every upstream ERDM config** — `RollingDiT`
+  defaults them to 45×90, the *coarse state* grid, while the data resolution is
+  180×360. The wrapper's `horizontal_resolution` must be the state grid
+  (`data.horizontal_resolution / downsample_factor`).
+- **`model_name: ERDM` is ambiguous** across the rebaseline; `model.backbone`
+  decides between `ERDMWrapper` (v1 UNet) and `RollingDiTWrapper` (v2).
+- **The SST anomaly is a derived channel** — not in the store's
+  `varying_boundary_variables`, but counted in the source's `c_grid_dim`. The
+  translator splices it in via `climate.grid_forcing_names`; a model config must
+  list it too (post-rescaler order) or `c_grid_dim` comes out one short.

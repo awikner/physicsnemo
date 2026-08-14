@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12g complete; 12h translator + numerical validation done on REAL v2 checkpoints (2026-08-14, bit-exact), Combined/gates remaining. model-step/store-row stride audited + fixed 2026-08-13** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **Phase 12 COMPLETE (12a-12h, 2026-08-14). v2 translation validated bit-exactly on real checkpoints. model-step/store-row stride audited + fixed 2026-08-13** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -995,6 +995,36 @@ New configs: ``conf/model/amip_erdm_fancy.yaml``, ``conf/model/amip_x_ddc_dit.ya
     path**: exercise it against the existing real v1 ERDM / x_DDC /
     Combined checkpoints (Midway3 inventory), asserting forward
     equivalence with the frozen-contract loading of the same weights.
+**27 / 29 / 30 delivered (2026-08-14).**
+
+- **27 — streaming rollout.** ``CombinedModule`` gained upstream's
+  ``windowed_init`` / ``windowed_step``, so a driver emits one frame at a time
+  (and can checkpoint between them) instead of materialising a horizon. The
+  resolution crossing is factored into one ``_downscale`` shared with
+  ``forward``. Pinned: **streaming == batch** (``sample_rollout`` and the
+  streaming pair draw noise in the same order, so one seed must give identical
+  rolling state step for step — otherwise streaming is a second implementation
+  free to drift), and the **ocean tail comes off before the downscaler**, which
+  is a pretrained state-width model whose extra channels would be a silent width
+  error since the tail sits at the end of the channel axis. A rolling state whose
+  channel count disagrees with the forecaster is refused, since a streaming
+  driver may resume from disk.
+- **29 — health gates** (``test/models/amip_si/test_config_health_gates.py``,
+  34 tests): every ``conf/model/amip_*`` instantiates, runs a synthetic forward
+  at its *own* derived widths, has a self-consistent channel contract, and
+  carries a pinned parameter-shape digest. The digest is the gate that catches
+  this phase's worst bug directly — ``static_bias`` at ``[256, 180, 360]``
+  instead of ``[256, 45, 90]`` — which with ``boundary_static_bias: false``
+  would otherwise load cleanly and be silently wrong. ``amip_si`` and
+  ``amip_si_x`` share a digest by design.
+- **30 — docs.** ``phase8e_midway3_checkpoint_inventory.md`` gained an
+  amip_v2 section (both real checkpoints, their contracts, the translate +
+  verify commands, and the four gotchas they exposed) and a note that the v1
+  punch list is superseded for v2 work. ``README.md`` gained "Two channel
+  contracts, on purpose" (the ``v2`` / ``v1`` / ``fork`` table and why a wrong
+  ``channel_layout`` fails silently) plus the supported config set;
+  ``PANGUWEATHER_MIGRATION.md`` points at it.
+
 29. **Health gates**: adopt the useful subset of `check_repo.py` as
     tests — an instantiate-all-AMIP-configs test with a state-dict
     shape-signature hash (regression gate against silent widening, the
