@@ -351,6 +351,10 @@ _BACKBONE_AUTO_KEYS = ("in_channels", "out_channels", "c_grid_dim")
 
 
 # Per-wrapper kwarg name that holds the backbone constructor kwargs.
+#: Which wrapper kwarg carries the backbone block. x_DDC is the exception: it has
+#: two possible backbones (Phase 12h), so its key depends on ``decoder_type`` —
+#: this entry is only the ``unet`` default, and callers must honour
+#: ``decoder_type: dit`` -> ``dit_kwargs``.
 _WRAPPER_BACKBONE_KWARGS_KEY = {
     "AmipDiTWrapper": "dit_kwargs",
     "RollingDiTWrapper": "rolling_dit_kwargs",
@@ -818,6 +822,7 @@ def build_target_wrapper(
     # the backbone class for each wrapper to introspect it; the mapping
     # mirrors the wrapper init signatures.
     from physicsnemo.experimental.models.amip_si.dit import AmipDiT
+    from physicsnemo.experimental.models.amip_si.dit_ae import DiTAE
     from physicsnemo.experimental.models.amip_si.erdm_unet import ERDM
     from physicsnemo.experimental.models.amip_si.rolling_dit import RollingDiT
     from physicsnemo.experimental.models.amip_si.x_ddc import XDDCUNet
@@ -829,6 +834,13 @@ def build_target_wrapper(
         "XDDCWrapper": XDDCUNet,
     }[target_class]
     backbone_kwargs_name = _WRAPPER_BACKBONE_KWARGS_KEY[target_class]
+    # x_DDC is the one wrapper with two possible backbones (Phase 12h), so its
+    # kwargs key follows ``decoder_type`` rather than the wrapper class. Keying
+    # it off the class alone raised KeyError('unet_kwargs') on the first real
+    # dit-decoder checkpoint.
+    if target_class == "XDDCWrapper" and kwargs.get("decoder_type") == "dit":
+        backbone_kwargs_name = "dit_kwargs"
+        backbone_cls = DiTAE
     kwargs[backbone_kwargs_name] = _filter_unknown_backbone_kwargs(
         kwargs[backbone_kwargs_name], backbone_cls
     )

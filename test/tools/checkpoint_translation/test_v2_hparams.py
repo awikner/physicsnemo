@@ -360,6 +360,28 @@ def test_the_derived_xddc_kwargs_rebuild_their_stated_widths():
     assert (w.backbone.nlat, w.backbone.nlon) == (180, 360)
 
 
+def test_build_target_wrapper_picks_the_dit_kwargs_key():
+    """The builder's backbone-kwargs key follows ``decoder_type``, not the class.
+
+    x_DDC is the only wrapper with two possible backbones, and the key table is
+    per-wrapper — so the first real dit checkpoint died with
+    ``KeyError('unet_kwargs')`` inside the builder, after the mapper had done
+    everything right.
+    """
+    from amip_si import build_target_wrapper
+    from physicsnemo.experimental.models.amip_si import DiTAE
+
+    blob = _xddc_blob()
+    blob["hyper_parameters"]["config"]["model"]["x_DDC"]["dit"].update(
+        dim=32, num_heads=2, num_blocks=1
+    )
+    w = build_target_wrapper(
+        blob=blob, target_class="XDDCWrapper", source_contract="v2"
+    )
+    assert isinstance(w.backbone, DiTAE)
+    assert w.backbone.in_channels == 302 and w.backbone.out_channels == 151
+
+
 def test_the_v1_unet_decoder_still_maps():
     blob = _xddc_blob()
     xddc = blob["hyper_parameters"]["config"]["model"]["x_DDC"]
