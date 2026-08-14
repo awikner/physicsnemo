@@ -70,6 +70,7 @@ from train import (  # noqa: E402
 )
 from train_loop import (  # noqa: E402
     adopt_ocean_contract,
+    assert_checkpoint_dir_contract,
     lead_times_for_sampler,
     load_partial_weights,
     make_optimizer,
@@ -566,6 +567,14 @@ def main(cfg: DictConfig) -> None:
     # --- Checkpoint resume (mirrors train.py) -----------------------------
     ckpt_dir = _resolve_path(cfg.get("checkpoint_dir", "checkpoints"))
     start_epoch = int(cfg.start_epoch)
+    # Resuming your own run is the case where the config is "obviously" the same
+    # one — which is exactly why relaunching a run_name with an edited
+    # channel_layout (or a reordered variable list) is easy to do and impossible
+    # to see: the shapes still match, so the resume loads and training continues
+    # against differently-packed weights. Same guard as inference/eval, applied
+    # on every rank so a mismatch aborts the job rather than deadlocking it.
+    # A no-op for a fresh run: there is no .mdlus in the directory yet.
+    assert_checkpoint_dir_contract(inner_model, ckpt_dir, log=logger)
     resumed_epoch = load_checkpoint(
         ckpt_dir,
         models=inner_model,

@@ -16,10 +16,12 @@ generic path is called out at each step.
 
 > **AMIP dual contract (2026-08-14).** This doc covers the PanguWeather →
 > PhysicsNeMo migration. The AMIP diffusion port additionally spans two upstream
-> generations with **different channel orders** — see the "Two channel contracts"
-> section of [`README.md`](README.md#two-channel-contracts-on-purpose). Loading a
+> generations with **different channel orders** — see
+> [`README.md` §6.2](README.md#62-two-channel-contracts-on-purpose). Loading a
 > checkpoint against the wrong `channel_layout` runs without error and produces
-> nonsense, so it is worth checking before any AMIP inference run.
+> nonsense, so it is worth checking before any AMIP inference run. The full v1/v2
+> run guide — data prep, training, rollout, eval, translation, the two-stage
+> cascade — is [`README.md` §6](README.md#6-amip-diffusion-v1-and-v2--full-run-guide).
 
 
 ## 0. Mental model: what changed and what didn't
@@ -468,10 +470,13 @@ metrics (`val_loss`, `rmse_step*`, `acc_step*`) under `valid/`. See §5.4.
 python inference.py \
     model=sfno_e3sm dataset=e3sm \
     +inference.checkpoint_dir=/path/to/checkpoints \
-    +inference.output_path=/path/to/preds.nc \
+    +inference.output_dir=/path/to/preds \
     +inference.max_step=60 \
     +inference.ic_start=[0, 60, 120, 180]
 ```
+
+`output_dir` is a **directory**: the async writer emits one self-describing file
+per initial condition (`+inference.output_format=zarr|netcdf`, default `zarr`).
 
 ### 5.3 After-the-fact scoring (`validate_cli.py`)
 

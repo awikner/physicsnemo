@@ -44,6 +44,7 @@ frame).
 
 from __future__ import annotations
 
+import logging as _logging
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -515,6 +516,36 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def resolve_steps_per_bin(block, per_month: int, *, name: str, log=None) -> int:
+    """Aggregation-bin width in model steps, derived from its duration.
+
+    ``block.months_per_bin`` is the physical width; ``per_month`` comes from
+    :func:`train_loop.steps_per_month`, i.e. from ``cfg.model.timedelta_hours``
+    and the store's cadence. An explicit ``block.steps_per_bin`` still wins —
+    some runs want a deliberately non-calendar bin — but a value that disagrees
+    with the stated month count is warned about, because the config's own
+    ``months_per_bin`` (and the QBO period estimate derived from it) then
+    describes something the bins are not.
+
+    Module-level rather than a closure in :func:`main` so the precedence is
+    directly testable; it is the only thing deciding what the validators bin by.
+    """
+    log = log or _logging.getLogger(__name__)
+    months = float(block.get("months_per_bin", 1.0) or 1.0)
+    derived = max(1, round(months * per_month))
+    explicit = block.get("steps_per_bin", None)
+    if explicit is None:
+        return derived
+    explicit = int(explicit)
+    if explicit != derived:
+        log.warning(
+            f"{name}.steps_per_bin={explicit} overrides the {derived} steps "
+            f"this run's {months}-month bin implies ({per_month} steps/month at "
+            f"this model's timestep), so the bins are NOT {months} month(s) wide"
+        )
+    return explicit
+
+
 def _resolve_eval_sampler_num_steps(raw):
     """Mirror ``train_diffusion._build_validator``'s num_steps coercion."""
     if raw is None:
@@ -554,12 +585,23 @@ def main(cfg) -> None:
     if eval_cfg is None:
         raise ValueError(
             "eval_suite.* config block missing — select "
-            "validation=eval_suite on the Hydra command line."
+            "validation=eval_suite on the Hydra command line. (That config "
+            "carries a '# @package eval_suite' directive on its first line, "
+            "which is what routes it here from the validation group; if this "
+            "raises with validation=eval_suite selected, check that the "
+            "directive is still line 1 of conf/validation/eval_suite.yaml.)"
         )
 
     raw_ds = _build_dataset(cfg)
     wrapper = build_model(cfg.model).to(dist.device)
     ckpt_dir = _resolve_path(str(eval_cfg.checkpoint_dir))
+    # Same reason as inference.py: the wrapper's packing order came from
+    # cfg.model, and a contract mismatch against these weights changes no
+    # parameter shape. A whole eval suite of plausible-looking numbers is an
+    # expensive way to find that out.
+    from train_loop import assert_checkpoint_dir_contract
+
+    assert_checkpoint_dir_contract(wrapper, ckpt_dir, log=logger)
     loaded_epoch = load_checkpoint(ckpt_dir, models=wrapper, device=dist.device)
     logger.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
     wrapper.eval()
@@ -620,14 +662,27 @@ def main(cfg) -> None:
         seed=int(cfg.seed),
     )
 
+    # Bin widths are DERIVED from the model step (2026-08-14). A bin width is a
+    # physical duration, so the config states months and the step count follows
+    # from cfg.model.timedelta_hours + the store's own cadence — the same
+    # single source of truth model_step_rows uses.
+    from train_loop import steps_per_month  # noqa: E402
+
+    per_month = steps_per_month(cfg, raw_ds)
+
+    def _steps_per_bin(block, *, name: str) -> int:
+        return resolve_steps_per_bin(block, per_month, name=name, log=logger)
+
     results: dict = {}
 
     clim_cfg = eval_cfg.get("climatology", None)
     if clim_cfg is not None and bool(clim_cfg.get("enabled", False)):
+        steps = _steps_per_bin(clim_cfg, name="climatology")
+        logger.info(f"climatology: {steps} steps/bin")
         v = ClimatologyValidator(
             raw_ds,
             n_bins=int(clim_cfg.get("n_bins", 12)),
-            steps_per_bin=int(clim_cfg.get("steps_per_bin", 1)),
+            steps_per_bin=steps,
             **base_kwargs,
         )
         results["climatology"] = v.run(wrapper, epoch=0)
@@ -635,10 +690,12 @@ def main(cfg) -> None:
 
     bias_cfg = eval_cfg.get("bias", None)
     if bias_cfg is not None and bool(bias_cfg.get("enabled", False)):
+        steps = _steps_per_bin(bias_cfg, name="bias")
+        logger.info(f"bias: {steps} steps/bin")
         v = BiasValidator(
             raw_ds,
             n_bins=int(bias_cfg.get("n_bins", 12)),
-            steps_per_bin=int(bias_cfg.get("steps_per_bin", 1)),
+            steps_per_bin=steps,
             **base_kwargs,
         )
         results["bias"] = v.run(wrapper, epoch=0)
@@ -646,12 +703,16 @@ def main(cfg) -> None:
 
     qbo_cfg = eval_cfg.get("qbo", None)
     if qbo_cfg is not None and bool(qbo_cfg.get("enabled", False)):
+        steps = _steps_per_bin(qbo_cfg, name="qbo")
+        logger.info(f"qbo: {steps} steps/bin")
         v = QBOValidator(
             raw_ds,
-            u_variable_name=str(qbo_cfg.get("u_variable_name", "ua")),
+            u_variable_name=str(qbo_cfg.get("u_variable_name", "u_component_of_wind")),
             qbo_levels=list(qbo_cfg.get("levels", [10.0, 30.0, 50.0])),
-            steps_per_bin=int(qbo_cfg.get("steps_per_bin", 120)),
-            months_per_bin=float(qbo_cfg.get("months_per_bin", 1.0)),
+            steps_per_bin=steps,
+            # The period estimate is reported in months, so it needs the same
+            # physical width the step count was derived from.
+            months_per_bin=float(qbo_cfg.get("months_per_bin", 1.0) or 1.0),
             **base_kwargs,
         )
         results["qbo"] = v.run(wrapper, epoch=0)

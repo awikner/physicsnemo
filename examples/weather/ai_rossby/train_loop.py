@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import logging
 import tarfile
 import zipfile
@@ -65,6 +66,43 @@ def model_step_rows(cfg: Any, dataset: Any) -> int:
             model_cfg.get("timedelta_hours", None) if model_cfg else None
         ),
     )
+
+
+def model_step_hours(cfg: Any, dataset: Any) -> float:
+    """Wall-clock hours advanced per model step.
+
+    ``model_step_rows`` in units the physical world uses: rows-per-step times
+    the store's own ``data_timedelta_hours``. Anything that needs to convert a
+    duration into a step count — bin widths, horizons — goes through here, so
+    the conversion is derived from the same single source of truth as the
+    stride rather than hard-coded per config.
+    """
+    rows = model_step_rows(cfg, dataset)
+    layout = getattr(dataset, "layout", None)
+    hours_per_row = float(getattr(layout, "data_timedelta_hours", 0) or 0)
+    if hours_per_row <= 0:
+        raise ValueError(
+            "the store declares no data_timedelta_hours, so a duration cannot "
+            "be converted to model steps; set the bin widths explicitly"
+        )
+    return rows * hours_per_row
+
+
+#: Mean length of a calendar month, in days (365.25 / 12). The bin widths this
+#: converts are aggregation windows, not calendar arithmetic — a fixed mean
+#: month is both sufficient and what makes every bin the same size.
+_HOURS_PER_MONTH = 365.25 / 12.0 * 24.0
+
+
+def steps_per_month(cfg: Any, dataset: Any) -> int:
+    """Model steps in one mean calendar month, at this run's timestep.
+
+    24-hour step over 6-hourly rows -> 30; a 6-hour step -> 122. The shipped
+    eval-suite defaults used to hard-code the 6-hourly number (120) and label
+    it "≈ 1 month", which at the AMIP 24-hour step silently made every
+    "monthly" bin four months wide.
+    """
+    return max(1, round(_HOURS_PER_MONTH / model_step_hours(cfg, dataset)))
 
 
 def lead_times_for_sampler(cfg: Any, step_rows: int) -> list[int]:
@@ -177,6 +215,217 @@ def _extract_state_dict(blob: Any) -> dict[str, torch.Tensor]:
     return blob
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint/config contract guard (2026-08-14).
+#
+# Every driver instantiates the model from ``cfg.model`` and *then* loads
+# weights into it, so the packing order at run time is the YAML's — not the
+# one the weights were trained on. The two disagree silently: a
+# ``channel_layout`` flip permutes the upper-air block without moving a single
+# parameter shape, so ``load_state_dict`` is clean AND the Phase-12h shape
+# digest is identical (measured: XDDCWrapper v1 and v2 hash the same). That is
+# the exact failure mode this whole rebaseline kept hitting, so it gets a
+# guard rather than a paragraph.
+#
+# ``Module.save`` stores the FULLY RESOLVED constructor kwargs in the
+# archive's ``args.json`` (defaults included — verified), so the contract the
+# weights were built under is always recoverable.
+# ---------------------------------------------------------------------------
+
+#: Constructor kwargs that change how channels are PACKED or interpreted
+#: without necessarily changing any parameter shape. A mismatch in any of
+#: these is silently wrong, which is why they are checked rather than left to
+#: ``load_state_dict``. (Ordering matters as much as membership: a permuted
+#: variable list is shape-preserving too.)
+_CONTRACT_KEYS = (
+    "channel_layout",
+    "surface_variables",
+    "upper_air_variables",
+    "diagnostic_variables",
+    "constant_boundary_variables",
+    "varying_boundary_variables",
+    "scalar_routed_boundary_variables",
+    "ocean_state_variables",
+    "levels",
+)
+
+
+def mdlus_stored_args(path: str | Path) -> Optional[dict]:
+    """The constructor kwargs recorded inside a ``.mdlus`` archive.
+
+    Returns ``None`` when the file is not a readable ``.mdlus`` (a ``.pt``
+    state dict, a truncated archive, a future format) — callers treat that as
+    "cannot verify" and warn, never as "verified".
+    """
+    path = Path(path)
+    try:
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path, "r") as archive:
+                blob = json.loads(archive.read("args.json"))
+        elif tarfile.is_tarfile(path):
+            with tarfile.open(path, "r") as tar:
+                member = tar.extractfile("args.json")
+                if member is None:
+                    return None
+                blob = json.loads(member.read())
+        else:
+            return None
+    except (KeyError, OSError, ValueError, json.JSONDecodeError):
+        return None
+    args = blob.get("__args__", blob)
+    return args if isinstance(args, dict) else None
+
+
+def _normalize_contract_element(value: Any) -> Any:
+    """One list element, in a form that compares across representations.
+
+    Numbers become floats and everything else becomes its string: the AMIP
+    configs write ``levels: [5, 7, 10, ...]`` as ints while the translator's
+    auto-derive path takes them off upstream hparams as floats, and ``850 !=
+    850.0`` would be a false positive on the one comparison people make most.
+    ``bool`` is excluded from the numeric branch because it is an ``int``
+    subclass and ``True == 1.0`` would erase a real difference.
+    """
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return str(value)
+
+
+def _normalize_contract_value(value: Any) -> Any:
+    """Normalize a whole contract value, element-wise for sequences.
+
+    OmegaConf hands back ``ListConfig`` rather than ``list``, hence the
+    duck-typed sequence test rather than an ``isinstance`` against ``list``.
+    """
+    if isinstance(value, (list, tuple)) or type(value).__name__ == "ListConfig":
+        return [_normalize_contract_element(v) for v in value]
+    return _normalize_contract_element(value)
+
+
+def assert_checkpoint_contract(
+    model: torch.nn.Module,
+    ckpt_path: str | Path,
+    *,
+    log: Any = None,
+    warn_keys: tuple[str, ...] = (),
+) -> dict[str, tuple]:
+    """Refuse to load weights whose stored channel contract differs.
+
+    Compares :data:`_CONTRACT_KEYS` between the archive's ``args.json`` and
+    the instantiated ``model``. Raises :class:`ValueError` listing every
+    disagreement; returns the diff either way so a caller can log it.
+
+    ``warn_keys`` downgrades specific keys to a warning. A *warm start* needs
+    this: ``training.partial_checkpoint`` exists precisely to load one config's
+    weights into a differently-shaped one (the Phase-12f ocean variant adds
+    ``ocean_state_variables``), and its own skipped-key report is the intended
+    output. ``channel_layout`` is never in ``warn_keys`` at any call site —
+    there is no version of "warm start from differently-packed weights" that
+    means anything.
+
+    Keys absent from either side are skipped: an artifact predating a kwarg
+    cannot be judged against it, and a wrapper family without ocean support has
+    nothing to compare. None of this substitutes for ``load_state_dict``'s
+    shape check — it catches only what that cannot.
+    """
+    log = log or logger
+    inner = model.module if hasattr(model, "module") else model
+    stored = mdlus_stored_args(ckpt_path)
+    if stored is None:
+        log.warning(
+            f"cannot read a channel contract out of {ckpt_path} — skipping the "
+            f"contract check. Verify by hand that this checkpoint was trained "
+            f"on channel_layout={getattr(inner, 'channel_layout', '?')!r}."
+        )
+        return {}
+
+    diff: dict[str, tuple] = {}
+    for key in _CONTRACT_KEYS:
+        if key not in stored or not hasattr(inner, key):
+            continue
+        want = _normalize_contract_value(stored[key])
+        have = _normalize_contract_value(getattr(inner, key))
+        if want != have:
+            diff[key] = (want, have)
+
+    def _fmt(keys) -> str:
+        return "\n".join(
+            f"  {key}:\n      checkpoint: {diff[key][0]}\n      cfg.model:  {diff[key][1]}"
+            for key in keys
+        )
+
+    fatal = [k for k in diff if k not in warn_keys]
+    soft = [k for k in diff if k in warn_keys]
+    if soft:
+        log.warning(
+            f"channel contract differs from {Path(ckpt_path).name} in keys this "
+            f"call tolerates:\n{_fmt(soft)}"
+        )
+    if fatal:
+        raise ValueError(
+            f"channel-contract mismatch between {ckpt_path} and cfg.model "
+            f"({type(inner).__name__}):\n"
+            + _fmt(fatal)
+            + "\n\nThese kwargs change how channels are packed, not how many, so "
+            "the load would succeed and the run would be silently wrong. Fix "
+            "cfg.model to match the checkpoint (e.g. "
+            "'++model.channel_layout=<value>' for a translated v1 artifact), or "
+            "load through Module.from_checkpoint, which rebuilds the wrapper "
+            "from these stored args."
+        )
+
+    if not diff:
+        log.info(
+            f"channel contract verified against {Path(ckpt_path).name}: "
+            f"channel_layout={stored.get('channel_layout', '<absent>')!r}"
+        )
+    return diff
+
+
+def find_mdlus_for_model(
+    model: torch.nn.Module, ckpt_dir: str | Path
+) -> Optional[Path]:
+    """The ``.mdlus`` in ``ckpt_dir`` that ``load_checkpoint`` would pick.
+
+    Mirrors :func:`physicsnemo.utils.checkpoint.load_checkpoint`'s lookup:
+    files are named ``<ClassName>.<model_parallel_rank>.<index>.mdlus`` and the
+    highest index wins. Returns ``None`` when nothing matches, which is not an
+    error here — ``load_checkpoint`` logs its own miss.
+    """
+    ckpt_dir = Path(ckpt_dir)
+    if not ckpt_dir.is_dir():
+        return None
+    inner = model.module if hasattr(model, "module") else model
+    name = type(inner).__name__
+    best: tuple[int, Optional[Path]] = (-1, None)
+    for candidate in ckpt_dir.glob(f"{name}.*.mdlus"):
+        parts = candidate.name[len(name) + 1 : -len(".mdlus")].split(".")
+        try:
+            index = int(parts[-1])
+        except (IndexError, ValueError):
+            index = 0
+        if index > best[0]:
+            best = (index, candidate)
+    return best[1]
+
+
+def assert_checkpoint_dir_contract(
+    model: torch.nn.Module, ckpt_dir: str | Path, *, log: Any = None
+) -> None:
+    """:func:`assert_checkpoint_contract` against a checkpoint *directory*."""
+    path = find_mdlus_for_model(model, ckpt_dir)
+    if path is None:
+        return
+    assert_checkpoint_contract(model, path, log=log)
+
+
+#: Warm start deliberately crosses config shapes, so only the packing order is
+#: fatal there. See :func:`assert_checkpoint_contract`.
+_WARM_START_WARN_KEYS = tuple(k for k in _CONTRACT_KEYS if k != "channel_layout")
+
+
 def load_partial_weights(
     model: torch.nn.Module,
     partial_ckpt: str | Path,
@@ -204,6 +453,11 @@ def load_partial_weights(
         raise FileNotFoundError(f"partial_checkpoint {path} does not exist")
 
     if path.suffix == ".mdlus":
+        # Shape-compatible is not contract-compatible: fork-packed weights fit
+        # a v2 wrapper's tensors exactly and would poison every channel.
+        assert_checkpoint_contract(
+            model, path, log=log, warn_keys=_WARM_START_WARN_KEYS
+        )
         src = _mdlus_state_dict(path)
     else:
         src = _extract_state_dict(

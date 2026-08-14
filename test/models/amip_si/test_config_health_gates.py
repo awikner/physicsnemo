@@ -131,6 +131,48 @@ _EXPECTED_SIGNATURES = {
 }
 
 
+#: The channel contract each config is pinned to. Separate from the shape
+#: digest ON PURPOSE: ``channel_layout`` changes how channels are PACKED, not
+#: how many, so a flip is invisible to a digest over parameter shapes
+#: (``amip_x_ddc`` hashes to the same value under ``v1`` and ``v2``). Without
+#: this table, changing a layout — the single most consequential edit anyone can
+#: make to these configs — would pass the entire suite silently.
+_EXPECTED_LAYOUTS = {
+    # Frozen v1 families. `fork` is this fork's own Phase-8 packing: fine for
+    # training from scratch here, and never right for real upstream weights
+    # (translated v1 artifacts need ++model.channel_layout=v1 at run time).
+    "amip_si": "fork",
+    "amip_si_x": "fork",
+    "amip_erdm": "fork",
+    "amip_rfm": "fork",
+    # The v1 CONVOLUTIONAL downscaler. `v1` since 2026-08-14: XDDCUNet exists
+    # only in amip v1, so every checkpoint this config can load is a v1
+    # artifact, and nothing in-repo trains it.
+    "amip_x_ddc": "v1",
+    # amip_v2 proper.
+    "amip_erdm_v2": "v2",
+    "amip_erdm_v2_ocean": "v2",
+    "amip_erdm_fancy": "v2",
+    "amip_x_ddc_dit": "v2",
+}
+
+
+@pytest.mark.parametrize("stem", _CONFIGS)
+def test_channel_layout_is_pinned(stem):
+    model, _ = _build(stem)
+    expected = _EXPECTED_LAYOUTS.get(stem)
+    assert expected is not None, (
+        f"{stem} has no pinned channel_layout; add one to _EXPECTED_LAYOUTS. A "
+        f"config whose packing order nobody asserts can be flipped silently."
+    )
+    assert getattr(model, "channel_layout", None) == expected, (
+        f"{stem} packs channels as "
+        f"{getattr(model, 'channel_layout', None)!r}, expected {expected!r}. This "
+        f"changes channel ORDER without changing any shape, so no other gate in "
+        f"this file can see it — update the pin deliberately, or fix the config."
+    )
+
+
 def test_at_least_the_known_configs_are_present():
     """A renamed or deleted config should fail loudly, not shrink coverage."""
     assert set(_CONFIGS) >= {

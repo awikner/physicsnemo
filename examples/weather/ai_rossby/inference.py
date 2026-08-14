@@ -23,15 +23,18 @@ Usage::
         model=sfno_plasim_5412 \\
         dataset=plasim_sim52_year12 \\
         +inference.checkpoint_dir=/path/to/checkpoints \\
-        +inference.output_path=/path/to/preds.nc \\
+        +inference.output_dir=/path/to/preds \\
         +inference.max_step=20 \\
         +inference.ic_start=[0, 60, 120, 180]
 
-The ``inference.*`` config block (see :func:`_inference_defaults` below for
-the schema) controls IC selection, rollout horizon, ensemble settings,
-and output paths. A separate Hydra group is intentionally avoided —
-inference doesn't share state with training so a top-level CLI is
-cleaner than another defaults entry.
+The ``inference.*`` config block controls IC selection, rollout horizon,
+ensemble settings, and output paths. Required keys are ``checkpoint_dir``,
+``output_dir`` (a *directory* — one self-describing file is written per IC),
+``max_step``, and one of ``ic_start`` / ``init_schedule``; everything else has a
+default at its read site (``output_format``, ``ensemble_size``, ``perturber``,
+``sampler_num_steps``, ``step_size``, ``use_ema``, the writer knobs).
+A separate Hydra group is intentionally avoided — inference doesn't share state
+with training so a top-level CLI is cleaner than another defaults entry.
 """
 
 from __future__ import annotations
@@ -1373,6 +1376,12 @@ def run_diffusion_inference_streaming_per_ic(
                 x_next = scheduler.sample(
                     model, x, c_grid, c_scalar, num_steps=sampler_num_steps
                 )
+                # DynamicInterpolant (SI_X) returns ``(y, model_last_pred)``
+                # under its ``return_model_last=True`` default; the drift and
+                # EDM-style schedulers return a bare tensor. Take the sample
+                # either way — same unwrap as ``CombinedModule.forward``.
+                if isinstance(x_next, tuple):
+                    x_next = x_next[0]
                 unpacked = inner_model.unpack_state(x_next)
                 surface_phys = _denorm_named(
                     normalizer, "surface", unpacked["surface_in"]
@@ -1658,8 +1667,23 @@ def main(cfg: DictConfig) -> None:
     if inf_cfg is None:
         raise ValueError(
             "inference.* config block missing; add +inference.checkpoint_dir, "
-            "+inference.output_path, +inference.max_step, +inference.ic_start "
+            "+inference.output_dir, +inference.max_step, +inference.ic_start "
             "on the command line."
+        )
+
+    # Check every required key up front. Without this the first *missing* one
+    # surfaces wherever it happens to be read — as omegaconf's "Key 'output_dir'
+    # is not in struct", which says nothing about how to fix it, and only after
+    # the model and dataset have already been built.
+    _missing = [k for k in ("checkpoint_dir", "output_dir", "max_step") if k not in inf_cfg]
+    if inf_cfg.get("ic_start", None) is None and inf_cfg.get("init_schedule", None) is None:
+        _missing.append("ic_start (or init_schedule)")
+    if _missing:
+        raise ValueError(
+            "inference.* is missing required key(s): "
+            + ", ".join(_missing)
+            + ". Add them as +inference.<key>=<value>; note that output_dir is a "
+            "DIRECTORY (one file is written per initial condition)."
         )
 
     if dist.rank != 0:
@@ -1686,6 +1710,13 @@ def main(cfg: DictConfig) -> None:
     model.eval()
 
     ckpt_dir = _resolve_path(str(inf_cfg.checkpoint_dir))
+    # The model above was built from cfg.model, so its packing order is the
+    # YAML's — not necessarily the one these weights were trained on, and a
+    # mismatch moves no parameter shape. Checked BEFORE the load so a wrong
+    # ``channel_layout`` fails here instead of producing a plausible forecast.
+    from train_loop import assert_checkpoint_dir_contract
+
+    assert_checkpoint_dir_contract(model, ckpt_dir, log=logger)
     ckpt_meta: dict = {}
     loaded_epoch = load_checkpoint(
         ckpt_dir, models=model, device=dist.device, metadata_dict=ckpt_meta

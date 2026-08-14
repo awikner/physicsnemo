@@ -272,7 +272,10 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   (pinned by test); ``RollingDiTWrapper`` defaults ``"v2"`` with
   ``conf/model/amip_rfm.yaml`` pinning ``channel_layout: fork`` (frozen
   behavior preserved) and ``amip_erdm_v2.yaml`` / ``amip_x_ddc.yaml``
-  declaring ``v2`` explicitly. ``XDDCWrapper`` accepts ``{"v1","v2"}``
+  declaring ``v2`` explicitly. (``amip_x_ddc.yaml`` was moved to ``v1`` on
+  2026-08-14: its ``XDDCUNet`` backbone exists only in amip v1, so ``v2`` could
+  never match a real checkpoint. No shapes moved; the layout is now pinned per
+  config in ``test_config_health_gates.py``.) ``XDDCWrapper`` accepts ``{"v1","v2"}``
   (its group order always matched upstream). ``CombinedModule`` needed
   no changes — it converts via ``unpack → dict → pack``, so it inherits
   layout correctness from its sub-wrappers.

@@ -161,10 +161,11 @@ torchrun --standalone --nproc-per-node=4 train.py \
 
 ```bash
 python inference.py model=sfno_e3sm dataset=e3sm \
-  +inference.checkpoint_dir=... +inference.output_path=preds.nc
+  +inference.checkpoint_dir=... +inference.output_dir=preds \
+  +inference.max_step=60 '+inference.ic_start=[0]'
 
 python validate_cli.py dataset=e3sm \
-  +validation_cli.predictions=preds.nc \
+  +validation_cli.predictions=preds/<file> \
   +validation_cli.reference_zarr=$AI_ROSSBY_DATA/e3sm/2045.zarr
 ```
 

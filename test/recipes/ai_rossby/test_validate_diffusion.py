@@ -199,3 +199,90 @@ def test_window_mode_uniform_int_forwarded_verbatim():
     v = _make_validator(scheduler, horizon=3, sampler_num_steps=6)
     v.run(nn.Identity(), epoch=0)
     assert scheduler.calls == [6]
+
+
+# ---------------------------------------------------------------------------
+# Tuple-returning schedulers (SI_X). Fixed 2026-08-14.
+# ---------------------------------------------------------------------------
+
+
+class _TupleReturningScheduler(_RecordingSingleStepScheduler):
+    """``sample`` returns ``(y, model_last_pred)``, like SI_X.
+
+    :class:`~physicsnemo.experimental.diffusion.DynamicInterpolant.sample`
+    defaults to ``return_model_last=True``, so it hands back a 2-tuple where
+    DriftScheduler hands back a tensor. The validator used to pass that
+    straight into ``unpack_state`` and die on ``'tuple' object has no attribute
+    'narrow'`` — i.e. SI_X could be trained but never validated or rolled out.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.seen: list = []
+
+    def sample(self, model, x, c_grid, c_scalar, num_steps=None):
+        self.calls.append(num_steps)
+        self.seen.append(x.clone())
+        y = x + 0.1
+        return y, y * 2.0  # second element is the endpoint prediction
+
+
+def test_single_step_unwraps_a_tuple_returning_sampler():
+    scheduler = _TupleReturningScheduler()
+    v = _make_validator(scheduler, horizon=3, sampler_num_steps=2)
+    metrics = v.run(nn.Identity(), epoch=0)
+    assert scheduler.calls == [2, 2, 2]
+    # Scored, not crashed: some RMSE came back for the logged step.
+    assert any("rmse" in k for k in metrics), sorted(metrics)
+
+
+def test_the_first_tuple_element_is_the_one_that_marches():
+    """The sample, not the endpoint prediction, must feed the next step.
+
+    Taking ``[1]`` is also shape-legal and would silently walk a different
+    trajectory, so pin it by what the sampler is *handed*: chaining the first
+    element advances by +0.1 per step, chaining the second would double.
+    """
+    scheduler = _TupleReturningScheduler()
+    v = _make_validator(scheduler, horizon=3, sampler_num_steps=1)
+    v.run(nn.Identity(), epoch=0)
+    assert len(scheduler.seen) == 3
+    for k in (1, 2):
+        torch.testing.assert_close(
+            scheduler.seen[k], scheduler.seen[k - 1] + 0.1, rtol=0, atol=1e-6
+        )
+
+
+# ---------------------------------------------------------------------------
+# Over-long horizons (2026-08-14). An empty IC list used to run zero samples
+# and report RMSE 0.0 — a perfect score for having evaluated nothing, which is
+# what the shipped eval_suite horizon (1460, a 6-hourly year) produced on a
+# one-year store at the AMIP 24-hour step.
+# ---------------------------------------------------------------------------
+
+
+def test_a_horizon_the_store_cannot_serve_raises():
+    scheduler = _RecordingSingleStepScheduler()
+    v = _make_validator(scheduler, horizon=40, sampler_num_steps=1)  # store: 20
+    with pytest.raises(ValueError, match="no admissible initial condition"):
+        v.run(nn.Identity(), epoch=0)
+    assert scheduler.calls == [], "sampled despite having no IC"
+
+
+def test_the_error_reports_the_largest_horizon_that_fits():
+    """A bare "won't fit" is a puzzle; the number is the fix."""
+    v = _make_validator(
+        _RecordingSingleStepScheduler(), horizon=40, sampler_num_steps=1
+    )
+    with pytest.raises(ValueError) as excinfo:
+        v.run(nn.Identity(), epoch=0)
+    msg = str(excinfo.value)
+    assert "Largest horizon this store supports is 19" in msg, msg
+
+
+def test_a_horizon_that_just_fits_is_still_accepted():
+    """Guard the boundary, so it cannot drift into rejecting valid runs."""
+    scheduler = _RecordingSingleStepScheduler()
+    v = _make_validator(scheduler, horizon=19, sampler_num_steps=1)
+    v.run(nn.Identity(), epoch=0)
+    assert len(scheduler.calls) == 19

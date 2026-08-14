@@ -368,3 +368,78 @@ def test_single_family_stores_keep_an_explicit_row_lead(name):
     assert "timedelta_hours" not in cfg, (
         f"{name} restates the step in hours; the model config owns that"
     )
+
+
+# ---------------------------------------------------------------------------
+# Durations -> step counts (2026-08-14). Bin widths are physical quantities, so
+# the eval suite derives them from the model step instead of hard-coding a
+# cadence: `steps_per_bin: 120` labelled "≈ 1 month" was true only for a
+# 6-hourly model and made every AMIP "monthly" bin four months wide.
+# ---------------------------------------------------------------------------
+
+
+class _SixHourlyStore:
+    class layout:
+        data_timedelta_hours = 6
+
+
+@pytest.mark.parametrize(
+    "model_timedelta_hours, leads, expected_hours, expected_per_month",
+    [
+        (24, [4], 24.0, 30),   # every AMIP config, v1 and v2
+        (6, [1], 6.0, 122),    # e.g. sfno_plasim_5412 — the old hard-coded 120
+    ],
+)
+def test_steps_per_month_follows_the_model_step(
+    model_timedelta_hours, leads, expected_hours, expected_per_month
+):
+    from omegaconf import OmegaConf
+    from train_loop import model_step_hours, steps_per_month
+
+    cfg = OmegaConf.create(
+        {
+            "model": {"timedelta_hours": model_timedelta_hours},
+            "dataset": {"forecast_lead_times": leads},
+        }
+    )
+    store = _SixHourlyStore()
+    assert model_step_hours(cfg, store) == expected_hours
+    assert steps_per_month(cfg, store) == expected_per_month
+
+
+def test_a_store_with_no_declared_cadence_refuses_to_guess():
+    """A row stride can be known while the wall-clock duration is not.
+
+    With ``model.timedelta_hours`` absent, the stride comes from
+    ``forecast_lead_times`` alone and never needs the store's cadence — so
+    ``model_step_rows`` succeeds and there is still no way to say how long a
+    month is. Guessing would silently mis-bin, so it raises.
+    """
+    from omegaconf import OmegaConf
+    from train_loop import model_step_rows, steps_per_month
+
+    cfg = OmegaConf.create({"model": {}, "dataset": {"forecast_lead_times": [4]}})
+
+    class _Store:
+        class layout:
+            data_timedelta_hours = 0
+
+    assert model_step_rows(cfg, _Store()) == 4
+    with pytest.raises(ValueError, match="no data_timedelta_hours"):
+        steps_per_month(cfg, _Store())
+
+
+def test_the_shipped_eval_suite_no_longer_hard_codes_a_cadence():
+    """Regression pin for the config itself, not just the helper."""
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.load(_AI_ROSSBY_DIR / "conf" / "validation" / "eval_suite.yaml")
+    for block in ("climatology", "bias", "qbo"):
+        assert cfg[block].steps_per_bin is None, (
+            f"{block}.steps_per_bin is pinned to {cfg[block].steps_per_bin}; the "
+            f"width should be derived from months_per_bin + the model step"
+        )
+        assert float(cfg[block].months_per_bin) > 0
+    # And the two names that used to match no model config.
+    assert cfg.qbo.u_variable_name == "u_component_of_wind"
+    assert "DSWRFtoa" not in list(cfg.global_mean.flux_variables)

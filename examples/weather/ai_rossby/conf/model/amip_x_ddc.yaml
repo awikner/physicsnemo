@@ -62,10 +62,23 @@ levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
          500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
 horizontal_resolution: [180, 360]
 downsample_factor: 4
-# Phase 12b: amip_v2 upper-air layout (level-major, 1000 hPa first).
-# Use channel_layout: v1 for wrappers meant to load real v1 checkpoints
-# (the translator's --source-contract v1 sets this automatically).
-channel_layout: v2
+# v1 upper-air layout: variable-major, in this file's level order (changed from
+# `v2` on 2026-08-14). This wrapper's backbone is XDDCUNet, the CONVOLUTIONAL
+# denoiser, which exists only in amip v1 — amip_v2 deleted the conv path
+# (`ae_module.py` raises NotImplementedError for anything but 'dit'). So every
+# real checkpoint this config can ever load is a v1 artifact, and `v2` here
+# could only ever be wrong: the translator writes the artifact's layout from
+# `--source-contract`, which for this backbone is always v1.
+#
+# The flip moves NO parameter shape (the state dict hashes to
+# ba2d45a0801366be under either layout), so nothing becomes unloadable and the
+# health-gate shape digest does not move — which is exactly why
+# test_config_health_gates.py now pins `channel_layout` per config as well.
+# Nothing in this repo trains x_DDC (train_diffusion.py has no x_DDC branch), so
+# there is no in-fork checkpoint whose packing this reinterprets.
+#
+# amip_x_ddc_dit.yaml is the v2 downscaler and is legitimately `v2`.
+channel_layout: v1
 
 # XDDCUNet (convolutional denoiser) kwargs forwarded through unet_kwargs.
 # decoder_type: dit (DiTAE autoencoder) is not vendored — see

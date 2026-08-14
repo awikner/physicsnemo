@@ -1,3 +1,4 @@
+# @package eval_suite
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -11,6 +12,13 @@
 #       +eval_suite.checkpoint_dir=./outputs/amip_si_run/checkpoints \
 #       +eval_suite.output_path=./outputs/amip_si_run/eval_suite.pt
 #
+# The ``# @package eval_suite`` directive on line 1 is load-bearing (added
+# 2026-08-14): this file is selected through the ``validation`` group, but
+# eval_diffusion.py reads ``cfg.eval_suite``. Without the directive the content
+# lands at ``cfg.validation`` and the script raises "eval_suite.* config block
+# missing" — i.e. the invocation documented here never worked. It must stay the
+# FIRST line; Hydra does not look for it further down the header.
+#
 # Each sub-block below maps 1:1 to a validator class in eval_diffusion.py
 # (docstrings there explain the metric). Every sub-block is independently
 # toggled via ``enabled`` — turn off what you don't need to save GPU time
@@ -19,14 +27,33 @@
 # cheap to reuse; the F5 live-validation test should confirm actual
 # wall-time on Delta).
 #
-# ``eval_suite.horizon`` is the rollout length in *dataset steps* for
-# every enabled validator (e.g. 1460 six-hourly steps ≈ 1 year).
 # ``eval_suite.sampler_num_steps`` is forwarded to
 # DiffusionRolloutValidator's per-emitted-frame sampler schedule
 # (Phase 8f, F4) — a single int applies uniformly; a list of length
 # ``horizon`` gives a per-frame schedule. Capping this is what makes a
 # 1-year+ rollout tractable at eval time.
+#
+# BIN WIDTHS ARE DERIVED (2026-08-14). Each aggregator block below states
+# ``months_per_bin`` — a physical duration — and eval_diffusion.py converts it
+# to a step count via ``train_loop.steps_per_month``, i.e. from
+# ``cfg.model.timedelta_hours`` and the store's own cadence. One monthly bin is
+# 30 steps at the AMIP 24-hour step and 122 at a 6-hour one, and neither number
+# appears here. Before this, ``steps_per_bin: 120`` was hard-coded with the
+# comment "≈ 1 month", which is true only for a 6-hourly model: every AMIP
+# "monthly" climatology was silently binned four months wide. Setting
+# ``steps_per_bin`` explicitly still wins (for a deliberately non-calendar bin)
+# and logs a warning saying the bins are not the stated width.
 
+# Rollout length for every enabled validator, in MODEL STEPS — 1460 is ~1 year
+# at a 6-hour step and ~4 years at the AMIP 24-hour one. It is not derived,
+# because a multi-year archive legitimately supports either; a horizon longer
+# than the store can serve now raises in ``_select_ic_indices`` (it used to
+# select zero ICs and report a perfect RMSE of 0.0). For a single-year AMIP
+# store at 24 h, pass ``eval_suite.horizon=365``.
+#
+# Note that ``n_bins x months_per_bin`` is what the binned aggregators actually
+# cover: 12 monthly bins span ~1 year, so a longer ``horizon`` keeps rolling but
+# stops accumulating into bins past the twelfth. Match them deliberately.
 horizon: 1460
 max_initial_conditions: 1
 ic_stride: 9999
@@ -36,26 +63,34 @@ sampler_num_steps: 4
 
 climatology:
   enabled: True
-  n_bins: 12          # monthly climatology
-  steps_per_bin: 120  # 120 six-hourly steps ≈ 1 month
+  n_bins: 12            # 12 x 1 month = a monthly climatology over ~1 year
+  months_per_bin: 1.0
+  steps_per_bin: null   # derived; set an int to override (see the header)
 
 bias:
   enabled: True
   n_bins: 12
-  steps_per_bin: 120
+  months_per_bin: 1.0
+  steps_per_bin: null
 
 qbo:
   enabled: True
-  u_variable_name: ua
+  # Must name a channel in ``model.upper_air_variables`` — QBOValidator raises
+  # otherwise. Every ai-rossby config (v1 and v2) calls the zonal wind
+  # ``u_component_of_wind``; the CMIP spelling ``ua`` that used to sit here
+  # matched nothing and made a bare run unusable.
+  u_variable_name: u_component_of_wind
   levels: [10, 30, 50]   # hPa — must match entries in model.levels
-  steps_per_bin: 120
-  months_per_bin: 1.0
+  months_per_bin: 1.0    # also the unit the reported period estimate is in
+  steps_per_bin: null
 
 global_mean:
   enabled: True
-  # TOA net-radiation-style flux channels — override to match the
-  # model's actual surface_variables / diagnostic_variables names.
-  flux_variables: [DSWRFtoa]
+  # Each name is looked up against ``model.surface_variables`` then
+  # ``model.diagnostic_variables``, and an unknown one raises. The TOA fluxes
+  # are diagnostics in every AMIP config; ``DSWRFtoa``, which used to sit here,
+  # is a *varying boundary* in the v1 configs and so was never eligible.
+  flux_variables: [USWRFtoa_24h, ULWRFtoa_24h]
 
 ensemble_envelope:
   enabled: False   # off by default — needs ensemble_size>1 (E× cost)

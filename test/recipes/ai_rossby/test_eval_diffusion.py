@@ -291,3 +291,49 @@ def test_ensemble_envelope_validator_reports_spread_skill_ratio():
     assert len(ratio_keys) > 0
     for k in ratio_keys:
         assert isinstance(result[k], float)
+
+
+# ---------------------------------------------------------------------------
+# Bin widths are derived from the model step (2026-08-14).
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStepsPerBin:
+    """The one function deciding what the aggregators bin by."""
+
+    @staticmethod
+    def _fn():
+        from eval_diffusion import resolve_steps_per_bin
+
+        return resolve_steps_per_bin
+
+    def test_derives_from_months_when_unset(self):
+        fn = self._fn()
+        # 30 steps/month (24-hour step); a quarterly bin is 3x that.
+        assert fn({"months_per_bin": 1.0, "steps_per_bin": None}, 30, name="c") == 30
+        assert fn({"months_per_bin": 3.0, "steps_per_bin": None}, 30, name="c") == 90
+        # 6-hour step: the number the config used to hard-code.
+        assert fn({"months_per_bin": 1.0, "steps_per_bin": None}, 122, name="c") == 122
+
+    def test_a_missing_months_key_defaults_to_one_month(self):
+        assert self._fn()({}, 30, name="c") == 30
+
+    def test_never_returns_zero(self):
+        """A sub-step bin width would make an empty aggregator."""
+        assert self._fn()({"months_per_bin": 0.001}, 30, name="c") == 1
+
+    def test_an_explicit_value_wins(self):
+        assert self._fn()({"months_per_bin": 1.0, "steps_per_bin": 7}, 30, name="c") == 7
+
+    def test_a_disagreeing_explicit_value_warns(self, caplog):
+        fn = self._fn()
+        with caplog.at_level("WARNING"):
+            assert fn({"months_per_bin": 1.0, "steps_per_bin": 120}, 30, name="qbo") == 120
+        assert "qbo.steps_per_bin=120" in caplog.text
+        assert "NOT 1.0 month" in caplog.text
+
+    def test_an_agreeing_explicit_value_is_silent(self, caplog):
+        fn = self._fn()
+        with caplog.at_level("WARNING"):
+            assert fn({"months_per_bin": 1.0, "steps_per_bin": 30}, 30, name="c") == 30
+        assert caplog.text == ""

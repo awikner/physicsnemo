@@ -394,6 +394,22 @@ class DiffusionRolloutValidator:
         first_past = (self.window_size - 1) * self.step_size if self.window_mode else 0
         max_idx = self.dataset.n_time - last_future - 1
         candidates = list(range(first_past, max_idx + 1, self.ic_stride))
+        if not candidates:
+            # Refuse rather than score nothing (2026-08-14). An empty IC list
+            # ran zero samples and reported RMSE 0.0 — an eval suite claiming a
+            # perfect model because it never evaluated one. The shipped
+            # eval_suite horizon (1460, a 6-hourly year) does exactly this on a
+            # one-year store at the AMIP 24-hour step.
+            max_horizon = (self.dataset.n_time - first_past - 1) // max(
+                1, self.step_size
+            )
+            raise ValueError(
+                f"no admissible initial condition: horizon={self.horizon} x "
+                f"step_size={self.step_size} needs {last_future} future rows "
+                f"(plus {first_past} past) but the store has "
+                f"{self.dataset.n_time}. Largest horizon this store supports is "
+                f"{max(0, max_horizon)}."
+            )
         candidates = candidates[: self.max_initial_conditions]
         return [c for i, c in enumerate(candidates) if i % world_size == rank]
 
@@ -548,6 +564,13 @@ class DiffusionRolloutValidator:
             x_next = self.scheduler.sample(
                 model, x, c_grid, c_scalar, num_steps=self._num_steps_for_frame(k)
             )
+            # DynamicInterpolant (SI_X) returns ``(y, model_last_pred)`` under
+            # its ``return_model_last=True`` default; DriftScheduler returns a
+            # bare tensor. Take the sample either way — same unwrap as
+            # ``CombinedModule.forward``. Without it every SI_X rollout dies on
+            # ``'tuple' object has no attribute 'narrow'`` inside unpack_state.
+            if isinstance(x_next, tuple):
+                x_next = x_next[0]
 
             # Score this step (if requested) against the dataset's frame at t+k.
             if k in log_step_to_idx:
