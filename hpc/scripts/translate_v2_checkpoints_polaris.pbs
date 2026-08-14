@@ -54,7 +54,7 @@ free -g | head -2
 # No --model-config: the auto-derive path is the one under test (and the one
 # whose backbone lookup was silently broken until Phase 12h). --strict refuses to
 # write on any missing/unexpected key, so a clean exit IS the assertion.
-echo "=== 1/2: forecaster -> .mdlus (ERDM_fancy, v2 contract) ==="
+echo "=== 1/4: forecaster -> .mdlus (ERDM_fancy, v2 contract) ==="
 .venv/bin/python tools/checkpoint_translation/amip_si.py \
     --source "$FC" \
     --source-contract v2 \
@@ -64,7 +64,7 @@ echo "=== 1/2: forecaster -> .mdlus (ERDM_fancy, v2 contract) ==="
     2>&1 | tail -70
 
 echo
-echo "=== 2/2: downscaler -> .mdlus (x_DDC, dit decoder) ==="
+echo "=== 2/4: downscaler -> .mdlus (x_DDC, dit decoder) ==="
 .venv/bin/python tools/checkpoint_translation/amip_si.py \
     --source "$DS" \
     --source-contract v2 \
@@ -75,4 +75,24 @@ echo "=== 2/2: downscaler -> .mdlus (x_DDC, dit decoder) ==="
 
 echo
 ls -la "$OUT"
+
+# The decisive check: key parity cannot catch a channel permutation, so run
+# upstream's own forward on the same weights and compare. Needs an amip_v2
+# checkout; skipped with a loud note if absent, since it is the whole point.
+V2=${AMIP_V2_REPO:-/eagle/lighthouse-uchicago/members/awikner/amip_v2}
+if [[ -d "$V2/modules" ]]; then
+    echo
+    echo "=== 3/4: numerical equivalence, forecaster ==="
+    .venv/bin/python tools/checkpoint_translation/verify_v2_numerical.py \
+        --source "$FC" --amip-v2-repo "$V2" --family erdm 2>&1 | tail -20
+    echo
+    echo "=== 4/4: numerical equivalence, downscaler ==="
+    .venv/bin/python tools/checkpoint_translation/verify_v2_numerical.py \
+        --source "$DS" --amip-v2-repo "$V2" --family x_ddc 2>&1 | tail -20
+else
+    echo
+    echo "SKIPPED the numerical checks: no amip_v2 checkout at $V2."
+    echo "  git clone https://github.com/anthonyzhou-1/amip_v2 $V2"
+fi
+
 echo "=== translation done ==="
