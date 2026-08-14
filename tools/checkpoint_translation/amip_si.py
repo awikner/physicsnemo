@@ -274,6 +274,20 @@ def translate_state_dict(
     return out, stats
 
 
+def resolve_target_for_source(model_name: str, backbone: Optional[str]) -> str:
+    """Which wrapper a source ``model_name`` + ``backbone`` pair maps to.
+
+    ``model_name: ERDM`` is ambiguous across the rebaseline: in v1 it could be
+    the ADM-style UNet (:class:`ERDMWrapper`), while amip_v2 deleted that variant
+    and runs ERDM on the :class:`RollingDiT` backbone. The config says which via
+    ``model.backbone``, so use it rather than warning about a mismatch the user
+    cannot fix.
+    """
+    if model_name == "ERDM" and str(backbone or "").lower() == "dit":
+        return "RollingDiTWrapper"
+    return _MODEL_NAME_TO_WRAPPER.get(model_name, "")
+
+
 def detect_model_name(blob: dict) -> str:
     """Read the source ``model_name`` from the Lightning hparams blob.
 
@@ -635,12 +649,38 @@ def wrapper_kwargs_from_hparams(
                 f"{len(varying_boundary)} are listed in data config"
             )
 
-    # Wrapper.horizontal_resolution is *metadata* in the wrapper — it's
-    # only used to setdefault dit_kwargs.nlat / nlon. Since we preserve
-    # the source's nlat / nlon in backbone_cfg explicitly, the
-    # horizontal_resolution we report here is the source's data-side
-    # resolution, which matches what callers should be feeding for
-    # c_grid (the boundary stream) in the legacy two-resolution layout.
+    # ``horizontal_resolution`` sizes the BACKBONE's token grid (the wrapper
+    # setdefaults nlat/nlon from it), which for the v2 rolling forecaster is the
+    # COARSE state grid, not the data resolution: the state is pre-coarsened by
+    # ``downsample_factor`` while c_grid still arrives full-res and is reduced
+    # inside the model by ``c_grid_downsample``. Upstream never writes nlat/nlon
+    # in its ERDM configs — ``RollingDiT`` defaults them to 45x90 — so handing
+    # over ``data.horizontal_resolution`` (180x360) built a model whose learned
+    # geographic bias was 16x too large. Real checkpoints catch this only because
+    # ``input_embed.boundary_embed.static_bias`` is grid-shaped; nothing else in
+    # the module tree is, so with ``boundary_static_bias: false`` it would load
+    # cleanly and simply be wrong.
+    state_grid = list(data.get("horizontal_resolution", []))
+    if target_class_name == "RollingDiTWrapper":
+        explicit = (
+            source_backbone_cfg.get("nlat", None),
+            source_backbone_cfg.get("nlon", None),
+        )
+        if all(v is not None for v in explicit):
+            state_grid = [int(explicit[0]), int(explicit[1])]
+            logger.info("backbone grid from the source block: %s", state_grid)
+        else:
+            factor = int(data.get("downsample_factor", 1) or 1)
+            if factor > 1 and len(state_grid) == 2:
+                state_grid = [state_grid[0] // factor, state_grid[1] // factor]
+                logger.info(
+                    "backbone grid = data %s / downsample_factor %d = %s "
+                    "(the coarse state grid the forecaster runs on)",
+                    list(data.get("horizontal_resolution", [])),
+                    factor,
+                    state_grid,
+                )
+
     backbone_kwargs_name = _WRAPPER_BACKBONE_KWARGS_KEY[target_class_name]
     kwargs = {
         "surface_variables": list(data.get("surface_variables", [])),
@@ -649,7 +689,7 @@ def wrapper_kwargs_from_hparams(
         "constant_boundary_variables": const_boundary,
         "varying_boundary_variables": varying_boundary,
         "levels": list(data.get("levels", [])),
-        "horizontal_resolution": list(data.get("horizontal_resolution", [])),
+        "horizontal_resolution": state_grid,
         "scalar_dim": int(backbone_cfg.pop("scalar_dim", 2)),
         backbone_kwargs_name: backbone_cfg,
     }
@@ -796,7 +836,9 @@ def build_target_wrapper(
 
 
 def cross_check_compatibility(
-    source_model_name: str, target_class_name: str
+    source_model_name: str,
+    target_class_name: str,
+    source_backbone: Optional[str] = None,
 ) -> None:
     """Verify the source ``model_name`` is compatible with the target wrapper.
 
@@ -806,8 +848,12 @@ def cross_check_compatibility(
     doesn't refuse to translate. Catches obvious YAML mix-ups
     (translating an ERDM ckpt against an SI wrapper, for example).
     """
-    expected = _MODEL_NAME_TO_WRAPPER.get(source_model_name)
-    if expected is None:
+    # ``source_backbone`` disambiguates ERDM: v1 could be the ADM-style UNet,
+    # while amip_v2 deleted that and runs ERDM on RollingDiT (``backbone: DiT``).
+    # Without it, translating a perfectly correct v2 ERDM checkpoint warns about
+    # a mismatch the user cannot act on.
+    expected = resolve_target_for_source(source_model_name, source_backbone)
+    if not expected:
         # Already handled in detect_model_name; defensive.
         return
     if expected != target_class_name:
@@ -965,7 +1011,13 @@ def main(argv: Optional[list] = None) -> int:
             args.source_contract,
         )
     if not args.no_cross_check:
-        cross_check_compatibility(src_model_name, tgt_class_name)
+        src_backbone = (
+            blob.get("hyper_parameters", {})
+            .get("config", {})
+            .get("model", {})
+            .get("backbone", None)
+        )
+        cross_check_compatibility(src_model_name, tgt_class_name, src_backbone)
 
     src_sd = pick_source_state_dict(blob, prefer_live=args.prefer_live)
     tgt_sd, stats = translate_state_dict(src_sd)

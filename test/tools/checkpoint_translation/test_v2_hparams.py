@@ -116,6 +116,9 @@ def _fancy_blob():
                     "scalar_forcing": "global_mean_sst",
                     "levels": _LEVELS,
                     "horizontal_resolution": [180, 360],
+                    # The state is pre-coarsened by this; the forecaster runs on
+                    # 180/4 x 360/4 while c_grid still arrives full-res.
+                    "downsample_factor": 4,
                     "multistep_rollout": 6,
                 },
             }
@@ -244,6 +247,82 @@ def test_the_derived_kwargs_rebuild_the_checkpoints_stated_contract():
     assert w.scalar_dim == 3
     assert w.num_ocean == 3
     assert w.ocean_grid_indices == [1, 2, 3]
+
+
+def test_the_backbone_grid_is_the_coarse_state_grid():
+    """``horizontal_resolution`` must be the grid the FORECASTER runs on.
+
+    Found by translating the real checkpoint: it failed with
+
+        input_embed.boundary_embed.static_bias:
+          ckpt [256, 45, 90] vs model [256, 180, 360]
+
+    Upstream never writes nlat/nlon in an ERDM config — ``RollingDiT`` defaults
+    them to 45x90 — while the *data* resolution is 180x360 and the state is
+    pre-coarsened by ``downsample_factor``. Handing over the data resolution
+    built a learned geographic bias 16x too large. Only ``static_bias`` is
+    grid-shaped, so with ``boundary_static_bias: false`` this would have loaded
+    cleanly and simply been wrong.
+    """
+    kw = wrapper_kwargs_from_hparams(
+        _fancy_blob(), "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kw["horizontal_resolution"] == [45, 90]
+
+
+def test_an_explicit_backbone_grid_wins_over_the_division():
+    blob = _fancy_blob()
+    dit = blob["hyper_parameters"]["config"]["model"]["ERDM"]["DiT"]
+    dit["nlat"], dit["nlon"] = 60, 120
+    kw = wrapper_kwargs_from_hparams(
+        blob, "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kw["horizontal_resolution"] == [60, 120]
+
+
+def test_erdm_on_the_dit_backbone_resolves_to_the_rolling_wrapper():
+    """``model_name: ERDM`` is ambiguous across the rebaseline.
+
+    v1 could mean the ADM-style UNet; amip_v2 deleted that and runs ERDM on
+    RollingDiT. ``model.backbone`` says which, so the family cross-check must
+    read it instead of warning about a mismatch the user cannot fix.
+    """
+    from amip_si import resolve_target_for_source
+
+    assert resolve_target_for_source("ERDM", "DiT") == "RollingDiTWrapper"
+    assert resolve_target_for_source("ERDM", "UNet") == "ERDMWrapper"
+    assert resolve_target_for_source("ERDM", None) == "ERDMWrapper"
+    assert resolve_target_for_source("RFM", "DiT") == "RollingDiTWrapper"
+
+
+def test_trimming_never_takes_the_derived_anomaly_channel():
+    """The trim heuristic must prefer any stored channel over the derived one.
+
+    It exists for stored channels that were scalar-routed (``global_mean_co2``).
+    The anomaly cannot be one of those — the translator derived it from this
+    config's own ``sst_anomaly_channel`` — so dropping it would contradict the
+    source. Here a too-small c_grid_dim forces one drop; sea ice goes, the
+    anomaly stays.
+    """
+    blob = _fancy_blob()
+    blob["hyper_parameters"]["config"]["model"]["ERDM"]["DiT"]["c_grid_dim"] = 5
+    kw = wrapper_kwargs_from_hparams(
+        blob, "RollingDiTWrapper", source_contract="v2"
+    )
+    assert _ANOM in kw["varying_boundary_variables"]
+    assert "sea_ice_cover_monthly_interp" not in kw["varying_boundary_variables"]
+
+
+def test_a_config_that_only_reconciles_by_dropping_the_anomaly_is_refused():
+    """When no stored channel is left to drop, refuse rather than guess."""
+    blob = _fancy_blob()
+    # 2 constant + 4 varying (3 stored + 1 derived); c_grid_dim 2 leaves room for
+    # zero varying channels, so reconciling would have to discard the derived one.
+    blob["hyper_parameters"]["config"]["model"]["ERDM"]["DiT"]["c_grid_dim"] = 2
+    with pytest.raises(ValueError, match="derived"):
+        wrapper_kwargs_from_hparams(
+            blob, "RollingDiTWrapper", source_contract="v2"
+        )
 
 
 # ---------------------------------------------------------------------------
