@@ -218,12 +218,21 @@ def main() -> int:
     torch.manual_seed(args.seed)
     b = args.batch
     if args.family == "erdm":
-        W = int(backbone_cfg.get("window_size", 6))
-        C = int(backbone_cfg["in_channels"])
-        nlat, nlon = int(backbone_cfg["nlat"]), int(backbone_cfg["nlon"])
-        cg = int(backbone_cfg.get("c_grid_dim", 0))
-        sd = int(backbone_cfg.get("scalar_dim", 0))
+        # Read the geometry off the INSTANTIATED model, not the config block:
+        # upstream's ERDM configs omit nlat/nlon entirely and rely on
+        # RollingDiT's 45x90 defaults (the same omission that made the
+        # translator build a 180x360 static_bias). Asking the object is the only
+        # way to be sure both sides agree on the grid.
+        W = int(getattr(theirs, "window_size", backbone_cfg.get("window_size", 6)))
+        C = int(theirs.in_channels)
+        nlat, nlon = int(theirs.nlat), int(theirs.nlon)
+        cg = int(getattr(theirs, "c_grid_dim", 0) or 0)
+        sd = int(getattr(theirs, "scalar_dim", 0) or 0)
         down = int(backbone_cfg.get("c_grid_downsample", 1) or 1)
+        logger.info(
+            "erdm inputs: W=%d C=%d grid=%dx%d c_grid=%d@%dx%d scalar=%d",
+            W, C, nlat, nlon, cg, nlat * down, nlon * down, sd,
+        )
         # c_grid arrives at the FULL forcing resolution; the backbone's strided
         # conv reduces it to the token grid.
         z = torch.randn(b, W, C, nlat, nlon)
@@ -234,8 +243,8 @@ def main() -> int:
             out_t = theirs(z, t, c_grid=c_grid, c_scalar=c_scalar)
             out_o = ours(z, t, c_grid=c_grid, c_scalar=c_scalar)
     else:
-        C = int(backbone_cfg["out_channels"])
-        nlat, nlon = int(backbone_cfg["nlat"]), int(backbone_cfg["nlon"])
+        C = int(theirs.out_channels)
+        nlat, nlon = int(theirs.nlat), int(theirs.nlon)
         x = torch.randn(b, C, nlat, nlon)
         cond = torch.randn(b, C, nlat, nlon)
         t = torch.rand(b)
@@ -315,6 +324,9 @@ def _synthetic_blob(family: str) -> dict:
                                 "temporal_num_heads": 2,
                                 "num_blocks": 1,
                                 "window_size": 3,
+                                # nlat/nlon deliberately ABSENT, as in every real
+                                # upstream ERDM config: the harness must read the
+                                # grid off the model, not the config.
                                 "nlat": 4,
                                 "nlon": 8,
                                 "c_grid_downsample": 4,
