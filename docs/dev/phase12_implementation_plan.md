@@ -1,6 +1,6 @@
 # Phase 12 — amip_v2 rebaseline (ERDM / x_DDC / Combined parity)
 
-Status: **12a-12g complete (12g 2026-08-13, artifact built); 12h remaining. model-step/store-row stride audited + fixed 2026-08-13** · Author: Claude (analysis + plan) · Created: 2026-08-07
+Status: **12a-12g complete; 12h translator + numerical validation done on REAL v2 checkpoints (2026-08-14, bit-exact), Combined/gates remaining. model-step/store-row stride audited + fixed 2026-08-13** · Author: Claude (analysis + plan) · Created: 2026-08-07
 
 Phase 8 ported the amip repo as of its last public commit
 (`497827e` "BIG changes", 2026-06-17) in full — all five diffusion
@@ -921,6 +921,70 @@ consumes.
     our existing `AsyncForecastWriter` with month-buffered output
     (upstream's thread-pool NetCDF writer maps 1:1 onto what we already
     have).
+**Delivered so far (2026-08-14): the v2 translator, validated numerically on
+real weights.**
+
+The premise changed at the start of 12h: the user pointed at two checkpoints
+that both say ``project: amip_v2``, so the "no v2-trained checkpoints exist yet"
+note (item 1 under Open items) is retired and 28's live validation is **done**,
+not deferred.
+
+| | forecaster | downscaler |
+|---|---|---|
+| run | ``ERDM_ERDM_fancy_42_2026-08-10T13-21-13`` | ``x_DDC_x_DDC_42_2026-08-07T09-34-49`` |
+| size | 5.1 GB, 561.61M params | 4.5 GB, 389.62M params |
+| exercises | 12b packing, the full 12e feature set, 12f ``nocean=3`` (SST + **anomaly** + ice), 12g ``sst_anomaly_channel: append`` + ``scalar_forcing: global_mean_sst`` | ``decoder_type: dit`` = ``DiTAE``, 302 → 151 @ 180x360 |
+| translated | ``--strict``: 373 kept, 1 scheduler dropped, **0 unknown, 0 missing** | 192 kept, **0 dropped, 0 missing** |
+| **numerical** | **max │diff│ 0.0000e+00** at W=6, C=154, 45x90 state, c_grid 6@180x360, scalar 3 | **max │diff│ 0.0000e+00** |
+
+Zero in every channel block, ocean tail included (surface 0:6, diagnostic 6:21,
+upper_air 21:151, ocean 151:154). Both checkpoints were fetched off retiring
+Derecho scratch by Globus (task ``56188e3e``, 9.6 GB) to
+``/eagle/lighthouse-uchicago/amip-checkpoints``; translated artifacts sit in
+``translated/`` beside them. Reproduce with
+``hpc/scripts/translate_v2_checkpoints_polaris.pbs``.
+
+**Why the numerical step, and not just key parity.** Every contract bug in this
+phase was **shape-preserving** — the Phase-8e channel scramble, the forcing-lag
+shift, the sea-ice drop — so a clean ``load_state_dict`` proves nothing about
+channel order. ``tools/checkpoint_translation/verify_v2_numerical.py`` builds
+upstream's own backbone and ours in one process (their ``RollingDiT`` and
+``DiTAE`` import only torch + einops + their own layers, so no Lightning, no
+config machinery, no ``norm_stats``), hands both the same weights, and compares
+the **forward** — deliberately not a sampled rollout, since sampling draws noise
+and would need their RNG stream reproduced. On mismatch it localises the error
+per channel block.
+
+**Five bugs the real checkpoints found**, every one in the auto-derive path that
+the earlier live sweeps skipped by passing ``--model-config``:
+
+1. **Backbone block never found.** Read at ``model.<name>.model``; both v1 and
+   v2 nest it under the backbone name (``model.ERDM.DiT`` — v1's
+   ``ERDM_Unet.yaml`` even carries ``DiT`` and ``UNet`` side by side). It
+   silently yielded ``{}``: class-default geometry, ``scalar_dim`` → 2,
+   reconciliation skipped.
+2. **Wrong backbone grid** — ``static_bias`` ``[256, 45, 90]`` vs our
+   ``[256, 180, 360]``. The learned geographic bias is on the forecaster's token
+   grid, but the translator passed the *data* resolution; upstream never writes
+   ``nlat``/``nlon`` in an ERDM config and leans on ``RollingDiT``'s 45x90
+   defaults. **It surfaced only because ``static_bias`` is the single
+   grid-shaped parameter in the tree — with ``boundary_static_bias: false`` the
+   same error loads cleanly and is silently wrong.**
+3. **``model_name: ERDM`` is ambiguous** across the rebaseline (v1's UNet vs
+   v2's RollingDiT); ``model.backbone`` disambiguates.
+4. **The builder's backbone-kwargs key** was fixed per wrapper, but x_DDC has
+   two possible backbones — ``KeyError('unet_kwargs')`` after the mapper had
+   done everything right.
+5. Plus the trim heuristic could discard the **derived** anomaly channel; it now
+   prefers any stored channel and raises when nothing else remains.
+
+Also ported: :class:`DiTAE` (``physicsnemo/experimental/models/amip_si/dit_ae.py``),
+amip_v2's only x_DDC denoiser — upstream deleted the convolutional path, so a v2
+x_DDC checkpoint has no other backbone. Submodule names match upstream's
+key-for-key, so translation needs no renaming.
+
+New configs: ``conf/model/amip_erdm_fancy.yaml``, ``conf/model/amip_x_ddc_dit.yaml``.
+
 28. **Translator for v2 checkpoints**: new key layouts (input_embed /
     output_head / cross-attn / ocean modules), `ERDM_fancy` and
     `ERDM_ocean` variants, `combined` two-ckpt loading. **No v2-trained
