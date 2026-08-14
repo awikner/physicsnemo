@@ -188,8 +188,8 @@ def smoke_cfg(tmp_path, monkeypatch):
 
 
 @pytest.mark.slow
-def test_train_smoke_and_resume(smoke_cfg, capsys):
-    import train as train_mod
+def test_train_smoke_and_resume(smoke_cfg, capsys, palooza_train):
+    train_mod = palooza_train
 
     torch.manual_seed(0)
     train_mod.run(smoke_cfg)
@@ -212,9 +212,9 @@ def test_train_smoke_and_resume(smoke_cfg, capsys):
 
 
 @pytest.mark.slow
-def test_gate_learns_on_synthetic_signal(smoke_cfg):
+def test_gate_learns_on_synthetic_signal(smoke_cfg, palooza_train):
     """Loss decreases over a few epochs on the synthetic data."""
-    import train as train_mod
+    train_mod = palooza_train
     from datapipes.factory import build_dataset
     from losses import build_loss
     from mowe_precip import MoWEPrecipGate, mix
@@ -260,7 +260,7 @@ def test_gate_learns_on_synthetic_signal(smoke_cfg):
 
 
 @pytest.mark.slow
-def test_best_checkpoint_and_early_stopping(smoke_cfg, monkeypatch):
+def test_best_checkpoint_and_early_stopping(smoke_cfg, monkeypatch, palooza_train):
     """Best weights land in their own directory, and a validation loss that
     stops improving ends the run before max_epochs.
 
@@ -268,7 +268,7 @@ def test_best_checkpoint_and_early_stopping(smoke_cfg, monkeypatch):
     fixture the real loss improves every epoch, so early stopping would
     (correctly) never fire.
     """
-    import train as train_mod
+    train_mod = palooza_train
     import validation as validation_mod
     from pathlib import Path
 
@@ -307,9 +307,9 @@ def test_best_checkpoint_and_early_stopping(smoke_cfg, monkeypatch):
 
 
 @pytest.mark.slow
-def test_ema_disabled_path_still_trains(smoke_cfg):
+def test_ema_disabled_path_still_trains(smoke_cfg, palooza_train):
     """EMA off + early stopping off is the plain path and must still work."""
-    import train as train_mod
+    train_mod = palooza_train
     from pathlib import Path
 
     torch.manual_seed(0)
@@ -328,12 +328,12 @@ def test_ema_disabled_path_still_trains(smoke_cfg):
 
 
 @pytest.mark.slow
-def test_inference_writes_gate_forecasts(smoke_cfg, monkeypatch):
+def test_inference_writes_gate_forecasts(smoke_cfg, monkeypatch, palooza_train):
     """infer_mowe replays a split and writes a dense (init, lead, lat, lon)
     zarr of the mixture in mm/day, leaving pairs absent from the index NaN."""
     from pathlib import Path
 
-    import train as train_mod
+    train_mod = palooza_train
 
     torch.manual_seed(0)
     # every_n_epochs must be 1: the best checkpoint is only written when a

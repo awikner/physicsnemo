@@ -96,10 +96,37 @@ def test_batched_constant_boundary_and_backward():
     assert s.grad is not None and torch.isfinite(s.grad).all()
 
 
-def test_diagnostic_variables_rejected():
-    kw = dict(_SMOKE_KWARGS, diagnostic_variables=["pr_6h"])
-    with pytest.raises(ValueError, match="no diagnostic head"):
-        ArchesWeather(**kw)
+def test_diagnostic_variables_attach_a_head():
+    """A non-empty ``diagnostic_variables`` builds the diagnostic decoder.
+
+    This used to assert the opposite — the original port (2026-07-21) was
+    head-less and rejected the argument — but the diagnostic head landed on
+    2026-07-27 as an ai-rossby extension over geoarches ArchesWeather-M, which
+    deliberately removed that guard. The test outlived the behaviour it
+    described; it now pins the behaviour the model documents.
+    """
+    kw = dict(_SMOKE_KWARGS, diagnostic_variables=["pr_6h", "olr"])
+    model = ArchesWeather(**kw).eval()
+    assert model.has_diagnostic
+    with torch.no_grad():
+        out = model(*_inputs(batch_size=1))
+    # forward returns (surface, upper_air, diagnostic, 0, 0, 0).
+    diagnostic = out[2]
+    assert diagnostic.shape == (1, 2, _H, _W)
+    assert torch.isfinite(diagnostic).all()
+
+
+def test_the_head_less_path_is_unchanged():
+    """Empty ``diagnostic_variables`` keeps the original geoarches architecture.
+
+    The head is an extension, so its absence must stay the default: a scalar 0
+    in the diagnostic slot rather than a tensor.
+    """
+    model = ArchesWeather(**_SMOKE_KWARGS).eval()
+    assert not model.has_diagnostic
+    with torch.no_grad():
+        out = model(*_inputs(batch_size=1))
+    assert not torch.is_tensor(out[2]) or out[2].numel() == 1
 
 
 def test_instantiate_and_checkpoint_roundtrip(tmp_path):

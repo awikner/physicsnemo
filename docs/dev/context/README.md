@@ -23,5 +23,5 @@ For a top-level orientation see the repo-root **`CLAUDE.md`**.
 | [sfno-e3sm-compute-bound-gh200](sfno-e3sm-compute-bound-gh200.md) | SFNO-E3SM is compute-bound on GH200; node-local staging off by default |
 | [phase11-data-consolidation](phase11-data-consolidation.md) | Phase 11: convert all datasets, consolidate; Globus/tar/inode gotchas; ERA5 norm fix |
 | [derecho-retire-rehome-to-delta](derecho-retire-rehome-to-delta.md) | **DEFERRED** work: retire inode-limited Derecho scratch, re-home to Delta |
-| [known-test-failures](known-test-failures.md) | **Parked for another branch**: two recipe dirs both export `train` (palooza smoke fails only in a combined run); ArchesWeather diagnostic guard no longer raises |
+| [known-test-failures](known-test-failures.md) | **Both fixed 2026-08-14.** Two recipe dirs both export `train` *and* `ema` (import-collision trap any new recipe dir can hit); a stale ArchesWeather guard assertion |
 | [PhysMetrics](PhysMetrics.md) | PhysMetrics.Weather install fix + custom mass-drift/TCWV-bias scripts for the hackathon hindcasts (`pangu_s2s`/`sfno_s2s` vs ERA5) |
