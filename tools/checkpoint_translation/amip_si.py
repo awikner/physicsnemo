@@ -593,8 +593,32 @@ def wrapper_kwargs_from_hparams(
             ]
             dropped = scalar_routed[:n_drop]
             if len(dropped) < n_drop:
-                remaining = [v for v in varying_boundary if v not in dropped]
-                dropped = dropped + remaining[-(n_drop - len(dropped)):]
+                # Never trim the SST anomaly: we DERIVED it a few lines above
+                # from this config's own ``sst_anomaly_channel``, so it cannot
+                # be a stored channel that was scalar-routed instead. If the
+                # count only reconciles by dropping it, the source config
+                # disagrees with itself and guessing would hide that.
+                from physicsnemo.experimental.datapipes.climate import (
+                    SST_ANOMALY_CHANNEL_NAME,
+                )
+
+                remaining = [
+                    v
+                    for v in varying_boundary
+                    if v not in dropped and v != SST_ANOMALY_CHANNEL_NAME
+                ]
+                take = n_drop - len(dropped)
+                if len(remaining) < take:
+                    raise ValueError(
+                        f"cannot reconcile c_grid_dim={target_c_grid_dim} with "
+                        f"{n_const} constant + {len(varying_boundary)} varying "
+                        f"channels {varying_boundary}: it would require "
+                        f"dropping the derived "
+                        f"{SST_ANOMALY_CHANNEL_NAME!r} channel, which this "
+                        f"config's sst_anomaly_channel asked for. Check "
+                        f"c_grid_dim against the variable lists."
+                    )
+                dropped = dropped + remaining[-take:]
             logger.warning(
                 "trimming varying_boundary_variables to match "
                 "c_grid_dim=%d (dropped %d entries: %s); upstream amip "
