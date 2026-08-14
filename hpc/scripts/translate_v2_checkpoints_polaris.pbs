@@ -1,0 +1,78 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Phase 12h — translate the two real amip_v2 checkpoints and report the key
+# reconciliation. The first live exercise of the v2 translator path.
+#
+#   ERDM_fancy_42_2026-08-10T13-21-13/last.ckpt   5.1 GB, 561.6M params + EMA
+#   x_DDC_42_2026-08-07T09-34-49/last.ckpt        4.5 GB, 389.6M params + EMA
+#
+# Runs on a compute node, not a login node: each blob carries EMA weights AND
+# Muon optimizer state, so peak host memory is several times the parameter count.
+# CPU-only work (load, remap, load_state_dict, save) — no GPU needed, but the
+# debug queue is the quickest way to get a whole node's memory.
+#
+# What "success" means here is NOT that it runs. It is:
+#   * every source key lands (missing/unexpected both empty), and
+#   * the shapes agree, which for a 561M-param model with a derived channel
+#     contract is a real statement about 12b/12e/12f/12g being right.
+# The numerical equivalence check is a separate step; key parity cannot catch a
+# shape-preserving permutation, which is how every contract bug in this phase
+# presented.
+#
+# Submit:  qsub hpc/scripts/translate_v2_checkpoints_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=00:50:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-translate-v2
+
+set -euo pipefail
+
+REPO=/eagle/lighthouse-uchicago/members/awikner/physicsnemo
+CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
+OUT=$CKPT/translated
+cd "$REPO"
+
+export OMP_NUM_THREADS=1
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+mkdir -p "$OUT"
+
+FC=$CKPT/ERDM_fancy_42_2026-08-10T13-21-13/last.ckpt
+DS=$CKPT/x_DDC_42_2026-08-07T09-34-49/last.ckpt
+for f in "$FC" "$DS"; do
+    [[ -f "$f" ]] || { echo "ERROR: $f missing"; exit 1; }
+done
+
+free -g | head -2
+
+# No --model-config: the auto-derive path is the one under test (and the one
+# whose backbone lookup was silently broken until Phase 12h). --strict refuses to
+# write on any missing/unexpected key, so a clean exit IS the assertion.
+echo "=== 1/2: forecaster -> .mdlus (ERDM_fancy, v2 contract) ==="
+.venv/bin/python tools/checkpoint_translation/amip_si.py \
+    --source "$FC" \
+    --source-contract v2 \
+    --target-class RollingDiTWrapper \
+    --output "$OUT/erdm_fancy.mdlus" \
+    --strict --verbose \
+    2>&1 | tail -70
+
+echo
+echo "=== 2/2: downscaler -> .mdlus (x_DDC, dit decoder) ==="
+.venv/bin/python tools/checkpoint_translation/amip_si.py \
+    --source "$DS" \
+    --source-contract v2 \
+    --target-class XDDCWrapper \
+    --output "$OUT/x_ddc_dit.mdlus" \
+    --strict --verbose \
+    2>&1 | tail -70
+
+echo
+ls -la "$OUT"
+echo "=== translation done ==="
