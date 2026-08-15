@@ -100,6 +100,17 @@ def _build(stem: str):
             args[key].update(shrink)
             if isinstance(args[key].get("input_embed"), dict):
                 args[key]["input_embed"].update(_EMBED_SHRINK)
+            # Block counts that only SOME configs carry are CLAMPED, never
+            # injected: adding ``num_ca_blocks`` to a config that omits it would
+            # build cross-attention blocks it does not have and silently move
+            # that config's pinned digest. AmipDiT also asserts
+            # ``num_ca_blocks <= num_blocks``, which shrinking num_blocks to 1
+            # would otherwise violate for the real-checkpoint SI configs (8).
+            for count_key in ("num_ca_blocks", "num_output_blocks"):
+                if count_key in args[key]:
+                    args[key][count_key] = min(
+                        int(args[key][count_key]), int(args[key].get("num_blocks", 1))
+                    )
     cls = getattr(amip_si_models, str(cfg.name))
     return cls(**args), cfg
 
@@ -128,6 +139,11 @@ _EXPECTED_SIGNATURES = {
     "amip_si_x": "04782906ab186194",
     "amip_x_ddc": "ba2d45a0801366be",         # v1 convolutional denoiser
     "amip_x_ddc_dit": "fc21c0c4de4d300c",     # 12h DiTAE denoiser
+    # The real v1 SI checkpoints' contracts (2026-08-14). Distinct from
+    # amip_si/amip_si_x: 151 channels on a 45x90 backbone grid with
+    # cross-attention blocks, vs 161 on 180x360 without.
+    "amip_si_v_coarse": "7485981e1269e7b5",
+    "amip_si_x_wco2_coarse": "a68c24af2dc030b7",
 }
 
 
@@ -145,6 +161,11 @@ _EXPECTED_LAYOUTS = {
     "amip_si_x": "fork",
     "amip_erdm": "fork",
     "amip_rfm": "fork",
+    # The two configs describing the REAL v1 SI checkpoints (2026-08-14). `v1`,
+    # not `fork`: their weights are channel-indexed in upstream's order, and
+    # both were verified bitwise against upstream's own DiT under it.
+    "amip_si_v_coarse": "v1",
+    "amip_si_x_wco2_coarse": "v1",
     # The v1 CONVOLUTIONAL downscaler. `v1` since 2026-08-14: XDDCUNet exists
     # only in amip v1, so every checkpoint this config can load is a v1
     # artifact, and nothing in-repo trains it.
@@ -238,6 +259,62 @@ def test_rolling_configs_run_on_their_own_declared_widths(stem):
         out = model(z, torch.zeros(b, W), c_grid=c_grid, c_scalar=c_scalar)
     assert out.shape == z.shape
     assert torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize(
+    "stem",
+    ["amip_si", "amip_si_x", "amip_si_v_coarse", "amip_si_x_wco2_coarse"],
+)
+def test_single_step_configs_run_on_their_own_declared_widths(stem):
+    """Synthetic forward for the single-step family, at the config's own widths.
+
+    The load-bearing case is ``c_grid_downsample``: the real-checkpoint SI
+    configs put the state on a 45x90 backbone grid and the forcings at 180x360,
+    and the backbone's strided conv is what reconciles them. Feed c_grid at the
+    state grid instead and the concat inside ``AmipDiT.forward`` fails on a
+    spatial mismatch — which is exactly what happens if a config claims
+    ``c_grid_downsample: 4`` while its dataset serves native-resolution state.
+    """
+    model, cfg = _build(stem)
+    model.eval()
+    nlat, nlon = model.horizontal_resolution
+    down = int((cfg.get("dit_kwargs", {}) or {}).get("c_grid_downsample", 1) or 1)
+    b = 1
+    x = torch.randn(b, model.in_channels, nlat, nlon)
+    c_grid = (
+        torch.randn(b, model.c_grid_dim, nlat * down, nlon * down)
+        if model.c_grid_dim
+        else None
+    )
+    c_scalar = torch.randn(b, model.scalar_dim) if model.scalar_dim else None
+    with torch.no_grad():
+        out = model(x, x.clone(), torch.zeros(b, 1), c_grid=c_grid, c_scalar=c_scalar)
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+
+
+def test_the_routed_scalar_contract_is_enforced_for_single_step():
+    """``scalar_dim`` must pay for every routed channel, or the pack drifts.
+
+    ``amip_si_x_wco2_coarse`` routes ``global_mean_co2`` out of the gridded
+    stream into the calendar row, which is what keeps ``c_grid_dim`` at 5 for a
+    4-entry varying list. Getting ``scalar_dim`` wrong alongside it is a silent
+    mis-pack, so the wrapper refuses it.
+    """
+    model, cfg = _build("amip_si_x_wco2_coarse")
+    assert model.c_grid_dim == 5, model.c_grid_dim
+    assert model.scalar_dim == 3
+    assert model.scalar_routed_boundary_variables == ["global_mean_co2"]
+
+    args = {
+        k: v
+        for k, v in OmegaConf.to_container(_load_composed("amip_si_x_wco2_coarse"),
+                                           resolve=True).items()
+        if k not in _NON_KWARGS
+    }
+    args["scalar_dim"] = 2  # one short for the routed channel
+    with pytest.raises(ValueError, match="does not match"):
+        getattr(amip_si_models, "AmipDiTWrapper")(**args)
 
 
 @pytest.mark.parametrize("stem", ["amip_x_ddc", "amip_x_ddc_dit"])

@@ -22,15 +22,29 @@ the sampler draws noise, so a rollout could only be compared by also reproducing
 their RNG stream. The forward is where the translation lives — weights, channel
 order, module wiring — and it is deterministic.
 
+**Which upstream checkout to compare against depends on the family.** ERDM and
+x_DDC are amip_v2's; SI / SI_X / EDM exist *only* in v1 (``497827e``), because
+amip_v2 deleted the single-step families — so ``--family si`` wants the v1
+checkout. ``--amip-repo`` names it either way (``--amip-v2-repo`` still works).
+
 Usage::
 
     python tools/checkpoint_translation/verify_v2_numerical.py \
         --source $CKPT/ERDM_fancy_.../last.ckpt \
-        --amip-v2-repo ~/amip_v2 --family erdm
+        --amip-repo ~/amip_v2 --family erdm
 
-    # harness self-test with random weights, no 5 GB blob needed
+    # frozen v1 family — note the v1 checkout
     python tools/checkpoint_translation/verify_v2_numerical.py \
-        --amip-v2-repo ~/amip_v2 --family erdm --synthetic
+        --source $CKPT/SI_X_AIMIP_wCO2_interp_gaussian_.../last.ckpt \
+        --amip-repo $AI_ROSSBY_AMIP_REPO --family si
+
+    # harness self-test with random weights, no multi-GB blob needed
+    python tools/checkpoint_translation/verify_v2_numerical.py \
+        --amip-repo ~/amip_v2 --family erdm --synthetic
+
+The sampler's noise type (gaussian vs spherical) does not enter into any of this:
+what is compared is the deterministic network forward, so the scheduler — and
+therefore the noise basis — is never constructed.
 """
 
 from __future__ import annotations
@@ -73,6 +87,23 @@ def _state_blocks(nsurface, ndiagnostic, nlevels, n_upper_air, nocean):
             blocks.append((name, i, i + width))
             i += width
     return blocks
+
+
+def _geom(model, backbone_cfg: dict, name: str, default):
+    """A geometry number, preferring the INSTANTIATED model over the config.
+
+    The model is authoritative when it exposes the attribute — upstream's ERDM
+    configs omit ``nlat``/``nlon`` and lean on class defaults, and trusting the
+    config there is what built a 180x360 ``static_bias`` against a 45x90 one
+    (Phase 12h bug 2). But not every backbone stores every kwarg: ``AmipDiT``
+    keeps ``c_grid_dim`` and not ``scalar_dim``, so a missing attribute must
+    fall back to the config block rather than to a default that silently
+    disables a whole conditioning stream.
+    """
+    value = getattr(model, name, None)
+    if value is None:
+        value = backbone_cfg.get(name, default)
+    return default if value is None else value
 
 
 def _strip_model_prefix(sd):
@@ -123,11 +154,56 @@ def build_upstream_ditae(cfg, repo: Path):
     return DiTAE(**backbone), backbone
 
 
+def _backbone_block(cfg) -> tuple[dict, str]:
+    """The raw backbone kwargs out of a v1/v2 hparams block.
+
+    Mirrors ``amip_si.wrapper_kwargs_from_hparams``'s precedence exactly —
+    ``model.<family>.<model.backbone>``, else a legacy ``model.<family>.model``
+    — because both sides of this comparison have to read the *same* block. This
+    is the lookup whose earlier ``.get("model", {})`` version silently returned
+    ``{}`` and built the class-default geometry (Phase 12h bug 1).
+    """
+    model = cfg["model"]
+    family_name = model["model_name"]
+    family = model[family_name]
+    backbone_key = model.get("backbone", None)
+    if backbone_key and backbone_key in family:
+        return dict(family[backbone_key]), f"model.{family_name}.{backbone_key}"
+    if "model" in family:
+        return dict(family["model"]), f"model.{family_name}.model"
+    raise KeyError(
+        f"cannot find backbone kwargs under model.{family_name} "
+        f"(has {sorted(family)}); model.backbone={backbone_key!r}"
+    )
+
+
+def build_upstream_si(cfg, repo: Path):
+    """Instantiate upstream **v1**'s ``DiT`` — the SI / SI_X / EDM backbone.
+
+    Vendored here as :class:`AmipDiT` (``dit.py`` carries the provenance:
+    ``amip`` @ ``497827e``, ``modules/models/DiT.py``). amip_v2 deleted this
+    family, so the comparison repo for ``--family si`` is the **v1** checkout,
+    not the v2 one.
+    """
+    sys.path.insert(0, str(repo))
+    from modules.models.DiT import DiT  # noqa: E402
+
+    backbone, where = _backbone_block(cfg)
+    logger.info("upstream backbone kwargs from %s (%d keys)", where, len(backbone))
+    return DiT(**backbone), backbone
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--source", default=None, help="upstream Lightning .ckpt")
-    p.add_argument("--amip-v2-repo", required=True)
-    p.add_argument("--family", choices=("erdm", "x_ddc"), required=True)
+    # Which checkout to compare against depends on the family: ERDM/x_DDC live
+    # in amip_v2, while SI/SI_X/EDM exist ONLY in v1 (v2 deleted them). Both
+    # spellings are accepted so the Phase-12h command lines and
+    # translate_v2_checkpoints_polaris.pbs keep working verbatim.
+    p.add_argument("--amip-repo", "--amip-v2-repo", dest="amip_repo", required=True,
+                   help="upstream checkout to compare against: amip_v2 for "
+                        "--family erdm/x_ddc, amip v1 (497827e) for --family si")
+    p.add_argument("--family", choices=("erdm", "x_ddc", "si"), required=True)
     p.add_argument("--tol", type=float, default=1e-5,
                    help="max |diff| accepted (fp32 forward over 20 blocks)")
     p.add_argument("--batch", type=int, default=1)
@@ -142,11 +218,12 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    repo = Path(args.amip_v2_repo).expanduser().resolve()
+    repo = Path(args.amip_repo).expanduser().resolve()
     if not (repo / "modules").is_dir():
-        raise SystemExit(f"{repo} does not look like an amip_v2 checkout")
+        raise SystemExit(f"{repo} does not look like an amip checkout")
 
     from physicsnemo.experimental.models.amip_si import (  # noqa: E402
+        AmipDiTWrapper,
         RollingDiTWrapper,
         XDDCWrapper,
     )
@@ -157,7 +234,10 @@ def main() -> int:
     else:
         if not args.source:
             raise SystemExit("--source is required unless --synthetic")
-        blob = load_lightning_ckpt(args.source, amip_repo=None)
+        # Hand the repo over: a v1 Lightning blob pickles a reference to
+        # upstream's dataset/normalizer, so unpickling needs it on sys.path.
+        # (The v2 pair happened not to, which is why ``None`` sufficed in 12h.)
+        blob = load_lightning_ckpt(args.source, amip_repo=repo)
         state = pick_source_state_dict(blob, prefer_live=False)
 
     cfg = _hparams(blob)
@@ -170,6 +250,17 @@ def main() -> int:
             blob, "RollingDiTWrapper", source_contract="v2"
         )
         ours = RollingDiTWrapper(**kwargs)
+    elif args.family == "si":
+        # SI / SI_X / EDM are the FROZEN v1 families, so the source contract is
+        # v1: group order [surface | diagnostic | upper_air] with the upper-air
+        # block variable-major. Translating this one as "fork" is the Phase-8e
+        # channel scramble, and it is shape-preserving — which is the whole
+        # reason this comparison exists.
+        theirs, backbone_cfg = build_upstream_si(cfg, repo)
+        kwargs = wrapper_kwargs_from_hparams(
+            blob, "AmipDiTWrapper", source_contract="v1"
+        )
+        ours = AmipDiTWrapper(**kwargs)
     else:
         theirs, backbone_cfg = build_upstream_ditae(cfg, repo)
         kwargs = wrapper_kwargs_from_hparams(
@@ -242,6 +333,39 @@ def main() -> int:
         with torch.no_grad():
             out_t = theirs(z, t, c_grid=c_grid, c_scalar=c_scalar)
             out_o = ours(z, t, c_grid=c_grid, c_scalar=c_scalar)
+    elif args.family == "si":
+        # Single-step signature: forward(x_noised, cond, t, c_grid, c_scalar),
+        # ``t`` shaped (b, 1) and c_grid at the MODEL grid (v1's DiT has no
+        # strided forcing conv, unlike the v2 RollingDiT).
+        # ``in_channels`` is the PatchEmbed width — x_noised and cond
+        # CONCATENATED (upstream writes ``in_channels: 302  # 151*2``), so each
+        # stream is half of it.
+        C = int(theirs.in_channels) // 2
+        nlat, nlon = int(theirs.nlat), int(theirs.nlon)
+        cg = int(_geom(theirs, backbone_cfg, "c_grid_dim", 0))
+        # NOT getattr alone: AmipDiT keeps c_grid_dim as an attribute but NOT
+        # scalar_dim, so a bare getattr default silently passed c_scalar=None
+        # and the forward assembled 4 channels short of its own PatchEmbed.
+        sd = int(_geom(theirs, backbone_cfg, "scalar_dim", 0))
+        # Same asymmetry as the v2 RollingDiT: with a strided forcing conv the
+        # c_grid stream arrives at ``down x`` the state grid and is reduced onto
+        # it. Upstream's SI recipe pre-downsamples x_noised+cond to that state
+        # grid; ours instead runs c_grid_downsample=1 with both streams native
+        # (see AmipDiTWrapper). The checkpoint's own value decides which
+        # geometry these weights were trained in, so read it, don't assume.
+        down = int(backbone_cfg.get("c_grid_downsample", 1) or 1)
+        logger.info(
+            "si inputs: C=%d (x2 concat) grid=%dx%d c_grid=%d@%dx%d scalar=%d",
+            C, nlat, nlon, cg, nlat * down, nlon * down, sd,
+        )
+        x_noised = torch.randn(b, C, nlat, nlon)
+        cond = torch.randn(b, C, nlat, nlon)
+        t = torch.rand(b, 1)
+        c_grid = torch.randn(b, cg, nlat * down, nlon * down) if cg else None
+        c_scalar = torch.randn(b, sd) if sd else None
+        with torch.no_grad():
+            out_t = theirs(x_noised, cond, t, c_grid=c_grid, c_scalar=c_scalar)
+            out_o = ours(x_noised, cond, t, c_grid=c_grid, c_scalar=c_scalar)
     else:
         C = int(theirs.out_channels)
         nlat, nlon = int(theirs.nlat), int(theirs.nlon)
@@ -356,6 +480,63 @@ def _synthetic_blob(family: str) -> dict:
                         ],
                         "sst_anomaly_channel": "append",
                         "scalar_forcing": "global_mean_sst",
+                    },
+                }
+            }
+        }
+    if family == "si":
+        # SI_X with CO2 routed out of the grid stream, which is the shape of the
+        # real wCO2 checkpoints: the data lists 5 varying boundaries while the
+        # backbone says c_grid_dim=6 (2 constant + 4 varying), because upstream
+        # sends the 5th through the scalar path. The translator's reconciliation
+        # is what has to notice that, so the synthetic blob exercises it.
+        return {
+            "hyper_parameters": {
+                "config": {
+                    "model": {
+                        "model_name": "SI_X",
+                        "backbone": "DiT",
+                        "SI_X": {
+                            "DiT": {
+                                # DOUBLED, as every real SI config is
+                                # (upstream writes ``in_channels: 302  # 151*2``):
+                                # AmipDiT.forward concatenates [x_noised, cond],
+                                # so in_channels is the PatchEmbed width, not the
+                                # state width. out_channels is the state width.
+                                "in_channels": 2 * n_state,
+                                "out_channels": n_state,
+                                "c_grid_dim": 6,
+                                "scalar_dim": 3,
+                                "dim": 64,
+                                "num_heads": 2,
+                                "num_blocks": 1,
+                                "patch_size": 2,
+                                "nlat": 16,
+                                "nlon": 32,
+                                # Stated explicitly, as a real config does.
+                                # It has to be: upstream's AmipDiT defaults it
+                                # to 4 while our WRAPPER defaults it to 1 (our
+                                # recipe keeps c_grid at native resolution
+                                # instead of upstream's pre-downsample of
+                                # x_noised+cond). The checkpoint's own value
+                                # flows through and settles it — but a config
+                                # that OMITS it would build a 4x4 forcing conv
+                                # upstream and a 1x1 here.
+                                "c_grid_downsample": 4,
+                            },
+                            "scheduler": {"num_steps": 10},
+                        },
+                    },
+                    "data": {
+                        **common_data,
+                        "constant_boundary_variables": ["z", "lsm"],
+                        "varying_boundary_variables": [
+                            "sea_surface_temperature",
+                            "sea_ice_cover",
+                            "DSWRFtoa",
+                            "DSWRFtoa_24h_lead",
+                            "global_mean_co2",
+                        ],
                     },
                 }
             }

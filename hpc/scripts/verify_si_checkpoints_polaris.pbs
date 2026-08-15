@@ -1,0 +1,118 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Numerical equivalence for the two real v1 SI-family checkpoints (2026-08-14).
+#
+#   SI-V   SI_AIMIP_interp_gaussian_v_42_2026-06-02T20-10-55/last.ckpt          11.3 GB
+#   SI-X   SI_X_AIMIP_wCO2_interp_gaussian_42_2026-05-30T08-32-59/model_epoch=19.ckpt  11.3 GB
+#
+# (SI-X has no ``last.ckpt`` — only model_epoch=16..19 — so the highest epoch is
+# the one under test.)
+#
+# Both are 1.2B-param coarse-state models, and their own config.yml says so:
+#     in_channels 302 (= 151 x 2, x_noised + cond concatenated)
+#     out_channels 151      nlat/nlon 45 x 90      c_grid_downsample 4
+#     c_grid_dim 5          scalar_dim 2 (SI-V) / 3 (SI-X, wCO2)
+# i.e. a 45x90 state with 180x360 forcings reduced by the backbone's stride-4
+# conv — architecturally the same shape as the v2 ERDM, and NOT what
+# conf/model/amip_si.yaml describes (161 channels on a 180x360 grid). Hence
+# auto-derive: no --model-config anywhere below.
+#
+# Compute node, not a login node: each blob carries EMA weights alongside the
+# live ones plus Muon optimizer state, so peak host memory is several times the
+# 4.8 GB parameter footprint. CPU-only work.
+#
+# Two things are asserted, in order, and they are not the same thing:
+#   1. --strict translation: every source key lands with a matching shape.
+#   2. numerical equivalence against upstream v1's own DiT, same weights, same
+#      seeded inputs. Key parity CANNOT catch a channel permutation, and the v1
+#      contract is exactly where that risk lives (upstream v1 packs
+#      [surface | diagnostic | upper_air] variable-major; this fork's historical
+#      "fork" order does not).
+#
+# Submit:  qsub hpc/scripts/verify_si_checkpoints_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-verify-si
+
+set -euo pipefail
+
+MEMBERS=/eagle/lighthouse-uchicago/members/awikner
+REPO=$MEMBERS/physicsnemo
+CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
+OUT=$CKPT/translated
+# Upstream v1 at the VENDORED commit. Comparing against a different commit would
+# conflate upstream drift with translation error, so this is a git-archive of
+# 497827e exactly (physicsnemo/experimental/models/amip_si/dit.py's provenance).
+V1=$MEMBERS/amip-497827e
+cd "$REPO"
+
+export OMP_NUM_THREADS=1
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+mkdir -p "$OUT"
+
+SI_V=$CKPT/SI_v_42_2026-06-02T20-10-55/last.ckpt
+SI_X="$CKPT/SI_X_wCO2_42_2026-05-30T08-32-59/model_epoch=19.ckpt"
+
+# Unpack the upstream archive on first use. ALCF's proxy blocks `git clone` from
+# GitHub, which is why this arrives as a tarball over Globus rather than a clone.
+if [[ ! -d "$V1/modules" ]]; then
+    echo "=== unpacking upstream v1 (497827e) ==="
+    mkdir -p "$MEMBERS"
+    tar xzf "$CKPT/upstream/amip-v1-497827e.tar.gz" -C "$MEMBERS"
+fi
+[[ -f "$V1/modules/models/DiT.py" ]] || { echo "ERROR: $V1 has no modules/models/DiT.py"; exit 1; }
+
+for f in "$SI_V" "$SI_X"; do
+    [[ -f "$f" ]] || { echo "ERROR: $f missing"; exit 1; }
+done
+
+free -g | head -2
+echo
+
+run_one () {
+    local tag="$1" src="$2" out="$3"
+    echo "############################################################"
+    echo "### $tag"
+    echo "############################################################"
+    # The run's own config.yml travelled with the checkpoint; echoing the
+    # geometry into the job log is what makes the numbers below auditable later.
+    echo "--- geometry the run's config.yml states ---"
+    grep -hE '^ +(in_channels|out_channels|nlat|nlon|c_grid_dim|c_grid_downsample|scalar_dim|patch_size|dim|num_blocks|num_ca_blocks):' \
+        "$(dirname "$src")/config.yml" 2>/dev/null || echo "(no sibling config.yml)"
+    echo
+    echo "=== 1/2: translate (--source-contract v1, --strict, auto-derive) ==="
+    .venv/bin/python tools/checkpoint_translation/amip_si.py \
+        --source "$src" \
+        --source-contract v1 \
+        --target-class AmipDiTWrapper \
+        --amip-repo "$V1" \
+        --output "$out" \
+        --strict
+    echo
+    echo "=== 2/2: numerical equivalence vs upstream v1 DiT ==="
+    .venv/bin/python tools/checkpoint_translation/verify_v2_numerical.py \
+        --source "$src" \
+        --amip-repo "$V1" \
+        --family si \
+        --tol 0
+    echo
+}
+
+# --tol 0 above is deliberate: the v2 pair came out at exactly 0.0000e+00, so a
+# faithful port has no reason to differ by even one ulp. Anything nonzero is a
+# finding, not a rounding artifact to be absorbed by a tolerance.
+run_one "SI-V  (model_name SI,   scalar_dim 2)" "$SI_V" "$OUT/si_v_42_2026-06-02T20-10-55.mdlus"
+run_one "SI-X  (model_name SI_X, scalar_dim 3, wCO2)" "$SI_X" "$OUT/si_x_wco2_42_2026-05-30T08-32-59.mdlus"
+
+echo "=== translated artifacts ==="
+ls -la "$OUT"
+echo
+echo "=== SI verification complete ==="

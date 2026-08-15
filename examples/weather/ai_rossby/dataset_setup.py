@@ -70,6 +70,67 @@ def _cfg_list(node, key: str) -> list:
     return list(value) if value else []
 
 
+class VaryingBoundarySubset:
+    """Select the model's varying-boundary channels out of the store's set.
+
+    Shared version of the slice ``inference.py`` and ``train.py`` each carried
+    privately (2026-08-14). Chains **first**, ahead of the NaN-fill and the
+    normalizer, because both of those are sized from the MODEL's list.
+
+    The case that forced this into the shared path: the real v1 ``SI`` (non-CO2)
+    checkpoint lists 3 varying channels while ``amip_dailyavg_coarse`` serves 4
+    — upstream's own run simply never fed ``global_mean_co2``. Without a slice,
+    ``NanFillTransform`` indexes a 4-channel tensor against a 3-entry fill
+    vector and dies with a bare ``IndexError``. Note the dropped channel is the
+    store's FIRST, so "take the leading N" would silently mis-assign every
+    forcing; the indices have to come from name lookup.
+    """
+
+    def __init__(self, indices: Sequence[int]) -> None:
+        import torch
+
+        self._idx = torch.tensor(list(indices), dtype=torch.long)
+
+    def __call__(self, sample: dict) -> dict:
+        import torch
+
+        out = dict(sample)
+        for key in ("varying_boundary", "varying_boundary_seq", "varying_boundary_next_seq"):
+            v = out.get(key)
+            if v is not None and torch.is_tensor(v):
+                out[key] = v.index_select(v.ndim - 3, self._idx)
+        return out
+
+
+def resolve_varying_subset(
+    cfg: DictConfig, store_varying: Sequence[str] | None
+) -> Optional[list[int]]:
+    """Indices of the model's varying channels within the store's, or ``None``.
+
+    ``None`` means "no slice needed" — the lists match, or there is nothing to
+    compare against. A model list that is **not** a subset is left alone
+    deliberately: that is a genuine misconfiguration, and the width checks
+    downstream (``ForcingPipeline.assert_matches``) name it better than a
+    silent reordering would.
+    """
+    model_varying = [str(v) for v in _cfg_list(cfg.model, "varying_boundary_variables")]
+    store = [str(v) for v in (store_varying or [])]
+    if not model_varying or not store or model_varying == store:
+        return None
+    if not set(model_varying).issubset(set(store)):
+        logger.warning(
+            f"model varying_boundary_variables {model_varying} is not a subset of "
+            f"the store's {store}; leaving the stream unsliced"
+        )
+        return None
+    indices = [store.index(v) for v in model_varying]
+    logger.info(
+        f"varying-boundary subset active: model uses {model_varying} of {store} "
+        f"(indices={indices})"
+    )
+    return indices
+
+
 def build_nan_fill(cfg: DictConfig, *, strict: bool = False):
     """The one :class:`NanFillTransform` definition for every recipe.
 
@@ -341,8 +402,22 @@ def build_forcing_pipeline(
     normalize_in_dataset: bool = True,
     extra_transforms: Sequence[Callable] = (),
     nan_fill_strict: bool = False,
+    store_varying_variables: Sequence[str] | None = None,
 ) -> ForcingPipeline:
-    """Build the recipe's :class:`ForcingPipeline` (see module docstring)."""
+    """Build the recipe's :class:`ForcingPipeline` (see module docstring).
+
+    ``store_varying_variables`` is the store's own varying-boundary list. Pass
+    it whenever the dataset is available (it is, at every call site — the
+    pipeline is built after the dataset): when the model consumes a strict
+    subset, a :class:`VaryingBoundarySubset` slice is prepended so the NaN-fill
+    and normalizer — both sized from the model's list — see the right width.
+    Callers that pass it must also align the normalizer to the model's list
+    (``ClimateNormalizer.from_dataset(..., varying_boundary_variables=...)``),
+    since the slice runs before it.
+    """
+    subset = resolve_varying_subset(cfg, store_varying_variables)
+    if subset is not None:
+        extra_transforms = (VaryingBoundarySubset(subset), *tuple(extra_transforms))
     # Phase 12g: the SST rescaler runs inside the assembler, before the CO2 pop
     # (upstream's step-2 ordering), and is a no-op unless the dataset config asks
     # for the anomaly channel or the global_mean_sst scalar.

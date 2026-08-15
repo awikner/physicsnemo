@@ -255,10 +255,22 @@ class ForcingAssembler:
     # ------------------------------------------------------------------ #
 
     def _scalar_of(self, channel: torch.Tensor, name: str) -> torch.Tensor:
-        """Collapse one routed channel's map to a scalar, checking uniformity."""
-        flat = channel.reshape(-1)
+        """Collapse one routed channel's MAP to a scalar, checking uniformity.
+
+        Reduces over the spatial axes only, preserving any leading batch/time
+        dims: ``(..., H, W) -> (...)``. Flattening everything (as this did until
+        2026-08-14) worked for the per-sample dataset transform and broke for
+        every batched caller two ways — a rank mismatch in the calendar concat
+        below (``cat`` of ``(B, 2)`` and ``(1,)``), and, had the ranks lined up,
+        one CO2 value averaged across the whole batch.
+        """
+        flat = channel.reshape(*channel.shape[:-2], -1)
         if self.strict or logger.isEnabledFor(logging.WARNING):
-            spread = float(flat.max() - flat.min())
+            # Per-sample spread, then the worst of them: a batch where one
+            # sample is non-uniform must not be excused by the others.
+            spread = float(
+                (flat.max(dim=-1).values - flat.min(dim=-1).values).max()
+            )
             if spread > self.uniform_atol:
                 msg = (
                     f"scalar-routed boundary channel {name!r} is not spatially "
@@ -269,7 +281,7 @@ class ForcingAssembler:
                 if self.strict:
                     raise ValueError(msg)
                 logger.warning("%s — reducing anyway (reduce=%s)", msg, self.reduce)
-        return flat.mean() if self.reduce == "mean" else flat[0]
+        return flat.mean(dim=-1) if self.reduce == "mean" else flat[..., 0]
 
     def __call__(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if self.sst_rescaler is not None:
@@ -312,10 +324,14 @@ class ForcingAssembler:
         ]
         keep = torch.as_tensor(self._keep_idx, device=vb.device)
         out["varying_boundary"] = vb.index_select(-3, keep)
+        # ``dim=-1`` on the stack, not the default 0: each scalar now carries the
+        # leading batch/time dims, so the routed channels have to become the
+        # LAST axis to line up with the calendar's. Unbatched (0-dim scalars)
+        # this is identical to the old ``stack(scalars)``.
         out["calendar"] = torch.cat(
             [
                 cal,
-                torch.stack(scalars).to(dtype=cal.dtype, device=cal.device),
+                torch.stack(scalars, dim=-1).to(dtype=cal.dtype, device=cal.device),
             ],
             dim=-1,
         )

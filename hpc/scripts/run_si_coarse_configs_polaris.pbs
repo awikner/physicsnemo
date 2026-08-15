@@ -1,0 +1,160 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Do the new SI configs actually describe the real v1 checkpoints (2026-08-14)?
+#
+# verify_si_checkpoints_polaris.pbs already showed the WEIGHTS translate bitwise
+# (max |diff| 0.0000e+00 vs upstream's own DiT on random tensors). That leaves the
+# other half: does our CONFIG + LOADER hand the model what upstream's did? The
+# checkpoints are 45x90-state models with 180x360 forcings
+# (``c_grid_downsample: 4``), a pairing no shipped SI config described until
+#   conf/model/amip_si_v_coarse.yaml        (SI,   scalar_dim 2)
+#   conf/model/amip_si_x_wco2_coarse.yaml   (SI_X, scalar_dim 3, CO2 routed)
+#
+# Two stages per model:
+#   A. verify_si_realdata.py — build the wrapper FROM THE CONFIG, assert its
+#      channel contract against the translated artifact, load strictly, then feed
+#      a real batch out of our own pipeline to both our wrapper and upstream's
+#      DiT and compare per channel block.
+#   B. inference.py — an actual short rollout through the recipe, proving the
+#      config composes with a dataset and a sampler end to end.
+#
+# ON THE DATA: these were trained on the 6-HOURLY AMIP archive, not on daily
+# averages (their config.yml says data_dir .../AMIP/h5 and
+# normalize_mean_interp.nc). Running them against amip_dailyavg_coarse is an
+# IMPLEMENTATION A/B — same inputs, same outputs? — and NOT a skill test. The
+# normalization differs, so stage B's forecast values are not expected to be
+# meteorologically meaningful; what stage B proves is that the path runs.
+#
+# Submit:  qsub hpc/scripts/run_si_coarse_configs_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-si-coarse
+
+# NOT `set -e` for the stages themselves (2026-08-14): the first run aborted at
+# SI-V stage A and so never told us whether SI-X or either rollout worked — one
+# gap hid three results, and each stage costs an 11 GB checkpoint load to retry.
+# Stages record their status and the job fails at the END if any did.
+set -uo pipefail
+FAILED=()
+
+MEMBERS=/eagle/lighthouse-uchicago/members/awikner
+REPO=$MEMBERS/physicsnemo
+CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
+V1=$MEMBERS/amip-497827e
+cd "$REPO"
+
+export OMP_NUM_THREADS=1
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+# The dataset configs resolve their roots from this; it is NOT set in the login
+# environment, and the oc.env fallback is a Derecho path that does not exist here.
+export AI_ROSSBY_DATA=/eagle/lighthouse-uchicago/physicsnemo-zarr
+
+TRANS=$CKPT/translated
+SI_V_CKPT=$CKPT/SI_v_42_2026-06-02T20-10-55/last.ckpt
+SI_X_CKPT="$CKPT/SI_X_wCO2_42_2026-05-30T08-32-59/model_epoch=19.ckpt"
+SI_V_MDLUS=$TRANS/si_v_42_2026-06-02T20-10-55.mdlus
+SI_X_MDLUS=$TRANS/si_x_wco2_42_2026-05-30T08-32-59.mdlus
+
+for f in "$SI_V_CKPT" "$SI_X_CKPT" "$SI_V_MDLUS" "$SI_X_MDLUS"; do
+    [[ -f "$f" ]] || { echo "ERROR: $f missing"; exit 1; }
+done
+[[ -d "$V1/modules" ]] || { echo "ERROR: upstream v1 not unpacked at $V1"; exit 1; }
+
+free -g | head -2
+echo
+
+# ---------------------------------------------------------------------------
+# Re-translate SI-X (2026-08-14). Its first artifact was written before the
+# translator learned to express a scalar-routed channel as ROUTED rather than
+# DELETED, so its stored contract says 3 varying channels where the config
+# correctly says 4-with-CO2-routed. Identical geometry either way, but the
+# deleted form is not runnable: nothing routed means a 2-wide calendar row
+# against a model wanting 3. The run-time contract guard flags the difference,
+# which is how this was caught.
+#
+# SI-V needs no re-translation: its config lists exactly the gridded channels,
+# so the reconciliation never fires.
+echo "=== re-translating SI-X with the routing-aware translator ==="
+if .venv/bin/python tools/checkpoint_translation/amip_si.py \
+    --source "$SI_X_CKPT" \
+    --source-contract v1 \
+    --target-class AmipDiTWrapper \
+    --amip-repo "$V1" \
+    --output "$SI_X_MDLUS" \
+    --strict
+then echo "RETRANSLATE SI-X: PASS"; else echo "RETRANSLATE SI-X: FAIL"; FAILED+=("T:SI-X"); fi
+echo
+
+# ---------------------------------------------------------------------------
+# Stage A — real-data A/B, ours vs upstream
+# ---------------------------------------------------------------------------
+stage_a () {
+    local tag="$1" cfgname="$2" mdlus="$3" src="$4"
+    echo "############################################################"
+    echo "### A: $tag — real batch, ours vs upstream"
+    echo "############################################################"
+    if .venv/bin/python tools/checkpoint_translation/verify_si_realdata.py \
+        --model "$cfgname" \
+        --dataset amip_dailyavg_coarse \
+        --translated "$mdlus" \
+        --source "$src" \
+        --amip-repo "$V1" \
+        --index 8 \
+        --tol 0
+    then echo "STAGE A $tag: PASS"; else echo "STAGE A $tag: FAIL"; FAILED+=("A:$tag"); fi
+    echo
+}
+
+# ---------------------------------------------------------------------------
+# Stage B — an actual recipe rollout on the new config
+# ---------------------------------------------------------------------------
+stage_b () {
+    local tag="$1" cfgname="$2" mdlus="$3" lossname="$4" samplername="$5"
+    local dir="$MEMBERS/si-coarse-run/$cfgname"
+    echo "############################################################"
+    echo "### B: $tag — inference.py rollout (loss=$lossname sampler=$samplername)"
+    echo "############################################################"
+    rm -rf "$dir"; mkdir -p "$dir/ckpt" "$dir/out"
+    # load_checkpoint looks up <WrapperClass>.<mp_rank>.<index>.mdlus in a
+    # directory, so the translated artifact is linked under that name.
+    ln -sf "$mdlus" "$dir/ckpt/AmipDiTWrapper.0.0.mdlus"
+    if .venv/bin/python examples/weather/ai_rossby/inference.py \
+        model="$cfgname" \
+        dataset=amip_dailyavg_coarse \
+        loss="$lossname" \
+        sampler="$samplername" \
+        +inference.checkpoint_dir="$dir/ckpt" \
+        +inference.output_dir="$dir/out" \
+        +inference.max_step=2 \
+        '+inference.ic_start=[8]' \
+        +inference.sampler_num_steps=2 \
+        +inference.output_format=netcdf \
+        wandb.enabled=False
+    then echo "STAGE B $tag: PASS"; else echo "STAGE B $tag: FAIL"; FAILED+=("B:$tag"); fi
+    echo "--- output ---"
+    ls -la "$dir/out" 2>/dev/null || echo "(none)"
+    echo
+}
+
+stage_a "SI-V"  amip_si_v_coarse      "$SI_V_MDLUS" "$SI_V_CKPT"
+stage_a "SI-X"  amip_si_x_wco2_coarse "$SI_X_MDLUS" "$SI_X_CKPT"
+
+stage_b "SI-V"  amip_si_v_coarse      "$SI_V_MDLUS" si   si
+# SI_X's DynamicInterpolant returns (y, model_last_pred); this is the first
+# exercise of the 2026-08-14 tuple unwrap on real weights.
+stage_b "SI-X"  amip_si_x_wco2_coarse "$SI_X_MDLUS" si_x si_x
+
+echo "############################################################"
+if ((${#FAILED[@]})); then
+    echo "### SI coarse-config run: ${#FAILED[@]} stage(s) FAILED: ${FAILED[*]}"
+    exit 1
+fi
+echo "### SI coarse-config run: all stages PASSED"

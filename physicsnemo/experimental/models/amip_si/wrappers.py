@@ -267,6 +267,7 @@ class AmipDiTWrapper(_PNeMoModule):
         diagnostic_variables: Sequence[str] = (),
         constant_boundary_variables: Sequence[str] = (),
         varying_boundary_variables: Sequence[str] = (),
+        scalar_routed_boundary_variables: Sequence[str] = (),
         levels: Sequence[float],
         horizontal_resolution: Sequence[int],
         scalar_dim: int = 2,
@@ -292,7 +293,35 @@ class AmipDiTWrapper(_PNeMoModule):
         self.num_diagnostic = len(self.diagnostic_variables)
         self.num_levels = len(self.levels)
         self.num_constant_boundary = len(self.constant_boundary_variables)
-        self.num_varying_boundary = len(self.varying_boundary_variables)
+        # Channels the ForcingAssembler pops out of the gridded stream and
+        # appends to the calendar row. Same contract as RollingDiTWrapper's
+        # (added 2026-08-14): a SUBSET of ``varying_boundary_variables`` — the
+        # stored order, which the NaN-fill still needs in full — subtracted from
+        # ``c_grid_dim`` so the backbone is sized for what actually arrives.
+        #
+        # Required by the real v1 ``wCO2`` checkpoints: their config lists 4
+        # varying channels while the backbone's ``c_grid_embed`` is
+        # ``Conv2d(5 -> N)`` = 2 constant + 3 gridded, because
+        # ``global_mean_co2`` rides the calendar row instead (``scalar_dim: 3``).
+        # Without this the wrapper sizes c_grid_dim at 6 and the checkpoint
+        # cannot load. Additive: an empty list reproduces the previous
+        # arithmetic exactly, so the frozen configs are untouched.
+        self.scalar_routed_boundary_variables = list(
+            scalar_routed_boundary_variables
+        )
+        unknown = [
+            v
+            for v in self.scalar_routed_boundary_variables
+            if v not in self.varying_boundary_variables
+        ]
+        if unknown:
+            raise ValueError(
+                f"scalar_routed_boundary_variables {unknown} are not in "
+                f"varying_boundary_variables {self.varying_boundary_variables}"
+            )
+        self.num_varying_boundary = len(self.varying_boundary_variables) - len(
+            self.scalar_routed_boundary_variables
+        )
 
         self.in_channels = (
             self.num_surface
@@ -300,6 +329,20 @@ class AmipDiTWrapper(_PNeMoModule):
             + self.num_diagnostic
         )
         self.c_grid_dim = self.num_constant_boundary + self.num_varying_boundary
+
+        if self.scalar_routed_boundary_variables:
+            # Every calendar encoding this datapipe emits is width 2, so a
+            # routed channel has to be paid for with a matching scalar_dim.
+            # Raising here keeps the model config and the assembler — which read
+            # the same two keys — from drifting apart.
+            expected = 2 + len(self.scalar_routed_boundary_variables)
+            if self.scalar_dim != expected:
+                raise ValueError(
+                    f"scalar_dim={self.scalar_dim} does not match "
+                    f"2 (calendar) + {len(self.scalar_routed_boundary_variables)} "
+                    f"routed boundary channel(s) = {expected}; set "
+                    f"scalar_dim: {expected} in the model config"
+                )
 
         nlat, nlon = self.horizontal_resolution
 

@@ -228,6 +228,8 @@ restates a channel count) and was read back off the instantiated wrapper:
 |---|---|---|---|---|---|---|---|---|---|---|
 | `amip_si` | `AmipDiTWrapper` | `fork` | `si` | `si` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
 | `amip_si_x` | `AmipDiTWrapper` | `fork` | `si_x` | `si_x` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
+| `amip_si_v_coarse` | `AmipDiTWrapper` | `v1`⁴ | `si` | `si` | `amip_dailyavg_coarse` | **45×90** | 151 | 5 | 2 | — |
+| `amip_si_x_wco2_coarse` | `AmipDiTWrapper` | `v1`⁴ | `si_x` | `si_x` | `amip_dailyavg_coarse` | **45×90** | 151 | 5 | 3⁵ | — |
 | `amip_erdm` | `ERDMWrapper` | `fork` | `erdm` | `erdm` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
 | `amip_rfm` | `RollingDiTWrapper` | `fork` | `rfm` | `rfm` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
 | `amip_x_ddc` | `XDDCWrapper` (`XDDCUNet`) | `v1`¹ | — (upstream)³ | —³ | `amip_dailyavg` | 180×360 | 151 | — | — | — |
@@ -250,6 +252,20 @@ variant.
 `train_diffusion.py` or `inference.py` (§6.15). Its listed dataset/grid is the
 resolution it operates at, not a store it reads — its conditioning is always the
 forecaster's own upsampled prediction.
+⁴ these two describe the **real v1 SI checkpoints** (2026-08-14) and are the only
+SI configs that do. Their weights are 1.25B-param *coarse-state* models — a 45×90
+backbone grid with 180×360 forcings reduced by `c_grid_downsample: 4`, the same
+shape as the v2 ERDM — where `amip_si`/`amip_si_x` describe an earlier, different
+model (16 surface variables, 161 channels, 180×360 backbone). Both verified
+bitwise against upstream v1's own `DiT`, on random inputs *and* on a real
+daily-average batch through our loader (`max │diff│ = 0.0000e+00`). Pair with
+`dataset=amip_dailyavg_coarse`, never `amip_1981`, which serves a
+native-resolution state. Note these were trained on the **6-hourly** archive, so
+running them on daily averages is an implementation A/B, not a skill test.
+⁵ `scalar_dim` 3 because `global_mean_co2` is **routed** out of the gridded
+stream into the calendar row (`scalar_routed_boundary_variables`), keeping
+`c_grid_dim` at 5 for a 4-entry varying list. The checkpoint's `c_grid_embed` is
+`Conv2d(5 → 192)`, so listing CO₂ as a fourth gridded channel would not load.
 
 `amip_combined` is documentation, not a buildable model config: `CombinedModule`
 takes already-instantiated sub-modules, so it is assembled in Python (§6.12).
@@ -351,6 +367,26 @@ one, because both size the same temporal tables.
 These commands train **from scratch**, where the `fork` layout is self-consistent
 and fine. Anything that starts from real upstream v1 weights — a warm start, an
 evaluation, a rollout — additionally needs `++model.channel_layout=v1` (§6.2).
+
+**If you have the real v1 SI checkpoints, use `amip_si_v_coarse` /
+`amip_si_x_wco2_coarse` instead** (§6.3 footnote 4). `amip_si` and `amip_si_x`
+describe a different, earlier model, and pointing them at those weights loads a
+161-channel 180×360 architecture where the checkpoint is 151 channels on 45×90.
+Those two configs are also `v1` already, so they need no layout override:
+
+```bash
+python inference.py model=amip_si_v_coarse dataset=amip_dailyavg_coarse loss=si \
+    +inference.checkpoint_dir=./ckpt +inference.output_dir=./out \
+    +inference.max_step=2 '+inference.ic_start=[8]'
+```
+
+**The store may serve more forcings than a model consumes.** SI-V lists 3 varying
+channels where `amip_dailyavg_coarse` has 4 — upstream's run never fed
+`global_mean_co2` — so the pipeline slices the stream down to the model's list
+before the NaN-fill and aligns the normalizer to the same list. It logs
+`varying-boundary subset active: … (indices=[1, 2, 3])`. The indices come from
+name lookup, which matters here: the dropped channel is the store's *first*, so
+taking the leading N would mis-assign every forcing.
 
 ### 6.6 Train — v2 ERDM
 
@@ -624,6 +660,36 @@ both the same weights, compares the **forward**, and localises any mismatch per
 channel block. `--synthetic` self-tests the harness with no checkpoint. Both real
 v2 checkpoints come out at `max │diff│ = 0.0000e+00`.
 
+`--family si` does the same for the frozen v1 single-step families against
+upstream **v1**'s own `DiT` — note the repo differs, since amip_v2 deleted them
+(`--amip-repo` names either; `--amip-v2-repo` still works):
+
+```bash
+python tools/checkpoint_translation/verify_v2_numerical.py \
+    --source .../SI_X_AIMIP_wCO2_.../model_epoch=19.ckpt \
+    --amip-repo $AI_ROSSBY_AMIP_REPO --family si --tol 0
+```
+
+**One step further — the same comparison on a real batch.** The above uses
+`torch.randn`, which isolates the translation but says nothing about whether your
+*config and loader* hand the model what upstream's did. That is a separate
+failure mode, and for the SI checkpoints it was the live one (a 45×90 state with
+180×360 forcings, which no shipped SI config described):
+
+```bash
+python tools/checkpoint_translation/verify_si_realdata.py \
+    --model amip_si_v_coarse --dataset amip_dailyavg_coarse \
+    --translated $CKPT/translated/si_v_....mdlus \
+    --source $CKPT/SI_v_.../last.ckpt --amip-repo $AI_ROSSBY_AMIP_REPO
+```
+
+It builds the wrapper **from the model config** (not `Module.from_checkpoint`,
+which would rebuild from the artifact's own args and prove nothing about the
+config), asserts its channel contract against the artifact, loads strictly, pulls
+a real sample through the recipe's own fill → normalize → route pipeline, and
+checks that `c_grid` arrives at exactly `c_grid_downsample ×` the state grid.
+Both SI checkpoints pass at `0.0000e+00` on real daily-average data.
+
 **Then run it.** The translator writes a bare `Module.save()` artifact, but
 `load_checkpoint` looks up `<WrapperClass>.<mp_rank>.<index>.mdlus` inside a
 directory. So give it that name:
@@ -760,6 +826,8 @@ Working launchers, in the order you'd use them:
 | `hpc/scripts/extract_amip_boundary_stampede3.sbatch` | the 1° boundary-only stores |
 | `hpc/scripts/make_sst_climatology_polaris.pbs` | the SST climatology `.npz` |
 | `hpc/scripts/translate_v2_checkpoints_polaris.pbs` | translate **and** numerically verify both real v2 checkpoints |
+| `hpc/scripts/verify_si_checkpoints_polaris.pbs` | same for the two real **v1 SI** checkpoints (needs the v1 checkout) |
+| `hpc/scripts/run_si_coarse_configs_polaris.pbs` | the SI configs end to end: real-data A/B vs upstream + an `inference.py` rollout |
 | `hpc/scripts/smoke_amip_ocean_polaris.pbs` | v2 ocean + warm start + DDP, on real data, with assertions on the log |
 | `hpc/scripts/smoke_amip_v2_layout_2xA40.sbatch` | v2 channel layout under DDP |
 | `hpc/scripts/smoke_amip_diffusion_2xA40.sbatch` | v1 SI wiring smoke (1 mini-epoch) |

@@ -237,3 +237,101 @@ def test_smoothing_knobs_reach_the_nan_fill():
         7,
         3,
     )
+
+
+# ---------------------------------------------------------------------------
+# Varying-boundary subset (2026-08-14). The store may serve more channels than
+# the model consumes: the real v1 SI (non-CO2) checkpoint lists 3 where
+# amip_dailyavg_coarse has 4, because upstream's run never fed global_mean_co2.
+# ---------------------------------------------------------------------------
+
+
+def _subset_cfg(model_varying):
+    cfg = _cfg()
+    cfg.model.varying_boundary_variables = list(model_varying)
+    cfg.model.scalar_routed_boundary_variables = [
+        v for v in cfg.model.scalar_routed_boundary_variables if v in model_varying
+    ]
+    return cfg
+
+
+def test_no_subset_when_the_lists_match():
+    from dataset_setup import resolve_varying_subset
+
+    assert resolve_varying_subset(_cfg(), ["global_mean_co2", "sst"]) is None
+
+
+def test_no_subset_without_a_store_list():
+    from dataset_setup import resolve_varying_subset
+
+    assert resolve_varying_subset(_cfg(), None) is None
+    assert resolve_varying_subset(_cfg(), []) is None
+
+
+def test_indices_come_from_names_not_position():
+    """The dropped channel is the store's FIRST, which is the whole point.
+
+    ``global_mean_co2`` leads the store's list, so "take the leading N" would
+    hand every forcing to the wrong slot — shape-correct and completely wrong.
+    """
+    from dataset_setup import resolve_varying_subset
+
+    store = ["global_mean_co2", "tisr", "sst", "ice"]
+    assert resolve_varying_subset(_subset_cfg(["tisr", "sst", "ice"]), store) == [1, 2, 3]
+    # Order follows the MODEL's list, not the store's.
+    assert resolve_varying_subset(_subset_cfg(["ice", "tisr"]), store) == [3, 1]
+
+
+def test_a_non_subset_is_left_alone(caplog):
+    """A genuine misconfiguration; the width checks name it better."""
+    from dataset_setup import resolve_varying_subset
+
+    with caplog.at_level("WARNING"):
+        got = resolve_varying_subset(_subset_cfg(["sst", "not_in_store"]),
+                                     ["global_mean_co2", "sst"])
+    assert got is None
+    assert "not a subset" in caplog.text
+
+
+def test_the_slice_runs_before_the_fill_and_narrows_the_stream():
+    """End to end through the pipeline: 4 channels in, the model's 3 out."""
+    store = ["global_mean_co2", "tisr", "sst", "ice"]
+    cfg = _subset_cfg(["tisr", "sst", "ice"])
+    cfg.dataset.nan_fill_values = {"sst": 270.0}
+    pipeline = build_forcing_pipeline(
+        cfg, normalizer=None, store_varying_variables=store
+    )
+    sample = {
+        "surface_in": torch.zeros(1, _H, _W),
+        "constant_boundary": torch.zeros(1, _H, _W),
+        # Channel c is filled with value c, so the slice is checkable by value.
+        "varying_boundary": torch.arange(4, dtype=torch.float32).view(4, 1, 1)
+        * torch.ones(4, _H, _W),
+        "calendar": torch.zeros(2),
+    }
+    out = pipeline.dataset_transform(sample)
+    vb = out["varying_boundary"]
+    assert vb.shape[-3] == 3, vb.shape
+    # Store channels 1,2,3 — i.e. CO2 (value 0) is gone.
+    assert [float(vb[c].flatten()[0]) for c in range(3)] == [1.0, 2.0, 3.0]
+
+
+def test_the_fill_would_have_died_without_the_slice():
+    """Pin the failure the slice prevents, so its absence is not silent.
+
+    NanFillTransform is sized from the MODEL's list; handed the store's wider
+    tensor it runs off the end of its own fill vector. Which exception depends
+    on which internal branch trips first — an ``IndexError`` from the
+    per-channel fill lookup (what the Polaris run hit) or a broadcast
+    ``RuntimeError`` — so the control asserts that it fails loudly rather than
+    pinning transform internals.
+    """
+    cfg = _subset_cfg(["tisr", "sst", "ice"])
+    nan_fill = build_nan_fill(cfg)
+    wide = {
+        "varying_boundary": torch.full((4, _H, _W), float("nan")),
+        "constant_boundary": torch.zeros(1, _H, _W),
+        "surface_in": torch.zeros(1, _H, _W),
+    }
+    with pytest.raises((IndexError, RuntimeError)):
+        nan_fill(wide)

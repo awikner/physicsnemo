@@ -444,6 +444,11 @@ _LAYOUT_AWARE_WRAPPERS = (
 # order real upstream-v1 checkpoints were trained on).
 _FROZEN_FORK_LAYOUT_WRAPPERS = ("AmipDiTWrapper", "ERDMWrapper")
 
+#: Wrappers with a ``c_scalar`` row, i.e. the ones that can express a varying
+#: channel being popped out of the grid and appended to the calendar
+#: (``scalar_routed_boundary_variables``).
+_SCALAR_ROUTING_WRAPPERS = ("AmipDiTWrapper", "RollingDiTWrapper")
+
 
 def wrapper_kwargs_from_hparams(
     blob: dict,
@@ -586,6 +591,10 @@ def wrapper_kwargs_from_hparams(
         )
         varying_boundary = derived
 
+    # Varying channels upstream popped into the calendar row, recovered from the
+    # c_grid_dim/scalar_dim reconciliation below. Empty for every config whose
+    # listed channels all reach the grid.
+    routed: list[str] = []
     target_c_grid_dim = source_backbone_cfg.get("c_grid_dim", None)
     if target_c_grid_dim is not None:
         target_c_grid_dim = int(target_c_grid_dim)
@@ -637,15 +646,66 @@ def wrapper_kwargs_from_hparams(
                         f"c_grid_dim against the variable lists."
                     )
                 dropped = dropped + remaining[-take:]
-            logger.warning(
-                "trimming varying_boundary_variables to match "
-                "c_grid_dim=%d (dropped %d entries: %s); upstream amip "
-                "likely routed these via the c_scalar path",
-                target_c_grid_dim,
-                len(dropped),
-                dropped,
-            )
-            varying_boundary = [v for v in varying_boundary if v not in dropped]
+            # ROUTE rather than DROP when the source's own scalar_dim accounts
+            # for the excess (2026-08-14). ``scalar_dim == 2 + len(dropped)`` is
+            # the evidence that upstream popped these channels into the calendar
+            # row rather than not serving them: 2 is every calendar encoding this
+            # datapipe emits, so the surplus slots are exactly the routed
+            # channels.
+            #
+            # Deleting them instead — which is all this could do before the
+            # wrappers grew ``scalar_routed_boundary_variables`` — produced an
+            # artifact that loads but cannot RUN: with nothing routed,
+            # ``resolve_scalar_forcing`` yields a 2-wide calendar row against a
+            # model wanting 3, and the pipeline's width check refuses it. It also
+            # made the artifact's stored contract disagree with any config that
+            # describes the same checkpoint correctly, which the run-time
+            # contract guard then flags.
+            # Only NAME-MATCHED channels are routable. A trailing-entry drop is
+            # a genuine gridded forcing (sea ice, TISR) that this config simply
+            # over-lists; calling it "routed" would append a 2D field to the
+            # calendar row. The fancy configs make that distinction load-bearing:
+            # their scalar_dim 3 is the global_mean_sst trend scalar, which would
+            # otherwise look like an invitation to route whatever got dropped.
+            source_scalar_dim = int(source_backbone_cfg.get("scalar_dim", 2) or 2)
+            routable = [
+                v for v in dropped if _is_scalar_routed_varying_boundary_name(v)
+            ]
+            if routable and source_scalar_dim == 2 + len(routable):
+                routed = list(routable)
+                still_dropped = [v for v in dropped if v not in routed]
+                logger.info(
+                    "scalar-routing %d varying channel(s) %s: c_grid_dim=%d "
+                    "accounts for %d gridded, and scalar_dim=%d = 2 calendar + "
+                    "%d routed",
+                    len(routed), routed, target_c_grid_dim, wanted_varying,
+                    source_scalar_dim, len(routed),
+                )
+                if still_dropped:
+                    logger.warning(
+                        "additionally dropping %s: not scalar-routable by name "
+                        "and c_grid_dim leaves no room",
+                        still_dropped,
+                    )
+                    varying_boundary = [
+                        v for v in varying_boundary if v not in still_dropped
+                    ]
+            else:
+                routed = []
+                logger.warning(
+                    "trimming varying_boundary_variables to match "
+                    "c_grid_dim=%d (dropped %d entries: %s); upstream amip "
+                    "likely routed these via the c_scalar path, but "
+                    "scalar_dim=%d does not account for them (expected %d), so "
+                    "they are dropped instead — the artifact will load but a "
+                    "run may not find the scalar row it expects",
+                    target_c_grid_dim,
+                    len(dropped),
+                    dropped,
+                    source_scalar_dim,
+                    2 + len(dropped),
+                )
+                varying_boundary = [v for v in varying_boundary if v not in dropped]
         elif wanted_varying > len(varying_boundary):
             raise ValueError(
                 f"hparams c_grid_dim={target_c_grid_dim} requires "
@@ -701,6 +761,17 @@ def wrapper_kwargs_from_hparams(
         # Pin the packing contract the checkpoint was trained on — it
         # travels with the .mdlus args so inference packs identically.
         kwargs["channel_layout"] = source_contract
+    if routed:
+        # Only the two wrappers with a c_scalar row can express routing; a
+        # config needing it against any other target is a contract error worth
+        # raising rather than silently dropping back to the old delete.
+        if target_class_name not in _SCALAR_ROUTING_WRAPPERS:
+            raise NotImplementedError(
+                f"source config routes {routed} through the c_scalar path, but "
+                f"the target wrapper {target_class_name} has no "
+                f"scalar_routed_boundary_variables support"
+            )
+        kwargs["scalar_routed_boundary_variables"] = routed
 
     # Phase 12f: predicted ocean channels widen in/out_channels by a tail block,
     # so the wrapper must know about them or the translated weights will not fit.

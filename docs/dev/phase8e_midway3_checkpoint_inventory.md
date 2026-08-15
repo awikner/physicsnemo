@@ -243,3 +243,78 @@ channel block. `--synthetic` self-tests the harness without a checkpoint.
   `varying_boundary_variables`, but counted in the source's `c_grid_dim`. The
   translator splices it in via `climate.grid_forcing_names`; a model config must
   list it too (post-rescaler order) or `c_grid_dim` comes out one short.
+
+## Real v1 SI checkpoints (2026-08-14)
+
+The first v1 SI-family checkpoints verified against upstream, off **Derecho
+scratch** (`/glade/derecho/scratch/ayz/AMIP_logs/`, retiring) and now on Polaris
+Eagle at `/eagle/lighthouse-uchicago/amip-checkpoints/`.
+
+| | SI-V | SI-X (wCO2) |
+|---|---|---|
+| run | `SI_AIMIP_interp_gaussian_v_42_2026-06-02T20-10-55` | `SI_X_AIMIP_wCO2_interp_gaussian_42_2026-05-30T08-32-59` |
+| file used | `last.ckpt` (11.3 GB) | `model_epoch=19.ckpt` (11.3 GB) — **no `last.ckpt` in that run** |
+| source `model_name` / block | `SI` / `model.SI.model` | `SI_X` / `model.SI_X.model` |
+| our config | `conf/model/amip_si_v_coarse.yaml` | `conf/model/amip_si_x_wco2_coarse.yaml` |
+| contract | 151 ch state, `c_grid_dim` 5, `scalar_dim` 2 | same, `scalar_dim` 3 (CO2 routed) |
+| backbone | dim 1536, 24 blocks, 8 ca-blocks, patch 1, **45×90** | same, wider embeds (192/192) |
+| params | 1247.77M | 1248.85M |
+| keys (`--strict`) | 308 kept, 1 scheduler dropped, 0 unknown / 0 missing | 312 / 1 / 0 / 0 |
+| **numerical, random inputs** | **max │diff│ 0.0000e+00** | **max │diff│ 0.0000e+00** |
+| **numerical, REAL daily-avg batch** | **max │diff│ 0.0000e+00** | **max │diff│ 0.0000e+00** |
+| `inference.py` rollout | writes a forecast file | writes a forecast file |
+
+Reproduce with `hpc/scripts/verify_si_checkpoints_polaris.pbs` (translate +
+verify on random inputs) then `hpc/scripts/run_si_coarse_configs_polaris.pbs`
+(re-translate SI-X, real-data A/B, rollout). Both need upstream **v1** at the
+vendored commit `497827e`; the Polaris copy came from a `git archive` of that
+commit shipped over Globus, because ALCF's proxy blocks `git clone`.
+
+### These are COARSE-STATE models, and no shipped config described them
+
+Their own `config.yml` states `nlat/nlon: 45×90` with `in_channels: 302`
+(= 151 × 2, `[x_noised, cond]` concatenated) and `c_grid_downsample: 4` — a
+45×90 state with 180×360 forcings reduced by the backbone's strided conv, the
+same shape as the v2 ERDM. `conf/model/amip_si.yaml` is a *different* model: 16
+surface variables (161 channels) on a 180×360 grid. So:
+
+- **translate with auto-derive**, never `--model-config conf/model/amip_si.yaml`;
+- **pair with `dataset=amip_dailyavg_coarse`** (coarse state + 1° boundary
+  store), not `amip_1981`, which serves a native-resolution state.
+
+Caveat on the data: both were trained on the **6-hourly** AMIP archive
+(`data_dir .../AMIP/h5`, `normalize_mean_interp.nc`). Running them against the
+daily-avg store is an implementation A/B — identical inputs, identical outputs —
+**not** a skill evaluation. The normalization differs.
+
+### What running them exposed
+
+Three defects, none visible from key parity or from the random-input check:
+
+1. **No varying-boundary subset in the shared pipeline.** SI-V lists 3 varying
+   channels where the store serves 4 (upstream's run never fed
+   `global_mean_co2`), and `NanFillTransform` — sized from the *model's* list —
+   indexed a 4-channel tensor and raised `IndexError`. `inference.py` had handled
+   this since the Pangu-S2S port; `train_diffusion._build_dataset` had not. Now
+   `dataset_setup.resolve_varying_subset` + `VaryingBoundarySubset`, with the
+   normalizer aligned to the model's list. The dropped channel is the store's
+   **first**, so the indices must come from name lookup — "take the leading N"
+   would mis-assign every forcing.
+2. **The translator deleted scalar-routed channels instead of routing them.**
+   Its trim heuristic predated the wrappers having
+   `scalar_routed_boundary_variables`, so `global_mean_co2` was dropped from
+   `varying_boundary_variables` outright. Same geometry, but not runnable: with
+   nothing routed, `resolve_scalar_forcing` yields a 2-wide calendar row against
+   a model wanting 3. It now routes when the source's `scalar_dim == 2 + n` *and*
+   the channels are name-matched — the second condition matters, because the
+   `fancy` configs' `scalar_dim: 3` is the `global_mean_sst` trend scalar and
+   would otherwise have "routed" sea ice into the calendar row.
+3. **`ForcingAssembler._scalar_of` collapsed the batch axis** (`reshape(-1)`),
+   so batched callers hit `cat` of `(B, 2)` and `(1,)`. The rank error was the
+   lucky outcome: with shapes aligned, every sample would have received one CO2
+   value averaged across the batch. Reduces over spatial axes only now.
+
+`AmipDiTWrapper` also gained `scalar_routed_boundary_variables` (additive; an
+empty list reproduces the old arithmetic), because SI-X cannot otherwise be
+expressed: its 4-entry varying list against a `Conv2d(5 -> 192)` `c_grid_embed`
+only reconciles if CO2 rides the calendar row.

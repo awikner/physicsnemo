@@ -59,7 +59,10 @@ with warnings.catch_warnings():
 
 # Reuse helpers from the deterministic train.py rather than re-implementing.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dataset_setup import build_forcing_pipeline  # noqa: E402
+from dataset_setup import (  # noqa: E402
+    build_forcing_pipeline,
+    resolve_varying_subset,
+)
 from ema import ModelEMA  # noqa: E402
 from train import (  # noqa: E402
     _flatten_optimizer_cfg,
@@ -110,6 +113,22 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
         ),
         emit_calendar=True,
     )
+    # The store may serve MORE varying-boundary channels than the model consumes
+    # (2026-08-14): the real v1 SI checkpoint lists 3 where amip_dailyavg_coarse
+    # has 4, because upstream's run never fed global_mean_co2. When that happens
+    # the stream is sliced to the model's list before the fill, so the
+    # normalizer has to be aligned to the same list — otherwise it would apply
+    # store-ordered statistics to a sliced tensor, which changes no shape.
+    store_varying = [
+        str(v)
+        for v in getattr(getattr(ds, "layout", None), "varying_boundary_variables", [])
+    ]
+    subset = resolve_varying_subset(cfg, store_varying)
+    normalizer_kwargs = {}
+    if subset is not None:
+        normalizer_kwargs["varying_boundary_variables"] = [
+            str(v) for v in cfg.model.varying_boundary_variables
+        ]
     normalizer = ClimateNormalizer.from_dataset(
         ds,
         mean_path=_resolve_path(data.mean_path),
@@ -118,12 +137,15 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
             data.get("normalize_constant_boundary", False)
         ),
         normalize_diagnostic=bool(data.get("normalize_diagnostic", False)),
+        **normalizer_kwargs,
     )
     # Phase 12d.13: one construction site for fill → normalize → scalar
     # routing. NOTE this replaces a ``nan_fill(normalizer(sample))`` compose,
     # which substituted PHYSICAL-unit fill values (SST 270 K) into an
     # already-z-scored tensor; dataset_setup pins the documented order.
-    pipeline = build_forcing_pipeline(cfg, normalizer=normalizer)
+    pipeline = build_forcing_pipeline(
+        cfg, normalizer=normalizer, store_varying_variables=store_varying
+    )
     ds.transform = pipeline.dataset_transform
     ds.forcing_pipeline = pipeline
     return ds

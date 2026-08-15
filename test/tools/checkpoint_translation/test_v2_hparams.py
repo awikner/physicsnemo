@@ -399,3 +399,102 @@ def test_an_unknown_decoder_type_is_refused():
     blob["hyper_parameters"]["config"]["model"]["x_DDC"]["decoder_type"] = "vqgan"
     with pytest.raises(NotImplementedError, match="decoder_type"):
         wrapper_kwargs_from_hparams(blob, "XDDCWrapper", source_contract="v2")
+
+
+# ---------------------------------------------------------------------------
+# Routing vs dropping (2026-08-14). Before this, a scalar-routed channel was
+# DELETED from varying_boundary_variables — which loads but cannot run: with
+# nothing routed, the calendar row comes out 2 wide against a model wanting 3.
+# ---------------------------------------------------------------------------
+
+
+def _wco2_blob(scalar_dim=3, c_grid_dim=5):
+    """An SI_X wCO2-shaped blob: 4 varying (CO2 first), CO2 not gridded."""
+    blob = _fancy_blob()
+    cfg = blob["hyper_parameters"]["config"]
+    cfg["model"]["model_name"] = "SI_X"
+    data = cfg["data"]
+    n_state = (
+        len(data["surface_variables"])
+        + len(data.get("diagnostic_variables", []) or [])
+        + len(data["upper_air_variables"]) * len(data["levels"])
+    )
+    # An AmipDiT block, not a copy of the rolling one: `temporal_num_heads` and
+    # friends are RollingDiT-only, and wrapper_kwargs_from_hparams passes the
+    # block through verbatim (the translator's unknown-kwarg filter runs later,
+    # in build_target_wrapper).
+    cfg["model"]["SI_X"] = {
+        "model": {
+            "in_channels": 2 * n_state,
+            "out_channels": n_state,
+            "c_grid_dim": c_grid_dim,
+            "scalar_dim": scalar_dim,
+            "dim": 32,
+            "num_heads": 2,
+            "num_blocks": 1,
+            "patch_size": 2,
+            "nlat": 16,
+            "nlon": 32,
+            "c_grid_downsample": 4,
+        }
+    }
+    cfg["model"].pop("ERDM", None)
+    cfg["model"].pop("backbone", None)
+    cfg["data"]["varying_boundary_variables"] = [
+        "global_mean_co2",
+        "DSWRFtoa_24h_lead",
+        "sea_surface_temperature_monthly_interp",
+        "sea_ice_cover_monthly_interp",
+    ]
+    cfg["data"]["sst_anomaly_channel"] = "none"
+    cfg["data"].pop("ocean_state_variables", None)
+    return blob
+
+
+def test_a_scalar_routed_channel_is_routed_not_deleted():
+    kw = wrapper_kwargs_from_hparams(
+        _wco2_blob(), "AmipDiTWrapper", source_contract="v1"
+    )
+    # Still listed (the NaN-fill needs the stored order) AND named as routed.
+    assert "global_mean_co2" in kw["varying_boundary_variables"]
+    assert kw["scalar_routed_boundary_variables"] == ["global_mean_co2"]
+    assert kw["scalar_dim"] == 3
+
+
+def test_the_routed_artifact_is_self_consistent():
+    """The wrapper's own validation is the check that matters here."""
+    from physicsnemo.experimental.models.amip_si import AmipDiTWrapper
+
+    kw = wrapper_kwargs_from_hparams(
+        _wco2_blob(), "AmipDiTWrapper", source_contract="v1"
+    )
+    model = AmipDiTWrapper(**kw)
+    # 2 constant + 3 gridded: CO2 rides the calendar row instead.
+    assert model.c_grid_dim == 5
+    assert model.scalar_dim == 3
+
+
+def test_routing_is_refused_when_scalar_dim_does_not_pay_for_it():
+    """scalar_dim 2 cannot carry a routed channel, so fall back to dropping."""
+    kw = wrapper_kwargs_from_hparams(
+        _wco2_blob(scalar_dim=2), "AmipDiTWrapper", source_contract="v1"
+    )
+    assert kw.get("scalar_routed_boundary_variables", []) == []
+    assert "global_mean_co2" not in kw["varying_boundary_variables"]
+
+
+def test_a_trailing_drop_is_never_called_routing():
+    """Sea ice is a real gridded forcing; routing it would be nonsense.
+
+    Guards the trap the first version of this fell into: the fancy configs carry
+    scalar_dim 3 for the global_mean_sst TREND scalar, which coincidentally
+    equals ``2 + 1`` and so looked like permission to route whatever the trim
+    dropped.
+    """
+    blob = _fancy_blob()
+    blob["hyper_parameters"]["config"]["model"]["ERDM"]["DiT"]["c_grid_dim"] = 5
+    kw = wrapper_kwargs_from_hparams(
+        blob, "RollingDiTWrapper", source_contract="v2"
+    )
+    assert kw.get("scalar_routed_boundary_variables", []) == []
+    assert "sea_ice_cover_monthly_interp" not in kw["varying_boundary_variables"]

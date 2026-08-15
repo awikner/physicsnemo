@@ -138,12 +138,57 @@ def test_missing_calendar_raises_strict_and_passes_through_otherwise():
 
 
 def test_leading_axis_is_preserved():
-    # A (T, C, H, W) boundary stack routes on the channel axis.
+    """A (T, C, H, W) stack routes on the channel axis and keeps T per-frame.
+
+    Rewritten 2026-08-14. It previously paired a leading-axis boundary with a
+    1-D ``(2,)`` calendar and only asserted the boundary's shape — which passed
+    because ``_scalar_of`` flattened *everything* and averaged the routed
+    channel across all 3 frames. The calendar it produced was therefore a single
+    shared CO2 value, and a genuinely batched caller (inference.py's
+    ``_maybe_normalize``) died in the concat instead: ``cat`` of ``(B, 2)`` and
+    ``(1,)``.
+    """
     a = _assembler()
     vb = torch.randn(3, len(_VARY), _H, _W)
-    vb[:, 0] = 0.75
-    out = a({"varying_boundary": vb, "calendar": torch.tensor([0.0, 5.0])})
+    # A DIFFERENT uniform CO2 per frame — the point is that each survives.
+    per_frame = [0.75, 1.5, 2.25]
+    for t, v in enumerate(per_frame):
+        vb[t, 0] = v
+    cal = torch.tensor([[0.0, 5.0], [1.0, 6.0], [2.0, 7.0]])
+    out = a({"varying_boundary": vb, "calendar": cal})
     assert out["varying_boundary"].shape == (3, len(_VARY) - 1, _H, _W)
+    assert out["calendar"].shape == (3, 3)
+    # Calendar columns untouched, routed column per-frame.
+    torch.testing.assert_close(out["calendar"][:, :2], cal)
+    torch.testing.assert_close(
+        out["calendar"][:, 2], torch.tensor(per_frame), rtol=0, atol=1e-6
+    )
+
+
+def test_a_batched_sample_routes_per_sample():
+    """The inference.py path: (B, C, H, W) with a (B, 2) calendar."""
+    a = _assembler()
+    vb = torch.randn(2, len(_VARY), _H, _W)
+    vb[0, 0] = 1.0
+    vb[1, 0] = 400.0
+    cal = torch.tensor([[0.0, 12.0], [0.0, 12.0]])
+    out = a({"varying_boundary": vb, "calendar": cal})
+    assert out["calendar"].shape == (2, 3)
+    # Not averaged into a single shared value.
+    torch.testing.assert_close(
+        out["calendar"][:, 2], torch.tensor([1.0, 400.0]), rtol=0, atol=1e-6
+    )
+
+
+def test_non_uniformity_in_one_batch_element_is_not_excused_by_the_others():
+    """Per-sample spread, then the worst — otherwise a bad frame hides."""
+    a = _assembler(strict=True)
+    vb = torch.randn(2, len(_VARY), _H, _W)
+    vb[0, 0] = 1.0                      # uniform
+    vb[1, 0] = torch.randn(_H, _W)      # not
+    cal = torch.zeros(2, 2)
+    with pytest.raises(ValueError, match="not spatially uniform"):
+        a({"varying_boundary": vb, "calendar": cal})
 
 
 def test_sst_rescaler_hook_runs_before_the_pop():
