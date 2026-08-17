@@ -171,7 +171,7 @@ during the rebaseline was shape-preserving. Every wrapper takes
 |---|---|---|
 | `v2` | upstream **amip_v2**: state `[surface \| diag \| upper_air]`, upper-air level-major (1000 hPa first), c_grid `[varying \| constant]` | `amip_erdm_v2`, `amip_erdm_v2_ocean`, `amip_erdm_fancy`, `amip_x_ddc_dit`; the default for `RollingDiTWrapper` / `XDDCWrapper` |
 | `v1` | upstream **amip v1**: same group order, upper-air **variable-major** in config level order | `amip_x_ddc` (its `XDDCUNet` backbone is v1-only). Also what `--source-contract v1` writes into a translated artifact — so for the *other* v1 families, whose YAMLs say `fork`, add `++model.channel_layout=v1` when you run one |
-| `fork` | the Phase-8 fork order (`[surface \| upper_air \| diag]`, c_grid `[constant \| varying]`) — **no upstream checkpoint matches it**, including v1's | `amip_rfm` explicitly; `amip_si` / `amip_si_x` / `amip_erdm` by wrapper default (`AmipDiTWrapper`, `ERDMWrapper`). Fine for training from scratch in this fork; wrong for loading real upstream weights |
+| `fork` | the Phase-8 fork order (`[surface \| upper_air \| diag]`, c_grid `[constant \| varying]`) — **no upstream checkpoint matches it**, including v1's | `amip_rfm` explicitly and `amip_erdm` by wrapper default. Fine for training from scratch in this fork; wrong for loading real upstream weights |
 
 **Why this needs saying at all.** `train_diffusion.py`, `inference.py` and
 `eval_diffusion.py` all build the model from `cfg.model` and *then* load weights
@@ -180,14 +180,16 @@ the YAML**, not the one baked into the `.mdlus` at translation time — and the
 translator sets the artifact's layout from `--source-contract` for all four
 wrapper classes. `amip_x_ddc` aside, the v1-family configs say `fork`, so a
 translated v1 checkpoint of those needs the layout supplied on the command line.
-Use `++` — it both appends the key where the YAML omits it (`amip_si`,
-`amip_si_x`, `amip_erdm`) and overrides it where the YAML sets it (`amip_rfm`),
-so one spelling always works:
+Use `++` — it both appends the key where the YAML omits it (`amip_erdm`) and
+overrides it where the YAML sets it (`amip_rfm`), so one spelling always works:
 
 ```bash
-python inference.py model=amip_si   ++model.channel_layout=v1 …  # not fork
+python inference.py model=amip_erdm ++model.channel_layout=v1 …  # not fork
 python inference.py model=amip_rfm  ++model.channel_layout=v1 …  # not fork
 ```
+
+The SI configs need no override: `amip_si` / `amip_si_x` already say `v1`,
+because they describe real v1 checkpoints rather than a from-scratch model.
 
 **Since 2026-08-14 the drivers refuse the mismatch instead of running it.**
 `Module.save` records the resolved constructor kwargs in the archive's
@@ -226,10 +228,8 @@ restates a channel count) and was read back off the instantiated wrapper:
 
 | Config | Wrapper | Layout | Train `loss=` | Sample `sampler=` | Dataset | State grid | `in_ch` | `c_grid` | `scalar` | ocean |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `amip_si` | `AmipDiTWrapper` | `fork` | `si` | `si` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
-| `amip_si_x` | `AmipDiTWrapper` | `fork` | `si_x` | `si_x` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
-| `amip_si_v_coarse` | `AmipDiTWrapper` | `v1`⁴ | `si` | `si` | `amip_dailyavg_coarse` | **45×90** | 151 | 5 | 2 | — |
-| `amip_si_x_wco2_coarse` | `AmipDiTWrapper` | `v1`⁴ | `si_x` | `si_x` | `amip_dailyavg_coarse` | **45×90** | 151 | 5 | 3⁵ | — |
+| `amip_si` | `AmipDiTWrapper` | `v1`⁴ | `si` | `si` | `amip_dailyavg_coarse` | **45×90** | 151 | 5 | 2 | — |
+| `amip_si_x` | `AmipDiTWrapper` | `v1`⁴ | `si_x` | `si_x` | `amip_dailyavg_coarse` | **45×90** | 151 | 5 | 3⁵ | — |
 | `amip_erdm` | `ERDMWrapper` | `fork` | `erdm` | `erdm` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
 | `amip_rfm` | `RollingDiTWrapper` | `fork` | `rfm` | `rfm` | `amip_1981` | 180×360 | 161 | 7 | 2 | — |
 | `amip_x_ddc` | `XDDCWrapper` (`XDDCUNet`) | `v1`¹ | — (upstream)³ | —³ | `amip_dailyavg` | 180×360 | 151 | — | — | — |
@@ -252,16 +252,17 @@ variant.
 `train_diffusion.py` or `inference.py` (§6.15). Its listed dataset/grid is the
 resolution it operates at, not a store it reads — its conditioning is always the
 forecaster's own upsampled prediction.
-⁴ these two describe the **real v1 SI checkpoints** (2026-08-14) and are the only
-SI configs that do. Their weights are 1.25B-param *coarse-state* models — a 45×90
-backbone grid with 180×360 forcings reduced by `c_grid_downsample: 4`, the same
-shape as the v2 ERDM — where `amip_si`/`amip_si_x` describe an earlier, different
-model (16 surface variables, 161 channels, 180×360 backbone). Both verified
-bitwise against upstream v1's own `DiT`, on random inputs *and* on a real
-daily-average batch through our loader (`max │diff│ = 0.0000e+00`). Pair with
-`dataset=amip_dailyavg_coarse`, never `amip_1981`, which serves a
-native-resolution state. Note these were trained on the **6-hourly** archive, so
-running them on daily averages is an implementation A/B, not a skill test.
+⁴ these describe the **real v1 SI checkpoints**: 1.25B-param *coarse-state*
+models on a 45×90 backbone grid with 180×360 forcings reduced by
+`c_grid_downsample: 4`, the same shape as the v2 ERDM. Both verified bitwise
+against upstream v1's own `DiT`, on random inputs *and* on a real batch through
+our loader (`max │diff│ = 0.0000e+00`). They took over these two names on
+2026-08-17; the previous `amip_si`/`amip_si_x` described a 161-channel model on a
+180×360 grid that no checkpoint we hold matches, and were deleted. Pair with
+`dataset=amip_dailyavg_coarse` — which is **6-hourly** ("dailyavg" names the
+24-hour-accumulation variables, not the row cadence) and carries exactly this
+variable set — never `amip_1981`, which serves a native-resolution state and a
+different variable set.
 ⁵ `scalar_dim` 3 because `global_mean_co2` is **routed** out of the gridded
 stream into the calendar row (`scalar_routed_boundary_variables`), keeping
 `c_grid_dim` at 5 for a 4-entry varying list. The checkpoint's `c_grid_embed` is
@@ -337,14 +338,14 @@ Same Hydra composition as §2, with `train_diffusion.py` instead of `train.py`:
 ```bash
 cd examples/weather/ai_rossby
 
-# SI (DriftScheduler, single-step)
+# SI (DriftScheduler, single-step) — 45x90 coarse state, 1-degree forcings
 python train_diffusion.py model=amip_si loss=si \
-    dataset=amip_1981 training=amip_diffusion validation=diffusion_rollout \
-    run_name=amip_si_run0
+    dataset=amip_dailyavg_coarse training=amip_diffusion \
+    validation=diffusion_rollout run_name=amip_si_run0
 
-# SI_X (DynamicInterpolant, single-step) — train only; see §6.15 for rollout
+# SI_X (DynamicInterpolant, single-step), CO2 routed to the calendar row
 python train_diffusion.py model=amip_si_x loss=si_x \
-    dataset=amip_1981 training=amip_diffusion validation=off \
+    dataset=amip_dailyavg_coarse training=amip_diffusion validation=off \
     run_name=amip_si_x_run0
 
 # ERDM, v1 UNet backbone + v1 statistics (rolling window, W from cfg.loss)
@@ -364,18 +365,16 @@ a shape error, not a graceful fallback. `loss.window_size` is the window length 
 it must equal the model's `rolling_dit_kwargs.window_size` where the backbone has
 one, because both size the same temporal tables.
 
-These commands train **from scratch**, where the `fork` layout is self-consistent
-and fine. Anything that starts from real upstream v1 weights — a warm start, an
-evaluation, a rollout — additionally needs `++model.channel_layout=v1` (§6.2).
+`amip_erdm` and `amip_rfm` train **from scratch** on the `fork` layout, which is
+self-consistent for that purpose. Starting either from real upstream v1 weights —
+a warm start, an evaluation, a rollout — additionally needs
+`++model.channel_layout=v1` (§6.2).
 
-**If you have the real v1 SI checkpoints, use `amip_si_v_coarse` /
-`amip_si_x_wco2_coarse` instead** (§6.3 footnote 4). `amip_si` and `amip_si_x`
-describe a different, earlier model, and pointing them at those weights loads a
-161-channel 180×360 architecture where the checkpoint is 151 channels on 45×90.
-Those two configs are also `v1` already, so they need no layout override:
+The SI pair describes the **real v1 checkpoints** (§6.3 footnote 4), so running
+translated weights needs no layout override — they already say `v1`:
 
 ```bash
-python inference.py model=amip_si_v_coarse dataset=amip_dailyavg_coarse loss=si \
+python inference.py model=amip_si dataset=amip_dailyavg_coarse loss=si \
     +inference.checkpoint_dir=./ckpt +inference.output_dir=./out \
     +inference.max_step=2 '+inference.ic_start=[8]'
 ```
@@ -522,7 +521,7 @@ python inference.py model=amip_erdm_v2 dataset=amip_dailyavg_coarse \
     +inference.output_format=zarr
 
 # v1 single-step (SI): autoregressive, one sample() per emitted frame
-python inference.py model=amip_si dataset=amip_1981 sampler=si loss=si \
+python inference.py model=amip_si dataset=amip_dailyavg_coarse sampler=si loss=si \
     +inference.checkpoint_dir=./outputs/amip_si_run0/checkpoints \
     +inference.output_dir=./outputs/amip_si_run0/rollout \
     +inference.max_step=20 '+inference.ic_start=[0, 60]'
@@ -678,7 +677,7 @@ failure mode, and for the SI checkpoints it was the live one (a 45×90 state wit
 
 ```bash
 python tools/checkpoint_translation/verify_si_realdata.py \
-    --model amip_si_v_coarse --dataset amip_dailyavg_coarse \
+    --model amip_si --dataset amip_dailyavg_coarse \
     --translated $CKPT/translated/si_v_....mdlus \
     --source $CKPT/SI_v_.../last.ckpt --amip-repo $AI_ROSSBY_AMIP_REPO
 ```
@@ -700,10 +699,11 @@ mkdir -p ckpt && cp erdm_fancy.mdlus ckpt/RollingDiTWrapper.0.0.mdlus
 python inference.py model=amip_erdm_fancy dataset=amip_dailyavg_coarse \
     loss=erdm_v2 +inference.checkpoint_dir=./ckpt …
 
-# v1: the layout has to be stated, or the upper-air block is silently permuted
-mkdir -p ckpt_v1 && cp si.mdlus ckpt_v1/AmipDiTWrapper.0.0.mdlus
-python inference.py model=amip_si ++model.channel_layout=v1 dataset=amip_1981 \
-    loss=si +inference.checkpoint_dir=./ckpt_v1 …
+# a fork-default config (amip_erdm / amip_rfm) needs the layout stated, or the
+# upper-air block is silently permuted. The SI pair already says v1.
+mkdir -p ckpt_v1 && cp rfm.mdlus ckpt_v1/RollingDiTWrapper.0.0.mdlus
+python inference.py model=amip_rfm ++model.channel_layout=v1 dataset=amip_1981 \
+    loss=rfm +inference.checkpoint_dir=./ckpt_v1 …
 ```
 
 Two log lines to read here. `channel contract verified against

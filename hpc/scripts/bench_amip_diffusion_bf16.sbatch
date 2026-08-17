@@ -31,6 +31,12 @@
 #SBATCH --job-name=bench-amip-diffusion-bf16
 #SBATCH --output=hpc/scripts/logs/bench-amip-diffusion-bf16-%j.out
 
+# NOTE (2026-08-17): dataset moved amip_1981 -> amip_dailyavg_coarse with the
+# amip_si config reassignment. amip_si now describes the REAL v1 SI checkpoints
+# (151 channels on a 45x90 backbone grid with 1-degree forcings); the previous
+# 161-channel/180x360 config it replaced was deleted. Any throughput or loss
+# figures recorded from earlier runs of this script are NOT comparable.
+
 set -euo pipefail
 
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo
@@ -59,15 +65,22 @@ cd examples/weather/ai_rossby
 COMMON_ARGS=(
     model=amip_si
     loss=si
-    dataset=amip_1981
+    dataset=amip_dailyavg_coarse
     validation=off
     training.max_epochs=3
     training.ema.warmup_epochs=0
     'model.dit_kwargs.dim=128'
     'model.dit_kwargs.num_blocks=4'
+    # num_ca_blocks must be <= num_blocks (AmipDiT asserts it), and the
+    # config ships 8 to match the real checkpoints, so shrink it too.
+    'model.dit_kwargs.num_ca_blocks=2'
+    'model.dit_kwargs.num_output_blocks=1'
     'model.dit_kwargs.num_heads=4'
     'model.dit_kwargs.patch_size=4'
-    'model.dit_kwargs.c_grid_downsample=1'
+    # c_grid_downsample stays at the config's 4: amip_dailyavg_coarse pairs a
+    # 45x90 state with 1-degree forcings, and the backbone's stride-4 conv is
+    # what reconciles them. Forcing 1 here would build a 1x1 conv and then
+    # fail the concat on a 180x360-vs-45x90 spatial mismatch.
     dataset.batch_size=2
     dataset.num_workers=4
     log_every_n_steps=5

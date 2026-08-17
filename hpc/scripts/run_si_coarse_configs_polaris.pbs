@@ -10,8 +10,8 @@
 # other half: does our CONFIG + LOADER hand the model what upstream's did? The
 # checkpoints are 45x90-state models with 180x360 forcings
 # (``c_grid_downsample: 4``), a pairing no shipped SI config described until
-#   conf/model/amip_si_v_coarse.yaml        (SI,   scalar_dim 2)
-#   conf/model/amip_si_x_wco2_coarse.yaml   (SI_X, scalar_dim 3, CO2 routed)
+#   conf/model/amip_si.yaml        (SI,   scalar_dim 2)
+#   conf/model/amip_si_x.yaml   (SI_X, scalar_dim 3, CO2 routed)
 #
 # Two stages per model:
 #   A. verify_si_realdata.py — build the wrapper FROM THE CONFIG, assert its
@@ -144,13 +144,13 @@ stage_b () {
     echo
 }
 
-stage_a "SI-V"  amip_si_v_coarse      "$SI_V_MDLUS" "$SI_V_CKPT"
-stage_a "SI-X"  amip_si_x_wco2_coarse "$SI_X_MDLUS" "$SI_X_CKPT"
+stage_a "SI-V"  amip_si      "$SI_V_MDLUS" "$SI_V_CKPT"
+stage_a "SI-X"  amip_si_x "$SI_X_MDLUS" "$SI_X_CKPT"
 
-stage_b "SI-V"  amip_si_v_coarse      "$SI_V_MDLUS" si   si
+stage_b "SI-V"  amip_si      "$SI_V_MDLUS" si   si
 # SI_X's DynamicInterpolant returns (y, model_last_pred); this is the first
 # exercise of the 2026-08-14 tuple unwrap on real weights.
-stage_b "SI-X"  amip_si_x_wco2_coarse "$SI_X_MDLUS" si_x si_x
+stage_b "SI-X"  amip_si_x "$SI_X_MDLUS" si_x si_x
 
 echo "############################################################"
 if ((${#FAILED[@]})); then

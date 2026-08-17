@@ -74,9 +74,10 @@ _CONFIGS = sorted(
 def _load_composed(stem: str):
     """Load a config, merging any single-level Hydra ``defaults`` parent.
 
-    ``amip_si_x.yaml`` is ``defaults: [amip_si]`` plus overrides, so reading it
-    alone yields a config missing every inherited key — which looks exactly like
-    a broken config to the gates below.
+    No shipped AMIP config uses ``defaults`` today — the pair that did
+    (``amip_si_x.yaml`` inheriting ``amip_si``) was replaced on 2026-08-17 — but
+    reading a config with a parent and not merging it yields one missing every
+    inherited key, which looks exactly like a broken config to the gates below.
     """
     cfg = OmegaConf.load(_CONF / f"{stem}.yaml")
     parents = [p for p in (cfg.get("defaults", []) or []) if isinstance(p, str)]
@@ -132,18 +133,16 @@ _EXPECTED_SIGNATURES = {
     "amip_erdm_v2_ocean": "f993dea98b28b39e",  # + 12f nocean=2
     "amip_erdm_fancy": "8565f2e7c781696d",    # + 12g anomaly, nocean=3
     "amip_rfm": "07de01c248b4c471",           # frozen v1 family
-    "amip_si": "04782906ab186194",
-    # Identical to amip_si BY DESIGN: amip_si_x inherits it and changes only the
-    # scheduler pairing, not a single shape. A future divergence here means one
-    # of them moved.
-    "amip_si_x": "04782906ab186194",
     "amip_x_ddc": "ba2d45a0801366be",         # v1 convolutional denoiser
     "amip_x_ddc_dit": "fc21c0c4de4d300c",     # 12h DiTAE denoiser
-    # The real v1 SI checkpoints' contracts (2026-08-14). Distinct from
-    # amip_si/amip_si_x: 151 channels on a 45x90 backbone grid with
-    # cross-attention blocks, vs 161 on 180x360 without.
-    "amip_si_v_coarse": "7485981e1269e7b5",
-    "amip_si_x_wco2_coarse": "a68c24af2dc030b7",
+    # The real v1 SI checkpoints' contracts. These names were reassigned on
+    # 2026-08-17: the previous amip_si / amip_si_x described a 161-channel model
+    # on a 180x360 grid that no checkpoint we have matches, and were deleted.
+    # These are 151 channels on a 45x90 backbone grid with cross-attention
+    # blocks, and unlike the old pair they do NOT share a digest — SI_X carries
+    # wider conditioning embeddings, not just a different scheduler.
+    "amip_si": "7485981e1269e7b5",
+    "amip_si_x": "a68c24af2dc030b7",
 }
 
 
@@ -154,18 +153,16 @@ _EXPECTED_SIGNATURES = {
 #: this table, changing a layout — the single most consequential edit anyone can
 #: make to these configs — would pass the entire suite silently.
 _EXPECTED_LAYOUTS = {
-    # Frozen v1 families. `fork` is this fork's own Phase-8 packing: fine for
-    # training from scratch here, and never right for real upstream weights
-    # (translated v1 artifacts need ++model.channel_layout=v1 at run time).
-    "amip_si": "fork",
-    "amip_si_x": "fork",
+    # `fork` is this fork's own Phase-8 packing: fine for training from scratch
+    # here, and never right for real upstream weights (a translated v1 artifact
+    # needs ++model.channel_layout=v1 at run time). Only these two still pin it.
     "amip_erdm": "fork",
     "amip_rfm": "fork",
-    # The two configs describing the REAL v1 SI checkpoints (2026-08-14). `v1`,
-    # not `fork`: their weights are channel-indexed in upstream's order, and
-    # both were verified bitwise against upstream's own DiT under it.
-    "amip_si_v_coarse": "v1",
-    "amip_si_x_wco2_coarse": "v1",
+    # The two configs describing the REAL v1 SI checkpoints. `v1`, not `fork`:
+    # their weights are channel-indexed in upstream's order, and both were
+    # verified bitwise against upstream's own DiT under it.
+    "amip_si": "v1",
+    "amip_si_x": "v1",
     # The v1 CONVOLUTIONAL downscaler. `v1` since 2026-08-14: XDDCUNet exists
     # only in amip v1, so every checkpoint this config can load is a v1
     # artifact, and nothing in-repo trains it.
@@ -261,10 +258,7 @@ def test_rolling_configs_run_on_their_own_declared_widths(stem):
     assert torch.isfinite(out).all()
 
 
-@pytest.mark.parametrize(
-    "stem",
-    ["amip_si", "amip_si_x", "amip_si_v_coarse", "amip_si_x_wco2_coarse"],
-)
+@pytest.mark.parametrize("stem", ["amip_si", "amip_si_x"])
 def test_single_step_configs_run_on_their_own_declared_widths(stem):
     """Synthetic forward for the single-step family, at the config's own widths.
 
@@ -296,19 +290,19 @@ def test_single_step_configs_run_on_their_own_declared_widths(stem):
 def test_the_routed_scalar_contract_is_enforced_for_single_step():
     """``scalar_dim`` must pay for every routed channel, or the pack drifts.
 
-    ``amip_si_x_wco2_coarse`` routes ``global_mean_co2`` out of the gridded
+    ``amip_si_x`` routes ``global_mean_co2`` out of the gridded
     stream into the calendar row, which is what keeps ``c_grid_dim`` at 5 for a
     4-entry varying list. Getting ``scalar_dim`` wrong alongside it is a silent
     mis-pack, so the wrapper refuses it.
     """
-    model, cfg = _build("amip_si_x_wco2_coarse")
+    model, cfg = _build("amip_si_x")
     assert model.c_grid_dim == 5, model.c_grid_dim
     assert model.scalar_dim == 3
     assert model.scalar_routed_boundary_variables == ["global_mean_co2"]
 
     args = {
         k: v
-        for k, v in OmegaConf.to_container(_load_composed("amip_si_x_wco2_coarse"),
+        for k, v in OmegaConf.to_container(_load_composed("amip_si_x"),
                                            resolve=True).items()
         if k not in _NON_KWARGS
     }

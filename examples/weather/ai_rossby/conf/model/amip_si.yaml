@@ -1,62 +1,77 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AMIP SI wrapper config — :class:`AmipDiTWrapper` around a single-step
-# :class:`AmipDiT` backbone for the SI / SI_X diffusion recipes.
-# Channel groups come from the dataset's Zarr attrs at runtime; the
-# values here echo the AMIP default for documentation + so build_model
-# can size the wrapper without round-tripping through the dataset.
+# AMIP SI (velocity variant) — the contract of a REAL v1 checkpoint (2026-08-14).
 #
-# FROZEN on the amip-v1 contract (Phase 12): upstream amip_v2 deleted this
-# family, so this config receives no amip_v2 rebaseline changes. Kept so
-# translated v1 checkpoints stay runnable. See
-# docs/dev/phase12_implementation_plan.md ("dual-contract seam").
+#   SI_AIMIP_interp_gaussian_v_42_2026-06-02T20-10-55
+#   1.25B params; translated + verified bitwise against upstream v1's own DiT
+#   (max |diff| 0.0000e+00, hpc/scripts/verify_si_checkpoints_polaris.pbs).
+#
+# This REPLACED an earlier amip_si.yaml (deleted 2026-08-17) that described a
+# different model entirely: the older AMIP variable set — 16 surface variables
+# including soil/snow/dewpoint, 161 channels, and the DiT at the full 180x360
+# data grid. No checkpoint we have matches that contract, and having both files
+# side by side was a live trap, so the name now belongs to the model the real
+# weights are.
+#
+# The geometry below is copied from the checkpoint's own config.yml, and every
+# width the wrapper derives agrees with what that file states by hand:
+#     in_channels 302 (= 151 x 2, [x_noised, cond] concatenated)
+#     out_channels 151   c_grid_dim 5   scalar_dim 2   nlat/nlon 45 x 90
+#
+# ``channel_layout: v1`` is load-bearing. This is a frozen v1 family and the
+# weights are channel-indexed in UPSTREAM's order — state
+# [surface | diagnostic | upper_air] with the upper-air block variable-major.
+# The wrapper's default is ``fork`` ([surface | upper_air | diag]), which no
+# upstream checkpoint matches: it loads cleanly, moves no shape, and is wrong
+# everywhere. See README section 6.2.
+#
+# DATA PAIRING (this is the part ``amip_si.yaml`` gets wrong for these weights):
+# a 45x90 state with c_grid_downsample 4 means the forcings arrive at 180x360
+# and the backbone's strided conv reduces them — upstream's own layout, and the
+# same shape as ``amip_erdm_v2``. So pair with the pre-coarsened store plus a
+# native-resolution boundary store:
+#     dataset=amip_dailyavg_coarse   (45x90 state; boundary_zarr_path -> 1 degree)
+# NOT ``dataset=amip_1981``, which serves a native-resolution state.
+#
+# ON THE DATA: ``amip_dailyavg_coarse`` is 6-HOURLY (data_timedelta_hours 6 —
+# "dailyavg" names the 24-hour-accumulation VARIABLES, not the row cadence),
+# and carries exactly this variable set, so it is the right store to train on.
+# The upstream runs used a different raw archive and their own statistics
+# (``/project/pedramh/AMIP/h5``, ``normalize_mean_interp.nc``); we train with
+# ours (``normalize_*_dailyavg.nc``). Reproducing THEIR checkpoints bitwise is a
+# separate exercise from training a model of the same type — see
+# docs/dev/phase8e_midway3_checkpoint_inventory.md.
 
 name: AmipDiTWrapper
 module: physicsnemo.experimental.models.amip_si
 
-# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
-# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
-# a 6-hour model. Source of truth for this one: amip v1 SI_NCAR_AIMIP.yaml
-# (every amip config, v1 and v2, steps 24 h).
-# `train_loop.model_step_rows` divides it by the store's own
-# `data_timedelta_hours` to get the row stride, and raises if the dataset
-# config's `forecast_lead_times` disagrees.
+# Model timestep, in hours. The checkpoint's config states timedelta_hours 24
+# over data_timedelta_hours 6, i.e. 4 store rows per step.
 timedelta_hours: 24
 
-# Channel groups — must match the AMIP Zarr's attrs (see
-# tools/data/amip/configs/amip_default.yaml).
 surface_variables:
+  - skin_temperature
+  - surface_pressure
   - 2m_temperature
   - 2m_specific_humidity
-  - 2m_dewpoint_temperature
   - 10m_u_component_of_wind
   - 10m_v_component_of_wind
-  - skin_temperature
-  - snow_depth
-  - surface_pressure
-  - soil_temperature_level_1
-  - soil_temperature_level_2
-  - soil_temperature_level_3
-  - soil_temperature_level_4
-  - volumetric_soil_water_layer_1
-  - volumetric_soil_water_layer_2
-  - volumetric_soil_water_layer_3
-  - volumetric_soil_water_layer_4
 upper_air_variables:
   - temperature
   - u_component_of_wind
   - v_component_of_wind
   - geopotential
-  - specific_total_water
+  - specific_humidity
 diagnostic_variables:
-  - DLWRFsfc_24h
-  - DSWRFsfc_24h
-  - ULWRFsfc_24h
+  - USWRFtoa_24h
   - ULWRFtoa_24h
   - USWRFsfc_24h
-  - USWRFtoa_24h
+  - ULWRFsfc_24h
+  - DSWRFsfc_24h
+  - DLWRFsfc_24h
   - LHTFLsfc_24h
   - SHTFLsfc_24h
   - PRATEsfc_24h
@@ -67,29 +82,39 @@ diagnostic_variables:
   - mx2t_24h
   - mxtpr_24h
 constant_boundary_variables:
-  - land_sea_mask
   - geopotential_at_surface
+  - land_sea_mask
+# Exactly the checkpoint's list: no global_mean_co2 in this run (scalar_dim 2 =
+# the bare calendar row). Its wCO2 sibling is amip_si_x.yaml.
 varying_boundary_variables:
-  - sea_surface_temperature
-  - sea_ice_cover
-  - DSWRFtoa
   - DSWRFtoa_24h_lead
-  - global_mean_co2
+  - sea_surface_temperature_monthly_interp
+  - sea_ice_cover_monthly_interp
+scalar_routed_boundary_variables: []
 
 levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
          500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
-horizontal_resolution: [180, 360]
+# The BACKBONE grid, not the data's. The wrapper hands this straight to
+# AmipDiT's nlat/nlon, and the checkpoint says 45x90.
+horizontal_resolution: [45, 90]
+# second_of_day + day_of_year. Nothing routed out of the grid stream.
 scalar_dim: 2
+channel_layout: v1
 
-# DiT backbone kwargs forwarded through ``dit_kwargs``.
 dit_kwargs:
-  dim: 384
-  num_heads: 8
-  num_blocks: 6
-  patch_size: 4
-  c_grid_embed_dim: 32
-  c_scalar_embed_dim: 16
-  c_grid_downsample: 1
-  num_ca_blocks: 0
-  num_output_blocks: 0
+  dim: 1536
+  num_heads: 16
+  num_blocks: 24
+  patch_size: 1
+  # Cross-attention blocks over the (c_grid, c_scalar) context, then a couple of
+  # output blocks — both present in this checkpoint and both load-bearing for
+  # the parameter count (1247.77M).
+  num_ca_blocks: 8
+  num_output_blocks: 2
+  c_grid_embed_dim: 96
+  c_scalar_embed_dim: 32
+  # The forcings arrive at 4x the state grid (180x360 -> 45x90 via a stride-4
+  # conv). This is upstream's pairing; the wrapper's own default is 1, which
+  # would build a 1x1 conv and silently expect native-resolution forcings.
+  c_grid_downsample: 4
   dropout: 0.0

@@ -11,7 +11,7 @@ whether *our config and loader* hand the model the tensors upstream's did. Those
 are separate failure modes, and for the v1 SI checkpoints the second one is the
 live risk: they are 45x90-state models with 180x360 forcings
 (``c_grid_downsample: 4``), a pairing no shipped SI config described until
-``amip_si_v_coarse.yaml``.
+``amip_si.yaml``.
 
 So this script closes the loop end to end:
 
@@ -37,7 +37,7 @@ script deliberately reports no error metric against truth.
 Usage::
 
     python tools/checkpoint_translation/verify_si_realdata.py \
-        --model amip_si_v_coarse --dataset amip_dailyavg_coarse \
+        --model amip_si --dataset amip_dailyavg_coarse \
         --translated $CKPT/translated/si_v_42_2026-06-02T20-10-55.mdlus \
         --source $CKPT/SI_v_42_2026-06-02T20-10-55/last.ckpt \
         --amip-repo ~/amip-497827e

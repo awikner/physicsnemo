@@ -253,9 +253,9 @@ Eagle at `/eagle/lighthouse-uchicago/amip-checkpoints/`.
 | | SI-V | SI-X (wCO2) |
 |---|---|---|
 | run | `SI_AIMIP_interp_gaussian_v_42_2026-06-02T20-10-55` | `SI_X_AIMIP_wCO2_interp_gaussian_42_2026-05-30T08-32-59` |
-| file used | `last.ckpt` (11.3 GB) | `model_epoch=19.ckpt` (11.3 GB) — **no `last.ckpt` in that run** |
+| file used | `last.ckpt` (11.3 GB) — **stale, see below** | `model_epoch=19.ckpt` (11.3 GB) — **no `last.ckpt` in that run** |
 | source `model_name` / block | `SI` / `model.SI.model` | `SI_X` / `model.SI_X.model` |
-| our config | `conf/model/amip_si_v_coarse.yaml` | `conf/model/amip_si_x_wco2_coarse.yaml` |
+| our config | `conf/model/amip_si.yaml` | `conf/model/amip_si_x.yaml` |
 | contract | 151 ch state, `c_grid_dim` 5, `scalar_dim` 2 | same, `scalar_dim` 3 (CO2 routed) |
 | backbone | dim 1536, 24 blocks, 8 ca-blocks, patch 1, **45×90** | same, wider embeds (192/192) |
 | params | 1247.77M | 1248.85M |
@@ -264,28 +264,46 @@ Eagle at `/eagle/lighthouse-uchicago/amip-checkpoints/`.
 | **numerical, REAL daily-avg batch** | **max │diff│ 0.0000e+00** | **max │diff│ 0.0000e+00** |
 | `inference.py` rollout | writes a forecast file | writes a forecast file |
 
+**SI-V's `last.ckpt` is not the trained weights.** It reports epoch 4 /
+global_step 7700 and its mtime (Jun 3) predates `model_epoch=20…24.ckpt`
+(Jun 5–7) in the same directory, so it looks like a leftover from an earlier
+segment. Translation fidelity is checkpoint-independent, so the verification
+below stands as a statement about the converter — but anyone wanting SI-V's
+actual weights should take `model_epoch=24.ckpt`.
+
 Reproduce with `hpc/scripts/verify_si_checkpoints_polaris.pbs` (translate +
 verify on random inputs) then `hpc/scripts/run_si_coarse_configs_polaris.pbs`
 (re-translate SI-X, real-data A/B, rollout). Both need upstream **v1** at the
 vendored commit `497827e`; the Polaris copy came from a `git archive` of that
 commit shipped over Globus, because ALCF's proxy blocks `git clone`.
 
-### These are COARSE-STATE models, and no shipped config described them
+### These are COARSE-STATE models, and they now own the SI config names
 
 Their own `config.yml` states `nlat/nlon: 45×90` with `in_channels: 302`
 (= 151 × 2, `[x_noised, cond]` concatenated) and `c_grid_downsample: 4` — a
 45×90 state with 180×360 forcings reduced by the backbone's strided conv, the
-same shape as the v2 ERDM. `conf/model/amip_si.yaml` is a *different* model: 16
-surface variables (161 channels) on a 180×360 grid. So:
+same shape as the v2 ERDM.
 
-- **translate with auto-derive**, never `--model-config conf/model/amip_si.yaml`;
+The `amip_si.yaml` / `amip_si_x.yaml` that shipped before 2026-08-17 described a
+*different* model — 16 surface variables (161 channels) on a 180×360 grid — that
+no checkpoint we hold matches. Those were **deleted** and the names reassigned to
+these two contracts, so `model=amip_si` / `model=amip_si_x` now mean the real
+weights. Consequences:
+
+- **translate with auto-derive**; the config now agrees with the checkpoints, but
+  the auto-derive path is still the one under test and needs no YAML;
 - **pair with `dataset=amip_dailyavg_coarse`** (coarse state + 1° boundary
-  store), not `amip_1981`, which serves a native-resolution state.
+  store), not `amip_1981`, which serves a native-resolution state and the older
+  variable set.
 
-Caveat on the data: both were trained on the **6-hourly** AMIP archive
-(`data_dir .../AMIP/h5`, `normalize_mean_interp.nc`). Running them against the
-daily-avg store is an implementation A/B — identical inputs, identical outputs —
-**not** a skill evaluation. The normalization differs.
+On the data: `amip_dailyavg` is **6-hourly** (`data_timedelta_hours: 6` —
+"dailyavg" names the 24-hour-accumulation *variables*, not the row cadence) and
+carries exactly this variable set, so it is the right store to train this model
+type on. What differs from the upstream runs is the raw archive and the
+statistics: they used `/project/pedramh/AMIP/h5` with `normalize_mean_interp.nc`,
+we use `normalize_*_dailyavg.nc`. So *reproducing their checkpoints* is a
+different exercise from *training a model of the same type*, and the bitwise
+verification below is a statement about the converter, not about skill.
 
 ### What running them exposed
 

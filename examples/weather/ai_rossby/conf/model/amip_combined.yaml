@@ -35,10 +35,16 @@
 timedelta_hours: 24
 
 forecaster:
-  # Which low-res forecaster family produced the checkpoint below.
+  # Which low-res forecaster family produced the checkpoint below. NOTE the
+  # config and the checkpoint have to describe the SAME contract: amip_si_x was
+  # reassigned on 2026-08-17 to the 151-channel / 45x90 model verified against
+  # the wCO2 run below, so an older SI_X checkpoint from a different variable set
+  # will NOT load against it. The run-time contract guard
+  # (train_loop.assert_checkpoint_contract) refuses the mismatch rather than
+  # letting it through.
   model: amip_si_x               # conf/model/amip_si_x.yaml
   sampler: si_x                  # conf/sampler/si_x.yaml
-  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work/nvme/bdiu/awikner/amip-checkpoints/AMIP_logs}/SI_X_AIMIP_interp_gaussian_42_2026-05-28T09-27-49/last.ckpt
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/eagle/lighthouse-uchicago/amip-checkpoints}/SI_X_wCO2_42_2026-05-30T08-32-59/model_epoch=19.ckpt
 
 downscaler:
   model: amip_x_ddc               # conf/model/amip_x_ddc.yaml
