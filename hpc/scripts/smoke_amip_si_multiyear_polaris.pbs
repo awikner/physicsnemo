@@ -1,0 +1,285 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Can this repo actually TRAIN the AMIP SI model type? (2026-08-17)
+#
+# run_si_coarse_configs_polaris.pbs settled inference: the real v1 SI weights
+# translate bitwise and roll out through `amip_si` / `amip_si_x`. Training was a
+# different story — two gaps, both of which this job is the proof for:
+#
+#   1. `train_diffusion._build_dataset` opened `ClimateZarrDataset`
+#      unconditionally, so the recipe could only ever train on ONE year while
+#      upstream's SI and ERDM runs trained 1979-2015. It now routes a DIRECTORY
+#      to ClimateZarrMultiYearDataset (`dataset=amip_dailyavg_coarse_multiyear`),
+#      which also meant pairing per-year boundary stores and fixing the
+#      cross-year target keys.
+#   2. `loss/si.yaml` shipped `noise_scale_path: null` (isotropic noise) where
+#      upstream loads a per-channel scale (sigma_c_lowres_26.pt). Stage 1 builds
+#      the equivalent from OUR store; stage 2 trains with it, which is the only
+#      way to find out the tensor is indexed the way the packer packs.
+#
+# FOUR stages, deliberately in this order:
+#   0. pre-flight  — the year sets of the state and boundary archives must MATCH.
+#                    The loader now raises on a state year with no boundary year
+#                    (a missing year would otherwise be served another year's
+#                    SST, silently, since boundary reads are by day-of-year), so
+#                    a data-inventory gap would look like a code failure 40
+#                    minutes into a GPU allocation. Cheap to check first.
+#   1. noise scales — real 1979-2015 increments through make_noise_scales.py.
+#   2. training     — 250 iterations across the multi-year archive.
+#   3. resume       — re-enter stage 2's checkpoint_dir. "Trainable" has to mean
+#                     "resumable": no 37-year run finishes in one allocation.
+#
+# What stage 2 asserts, beyond "it didn't crash":
+#   * `multi-year archive ...: N sub-store(s)` — a directory routed to the
+#     multi-year dataset, so this trained the range and not one year.
+#   * `model step: 4 store row(s) (24 h)` in the log — the stride the store's
+#     6-hourly rows imply for a 24 h model. A 1 there would mean the recipe was
+#     training 6-hourly pairs against a daily model, which trains happily and is
+#     wrong (the 2026-08-13 stride audit).
+#   * every loss finite and not diverging. Note what is NOT asserted: that the
+#     loss falls. CONVERGENCE.md records a healthy run of this family moving
+#     -4.6% over 7300 batches with per-batch variance far larger than that, so a
+#     few hundred iterations cannot resolve the trend and demanding one would
+#     fail good runs. The trend check is the 10-epoch convergence sbatch.
+#
+# Submit:  qsub hpc/scripts/smoke_amip_si_multiyear_polaris.pbs
+
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N pn-si-multiyear
+
+# Same rationale as run_si_coarse_configs_polaris.pbs: stages record status and
+# the job fails at the END, so one failure does not hide the other results.
+set -uo pipefail
+FAILED=()
+
+MEMBERS=/eagle/lighthouse-uchicago/members/awikner
+REPO=$MEMBERS/physicsnemo
+cd "$REPO"
+
+export OMP_NUM_THREADS=1
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+# The dataset configs resolve their roots from this; it is NOT set in the login
+# environment, and the oc.env fallback is a Derecho path that does not exist here.
+export AI_ROSSBY_DATA=/eagle/lighthouse-uchicago/physicsnemo-zarr
+
+STATE=$AI_ROSSBY_DATA/amip_dailyavg_coarse
+BND=$AI_ROSSBY_DATA/amip_dailyavg_boundary
+NORM_DIR=$AI_ROSSBY_DATA/norm_stats
+SIGMA=$NORM_DIR/sigma_c_amip_dailyavg_coarse.pt
+RUN=$MEMBERS/si-multiyear-smoke
+CKPT_DIR=$RUN/checkpoints
+TSV=$RUN/per_batch.tsv
+LOG=$RUN/train.log
+
+# ---------------------------------------------------------------------------
+# Stage 0 — pre-flight
+# ---------------------------------------------------------------------------
+echo "############################################################"
+echo "### 0: pre-flight — archives, year sets, optimizer"
+echo "############################################################"
+for d in "$STATE" "$BND"; do
+    [[ -d "$d" ]] || { echo "ERROR: $d missing"; exit 1; }
+done
+mkdir -p "$RUN" "$NORM_DIR"
+
+# Year sets, as file names — exactly what the loader pairs on.
+( cd "$STATE" && ls -d *.zarr 2>/dev/null | sort ) > "$RUN/state_years.txt"
+( cd "$BND"   && ls -d *.zarr 2>/dev/null | sort ) > "$RUN/bnd_years.txt"
+echo "state:    $(wc -l < "$RUN/state_years.txt") store(s)  [$(head -1 "$RUN/state_years.txt") .. $(tail -1 "$RUN/state_years.txt")]"
+echo "boundary: $(wc -l < "$RUN/bnd_years.txt") store(s)  [$(head -1 "$RUN/bnd_years.txt") .. $(tail -1 "$RUN/bnd_years.txt")]"
+ONLY_STATE=$(comm -23 "$RUN/state_years.txt" "$RUN/bnd_years.txt" | tr '\n' ' ')
+if [[ -n "${ONLY_STATE// }" ]]; then
+    echo "ERROR: state years with no boundary store: $ONLY_STATE"
+    echo "       The loader raises on these by design. Either ship the missing"
+    echo "       boundary years or run the smoke against a subset directory."
+    exit 1
+fi
+echo "year sets match (extra boundary years are harmless: $(comm -13 "$RUN/state_years.txt" "$RUN/bnd_years.txt" | tr '\n' ' ')none-or-listed)"
+
+# Muon is the configured optimizer and needs a package that is not a repo
+# dependency. Fall back rather than abort: the subject here is the DATA path,
+# and a flat-loss result under AdamW would still be a real failure.
+OPT_OVERRIDE=()
+if .venv/bin/python -c "import muon" 2>/dev/null; then
+    echo "optimizer: Muon (configured)"
+else
+    echo "optimizer: muon not importable -> AdamW override for this smoke"
+    echo "           (install with: uv pip install git+https://github.com/KellerJordan/Muon)"
+    OPT_OVERRIDE=(++training.optimizer.type=AdamW)
+fi
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+echo
+
+# ---------------------------------------------------------------------------
+# Stage 1 — per-channel noise scales off the real archive
+# ---------------------------------------------------------------------------
+echo "############################################################"
+echo "### 1: noise scales — 1979-2015 increments, amip_si pack order"
+echo "############################################################"
+# --sample-stride 4: one increment per day rather than per row. A std over ~13k
+# samples per channel is converged well past the point where more rows change
+# the 4th digit, and the builder is I/O bound on 37 years of 6-hourly reads.
+if .venv/bin/python tools/data/amip/make_noise_scales.py \
+    --zarr "$STATE" \
+    --model-config examples/weather/ai_rossby/conf/model/amip_si.yaml \
+    --mean "$STATE/normalize_mean_dailyavg.nc" \
+    --std  "$STATE/normalize_std_dailyavg.nc" \
+    --year-start 1979 --year-end 2016 \
+    --sample-stride 4 \
+    --out "$SIGMA"
+then echo "STAGE 1: PASS"; else echo "STAGE 1: FAIL"; FAILED+=("1:noise-scales"); fi
+echo "--- sidecar ---"
+cat "${SIGMA%.pt}.json" 2>/dev/null || echo "(none)"
+echo
+
+# ---------------------------------------------------------------------------
+# Stage 2 — 250 iterations over the multi-year archive
+# ---------------------------------------------------------------------------
+echo "############################################################"
+echo "### 2: train_diffusion — model=amip_si loss=si multi-year"
+echo "############################################################"
+NOISE_OVERRIDE=()
+if [[ -f "$SIGMA" ]]; then
+    NOISE_OVERRIDE=(++loss.noise_scale_path="$SIGMA")
+else
+    echo "NOTE: no sigma artifact — training with isotropic noise instead"
+fi
+rm -rf "$TSV" "$LOG" "$CKPT_DIR"
+# hydra job.chdir=True moves the cwd, so the TSV path is absolute on purpose.
+# validation=off: the rollout validator is exercised by its own tests and would
+# eat most of a debug allocation.
+if .venv/bin/python examples/weather/ai_rossby/train_diffusion.py \
+    model=amip_si \
+    loss=si \
+    dataset=amip_dailyavg_coarse_multiyear \
+    training=amip_diffusion \
+    validation=off \
+    "${OPT_OVERRIDE[@]}" \
+    "${NOISE_OVERRIDE[@]}" \
+    ++training.max_epochs=1 \
+    ++training.stages.0.num_epochs=1 \
+    ++training.stages.0.max_iterations=250 \
+    ++training.ema.warmup_epochs=0 \
+    ++bench.per_batch_tsv="$TSV" \
+    +checkpoint_dir="$CKPT_DIR" \
+    run_name=si_multiyear_smoke \
+    wandb.enabled=False 2>&1 | tee "$LOG"
+then echo "STAGE 2 (run): PASS"; else echo "STAGE 2 (run): FAIL"; FAILED+=("2:train"); fi
+echo
+
+# --- the two assertions the run is FOR -------------------------------------
+echo "--- multi-year routing + stride ---"
+grep -E "multi-year archive|model step:" "$LOG" || echo "(neither line present)"
+if grep -q "model step: 4 store row(s) (24 h)" "$LOG"; then
+    echo "ASSERT stride: PASS"
+else
+    echo "ASSERT stride: FAIL — a 24 h model over 6 h rows must step 4 rows"
+    FAILED+=("2:stride")
+fi
+if grep -q "multi-year archive" "$LOG"; then
+    echo "ASSERT multi-year routing: PASS"
+else
+    echo "ASSERT multi-year routing: FAIL — a directory did not route to the"
+    echo "  multi-year dataset, so this trained one year"
+    FAILED+=("2:routing")
+fi
+
+echo "--- loss health ---"
+# NOT "the loss must fall" (2026-08-17). CONVERGENCE.md records what a HEALTHY
+# run of this family looks like early on: 10 epochs x 730 batches on real data
+# moved the mean loss -4.6%, with per-batch variance far larger than that. A
+# few hundred iterations therefore cannot resolve a trend, and asserting one
+# would fail good runs — measured locally too, where the loss sat flat at
+# 19.5k +- 3k over 480 iterations of a shrunken model. What IS diagnostic at
+# this length: every loss finite, and no divergence.
+if .venv/bin/python - "$TSV" <<'PY'
+import math, pathlib, statistics, sys
+rows = [l.split("\t") for l in pathlib.Path(sys.argv[1]).read_text().splitlines()[1:] if l.strip()]
+loss = [float(r[3]) for r in rows]
+if len(loss) < 40:
+    raise SystemExit(f"only {len(loss)} iterations logged")
+bad = [(i, v) for i, v in enumerate(loss) if not math.isfinite(v)]
+if bad:
+    raise SystemExit(f"non-finite loss at iterations {[i for i, _ in bad][:10]}")
+B = 40
+for i in range(0, len(loss) // B * B, B):
+    blk = loss[i:i + B]
+    print(f"  iters {i:>4}-{i + B - 1:<4} mean {statistics.mean(blk):>12.4e}  "
+          f"sd {statistics.stdev(blk):>12.4e}")
+first, last = statistics.mean(loss[:B]), statistics.mean(loss[-B:])
+sd = statistics.stdev(loss[:B])
+print(f"iterations {len(loss)}  first{B} {first:.4e} -> last{B} {last:.4e}  "
+      f"({100 * (last / first - 1):+.1f}%, block-mean noise ~{100 * sd / math.sqrt(B) / first:.1f}%)")
+if last > 1.5 * first:
+    raise SystemExit("loss DIVERGED (>1.5x its opening block)")
+print("ASSERT loss finite and not diverging: PASS")
+print("NOTE: the direction above is informational at this length; the trend "
+      "check is hpc/scripts/smoke_amip_diffusion_convergence_2xA40.sbatch.")
+PY
+then :; else echo "ASSERT loss health: FAIL"; FAILED+=("2:loss"); fi
+echo
+
+# ---------------------------------------------------------------------------
+# Stage 3 — the checkpoint round-trips
+# ---------------------------------------------------------------------------
+# "Trainable" has to include "resumable": a 37-year run will not finish inside
+# one allocation. This re-enters the same checkpoint_dir, which puts the
+# freshly written artifact through assert_checkpoint_dir_contract — the guard
+# that reads args.json out of the .mdlus and compares the stored channel
+# contract to the live model. Every contract bug in the Phase 12 rebaseline was
+# SHAPE-PRESERVING, so a checkpoint that loads is not evidence it matches.
+echo "############################################################"
+echo "### 3: resume — contract guard + load of our own checkpoint"
+echo "############################################################"
+RESUME_LOG=$RUN/resume.log
+if .venv/bin/python examples/weather/ai_rossby/train_diffusion.py \
+    model=amip_si \
+    loss=si \
+    dataset=amip_dailyavg_coarse_multiyear \
+    training=amip_diffusion \
+    validation=off \
+    "${OPT_OVERRIDE[@]}" \
+    "${NOISE_OVERRIDE[@]}" \
+    ++training.max_epochs=2 \
+    ++training.stages.0.num_epochs=2 \
+    ++training.stages.0.max_iterations=20 \
+    ++training.ema.warmup_epochs=0 \
+    +checkpoint_dir="$CKPT_DIR" \
+    run_name=si_multiyear_smoke \
+    wandb.enabled=False 2>&1 | tee "$RESUME_LOG"
+then echo "STAGE 3 (run): PASS"; else echo "STAGE 3 (run): FAIL"; FAILED+=("3:resume"); fi
+# The exact strings a resume emits, confirmed by running one (2026-08-17) rather
+# than guessed: nothing in the log contains the word "resume".
+grep -E "channel contract verified|Loaded (model state|checkpoint file|optimizer)|epoch [0-9]+ batch 0/" \
+    "$RESUME_LOG" | head -12
+if grep -q "channel contract verified against" "$RESUME_LOG"; then
+    echo "ASSERT contract guard ran on our own artifact: PASS"
+else
+    echo "ASSERT contract guard: FAIL — no .mdlus was found to check, so stage 2"
+    echo "  wrote no checkpoint and the restart path is unproven"
+    FAILED+=("3:no-guard")
+fi
+# Stage 2 completed epoch 1, so a resumed run starts at epoch 2. Starting at 1
+# again means it silently ignored the checkpoint and retrained from scratch.
+if grep -q "epoch 2 batch" "$RESUME_LOG"; then
+    echo "ASSERT resumed epoch numbering: PASS"
+else
+    echo "ASSERT resumed epoch numbering: FAIL — restarted at epoch 1"
+    FAILED+=("3:no-resume")
+fi
+echo
+
+echo "############################################################"
+if ((${#FAILED[@]})); then
+    echo "### SI multi-year smoke: ${#FAILED[@]} check(s) FAILED: ${FAILED[*]}"
+    exit 1
+fi
+echo "### SI multi-year smoke: all checks PASSED"

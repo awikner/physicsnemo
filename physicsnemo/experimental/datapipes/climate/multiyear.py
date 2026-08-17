@@ -52,7 +52,11 @@ class ClimateZarrMultiYearDataset(Dataset):
         ``__getitem__`` returns. Composition order matches the single-store
         path.
     boundary_zarr_path : str or pathlib.Path, optional
-        Single-year boundary store. Forwarded to each per-year sub-dataset.
+        Where varying boundaries are read from. Either a single ``*.zarr``,
+        forwarded to every per-year sub-dataset (correct only for a boundary
+        that does not vary by year), or a DIRECTORY of per-year boundary stores
+        paired to the state stores by file name — the AMIP pairing. See
+        :meth:`_resolve_per_year_boundaries`.
     yearly_repeating_boundary : bool, optional
         Forwarded to each per-year sub-dataset.
     leap_boundary_zarr_path, non_leap_boundary_zarr_path : str or pathlib.Path, optional

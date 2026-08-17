@@ -373,6 +373,23 @@ python train_diffusion.py model=amip_si loss=si \
     validation=diffusion_rollout run_name=amip_si_multiyear
 ```
 
+`boundary_zarr_path` follows the same directory-or-store rule, and pairs **by
+file name**: `<state>/1981.zarr` reads `<boundary>/1981.zarr`. Boundary reads are
+indexed by day-of-year, so *any* store answers a read — pointing all years at one
+year's SST is not an error the loader can see, which is why a state year with no
+matching boundary store raises rather than falling back:
+
+```
+ValueError: no boundary store for ['2016.zarr'] under .../amip_dailyavg_boundary;
+a multi-year archive pairs state and boundary stores by file name, and a missing
+year would otherwise be served another year's boundaries.
+```
+
+A single `*.zarr` is still accepted and still serves every year — correct for a
+genuine climatology, and the caller's assertion, not the loader's. The two
+archives therefore need the **same year set**; `python tools/data/registry.py
+check` is the pre-flight.
+
 **Per-channel noise scaling.** `loss/si.yaml` and `loss/si_x.yaml` ship
 `noise_scale_path: null`, i.e. isotropic noise. Upstream's SI runs load a
 per-channel scale (`sigma_c_lowres_26.pt`); build the equivalent from our own
