@@ -112,15 +112,26 @@ class ClimateZarrMultiYearDataset(Dataset):
             consolidated=consolidated,
             pin_memory_dtype=pin_memory_dtype,
             transform=None,  # per-year sub-datasets stay raw; we apply ours below
-            boundary_zarr_path=boundary_zarr_path,
             yearly_repeating_boundary=yearly_repeating_boundary,
             leap_boundary_zarr_path=leap_boundary_zarr_path,
             non_leap_boundary_zarr_path=non_leap_boundary_zarr_path,
             emit_calendar=emit_calendar,
             calendar_encoding=calendar_encoding,
         )
+        # ``boundary_zarr_path`` may be a DIRECTORY of per-year boundary stores,
+        # matched to the state stores by filename (2026-08-17). Passing the
+        # directory straight through — as this did — handed every sub-dataset a
+        # path that is not a Zarr group, so a multi-year run with varying
+        # boundaries died with ``GroupNotFoundError``; and pointing it at one
+        # year's store instead would have fed every year that year's SST. The
+        # AMIP pairing (coarse state + 1-degree boundary archive) needs this to
+        # train over a range at all.
+        boundary_for = self._resolve_per_year_boundaries(
+            boundary_zarr_path, store_paths
+        )
         sub_datasets: list[ClimateZarrDataset] = [
-            ClimateZarrDataset(p, **sub_kwargs) for p in store_paths
+            ClimateZarrDataset(p, boundary_zarr_path=boundary_for[p], **sub_kwargs)
+            for p in store_paths
         ]
 
         # Sort sub-datasets by start time of each store, then validate layout match.
@@ -183,6 +194,45 @@ class ClimateZarrMultiYearDataset(Dataset):
     # ------------------------------------------------------------------ #
     # Global-index dispatch
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _resolve_per_year_boundaries(
+        boundary_zarr_path: Optional[Union[str, Path]],
+        store_paths: list[Path],
+    ) -> dict:
+        """Map each state store to its own boundary store.
+
+        Three shapes are accepted:
+
+        * ``None`` — no varying-boundary store; every sub-dataset gets ``None``.
+        * a single ``*.zarr`` — every year reads boundaries from it. Correct only
+          for a boundary that genuinely does not vary by year (a climatology);
+          for AMIP's per-year SST/ice it would feed one year's ocean to all of
+          them, so it is allowed but is the caller's assertion, not ours.
+        * a DIRECTORY of ``*.zarr`` — paired to the state stores by file name, so
+          ``1981.zarr`` reads ``<boundary>/1981.zarr``. A state year with no
+          matching boundary store raises rather than silently falling back.
+        """
+        if boundary_zarr_path is None:
+            return {p: None for p in store_paths}
+        bpath = Path(boundary_zarr_path)
+        if not bpath.is_dir() or str(bpath).endswith(".zarr"):
+            return {p: bpath for p in store_paths}
+        available = {b.name: b for b in sorted(bpath.glob("*.zarr"))}
+        if not available:
+            raise ValueError(
+                f"boundary_zarr_path {bpath} is a directory with no *.zarr "
+                f"sub-stores in it"
+            )
+        missing = [p.name for p in store_paths if p.name not in available]
+        if missing:
+            raise ValueError(
+                f"no boundary store for {missing} under {bpath}; a multi-year "
+                f"archive pairs state and boundary stores by file name, and a "
+                f"missing year would otherwise be served another year's "
+                f"boundaries. Present: {sorted(available)[:5]}..."
+            )
+        return {p: available[p.name] for p in store_paths}
+
     def _global_to_local(self, global_idx: int) -> tuple[int, int]:
         """Return ``(sub_dataset_index, local_time_index)`` for a global index."""
         if global_idx < 0:
@@ -226,7 +276,21 @@ class ClimateZarrMultiYearDataset(Dataset):
             target_sample = sub_target[(target_local, 0)]
             sample = dict(start_sample)
             sample["target_surface"] = target_sample["surface_in"]
-            sample["target_upper_air"] = target_sample["upper_air_in"]
+            # Mirror the single-year path's target keys EXACTLY (2026-08-17).
+            # ``upper_air_in`` is absent for a surface-only store, and is replaced
+            # by ``upper_air_sigma_in`` / ``upper_air_pressure_in`` when a dataset
+            # mixes level systems with different counts (the SFNO case). Indexing
+            # ``upper_air_in`` unconditionally raised KeyError on the first, and
+            # dropped the sigma/pressure targets on the second — so a pair
+            # straddling a year boundary behaved differently from every other
+            # pair, which is the one thing this branch must not do.
+            for src, dst in (
+                ("upper_air_in", "target_upper_air"),
+                ("upper_air_sigma_in", "target_upper_air_sigma"),
+                ("upper_air_pressure_in", "target_upper_air_pressure"),
+            ):
+                if src in target_sample:
+                    sample[dst] = target_sample[src]
             sample["lead_time"] = torch.tensor(int(lead), dtype=torch.int64)
 
         # Rewrite time_idx to the GLOBAL index so downstream code (samplers,
