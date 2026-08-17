@@ -45,8 +45,19 @@ def _write_year(
         with h5py.File(dirpath / f"{year}_{idx:04d}.h5", "w") as f:
             g = f.create_group("input")
             g["time"] = np.bytes_(f"{year}-01-{idx + 1:02d}T00:00:00.000000000")
-            for v in ("t2m", "lsm", "sst"):
+            for v in ("t2m", "sst"):
                 g[v] = np.random.rand(_H, _W).astype("float32")
+            # A REAL orientation anchor, not noise. The converter checks the
+            # declared lat coordinate against the row order the data actually
+            # has, and votes on the land mask (Antarctica is land, the Arctic is
+            # ocean). A random mask made that vote a coin flip — it decided
+            # `S->N` off nothing and failed against the config's `N->S` lat.
+            # These archives really are S->N, so: row 0 is the South Pole and
+            # carries the Antarctic land ring, and `_config()` declares an
+            # ascending lat to match.
+            lsm = np.zeros((_H, _W), dtype="float32")
+            lsm[0] = 1.0
+            g["lsm"] = lsm
             for lev in _LEVELS:
                 g[f"temperature_{lev}"] = np.random.rand(_H, _W).astype("float32")
             if extras_here:
@@ -71,7 +82,10 @@ def _config():
         "levels": _LEVELS,
         "calendar": "standard",
         "horizontal_resolution": [_H, _W],
-        "lat": list(np.linspace(89.5, -89.5, _H)),
+        # ASCENDING (S->N), matching both the real AMIP archives and the land
+        # ring `_write_year` puts in row 0. Declaring N->S here is what the
+        # ingest-time orientation check exists to catch.
+        "lat": list(np.linspace(-89.5, 89.5, _H)),
         "lon": list((np.arange(_W) + 0.5).astype(float)),
         "data_timedelta_hours": 6,
     }

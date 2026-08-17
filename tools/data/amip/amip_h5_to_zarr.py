@@ -86,6 +86,12 @@ from physicsnemo.experimental.datapipes.climate import (
     CLIMATE_ZARR_SCHEMA_VERSION,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _common.lat_orientation import (  # noqa: E402
+    assert_coord_matches_data,
+    infer_h5_row_order,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -140,6 +146,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "in one region update. Smaller = lower peak memory, more zarr writes; "
         "larger = the inverse. 50 ≈ 2 GB peak for the AMIP 1981 layout — fits "
         "in any sane Slurm allocation while keeping the write overhead negligible.",
+    )
+    p.add_argument(
+        "--allow-lat-mismatch",
+        action="store_true",
+        help="Downgrade the ingest-time latitude-orientation check from an error "
+        "to a warning. The check compares the config's lat coordinate against the "
+        "row order the raw data actually has (Antarctic land ring / ice sheet, "
+        "solstice insolation, seasonal temperature). Only pass this if you have "
+        "confirmed the anchors are unusable for your archive — a mismatch means "
+        "every field lands upside-down relative to its label.",
     )
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
@@ -315,6 +331,7 @@ def convert(
     output: Path,
     time_chunk: int,
     write_batch: int = 50,
+    allow_lat_mismatch: bool = False,
 ) -> None:
     surface_vars = list(config.get("surface_variables", []) or [])
     pressure_upper_vars = list(config.get("pressure_upper_air_variables", []) or [])
@@ -436,6 +453,27 @@ def convert(
         v: first[v] for v in constant_boundary_vars
     }
 
+    # Verify the declared lat coordinate against the row order the DATA actually
+    # has. The raw H5 carries no lat coordinate, so this used to be a silent
+    # assumption -- and it was wrong: these archives store rows S->N (row 0 =
+    # South Pole) while the shipped configs declared lat N->S, which left every
+    # field upside-down relative to its label in every AMIP store ever written
+    # (see docs/dev/context/lat-orientation-audit.md). Anchors are facts about the
+    # Earth (Antarctic land ring / ice sheet, solstice insolation, seasonal
+    # temperature), so this is a real check, not a restatement of the config.
+    with h5py.File(files[0], "r") as _f:
+        _grp = _f["input"]
+        _order, _votes = infer_h5_row_order(_grp, month=times[0].month)
+    _msg = assert_coord_matches_data(
+        lat,
+        _order,
+        votes=_votes,
+        context=f"{input_dir} -> {output.name}",
+        strict=not allow_lat_mismatch,
+    )
+    logger.info("%s", _msg)
+    lat_row_order = _order or "unverified"
+
     n_lat = lat.shape[0]
     n_lon = lon.shape[0]
     n_levels = len(pressure_levels)
@@ -492,6 +530,10 @@ def convert(
         "extra_pressure_upper_air_variables": list(extra_pressure_upper_vars),
         "year_index": int(year),
         "sample_range": list(sample_range) if sample_range else "all",
+        # Row order of the DATA, established from physical anchors at ingest (not
+        # copied from the config). Consumers and tools/data/check_lat_orientation.py
+        # can rely on this rather than re-deriving it.
+        "lat_row_order": lat_row_order,
     }
 
     chunk_spec = {
@@ -608,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output,
         time_chunk=args.time_chunk,
         write_batch=args.write_batch,
+        allow_lat_mismatch=args.allow_lat_mismatch,
     )
     return 0
 

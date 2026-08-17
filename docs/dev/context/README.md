@@ -25,3 +25,4 @@ For a top-level orientation see the repo-root **`CLAUDE.md`**.
 | [derecho-retire-rehome-to-delta](derecho-retire-rehome-to-delta.md) | **DEFERRED** work: retire inode-limited Derecho scratch, re-home to Delta |
 | [known-test-failures](known-test-failures.md) | **Both fixed 2026-08-14.** Two recipe dirs both export `train` *and* `ema` (import-collision trap any new recipe dir can hit); a stale ArchesWeather guard assertion |
 | [PhysMetrics](PhysMetrics.md) | PhysMetrics.Weather install fix + custom mass-drift/TCWV-bias scripts for the hackathon hindcasts (`pangu_s2s`/`sfno_s2s` vs ERA5) |
+| [lat-orientation-audit](lat-orientation-audit.md) | **Every registry store audited + 346 repaired 2026-08-14.** True row order of each raw archive; the whole AMIP family was upside-down (relabelled S→N, 322 stores); ERA5 half-flips + Derecho 1979–1999 fixed; **Delta's 4 ERA5 stores still outstanding** (filesystem full) |

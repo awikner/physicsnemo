@@ -115,6 +115,12 @@ datasets:
   amip:
     subdir: amip
     target_years: "1978-2022"                   # 2023-2024 raw lack global_mean_co2 — dropped 2026-07-10
+    note: "LAT IS S->N (ascending, -89.5..89.5) for the whole AMIP family. The raw
+      archives store rows S->N and the converter copies them verbatim; the stores were
+      relabelled 2026-08-14 to say so (data bytes untouched, so still bit-identical to
+      upstream amip_v2 and to every existing checkpoint). Do NOT assume the N->S
+      convention that era5/plasim/imerg use — read the lat coord or the lat_row_order
+      attr. See docs/dev/context/lat-orientation-audit.md."
     stats_nc:                                  # .nc — still to convert to .zarr (11a)
       cluster: delta
       path: /work/hdd/bdiu/awikner/AMIP/h5
@@ -237,7 +243,13 @@ datasets:
     note: "diagnostic-only precip: total_precipitation_24hr (mm/day, renamed from
       RAINFALL), daily (data_timedelta_hours=24). Native India 33x35 grid from
       coordinates.nc (lat 6.5..38.5, lon 66.5..100.5); ~69% NaN (ocean/no-station)
-      preserved as the fill value. Not regridded."
+      preserved as the fill value. Not regridded.
+      LAT CONVENTION DIFFERS BY CLUSTER (audited 2026-08-14): delta + stampede3 were
+      reoriented to N->S, derecho is still the native S->N. Both are internally
+      consistent — the data matches each copy's own label — but positional code that
+      assumes N->S reads the derecho copy upside-down. Run
+      tools/data/precip/reorient_imd_lat.py on derecho to unify, or align by coord
+      value. See docs/dev/context/lat-orientation-audit.md."
     raw_source:                                 # per-day YYYYMMDDHH.h5 (input/RAINFALL) + coordinates.nc
       cluster: derecho
       path: /glade/derecho/scratch/awikner/laude_data/IMD_1p0

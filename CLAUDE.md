@@ -64,6 +64,13 @@ Globus → untar; ~5× faster than per-file Globus for these tiny-chunk stores).
   update <domain>` (Delta ↔ `access-ci.org`, TACC ↔ `uchicago.edu`).
 - **Don't `import physicsnemo` on a login node** for small scripts — CUDA/Warp
   init can core-dump; use plain xarray/numpy.
+- **Latitude orientation is NOT uniform across datasets.** `era5`/`plasim`/`imerg`
+  are N→S; **`amip*` and `e3sm` are S→N** (both correct — the raw archives are S→N
+  and the data is stored verbatim). Never assume a row order positionally: read the
+  `lat` coord or the `lat_row_order` attr. The raw H5 archives carry *no* lat coord,
+  so converters must verify against physical anchors — `tools/data/check_lat_orientation.py`
+  does this, and the AMIP converter now asserts it at ingest. Full audit +
+  outstanding repairs: [lat-orientation-audit](docs/dev/context/lat-orientation-audit.md).
 
 ## Conventions
 - Commit messages end with the `Co-Authored-By` trailer; branch before committing
