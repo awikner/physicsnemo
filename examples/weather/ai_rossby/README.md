@@ -819,6 +819,26 @@ Two properties this path is pinned to (`test/models/amip_si/test_combined_window
   obvious one. A rolling state whose channel count disagrees with the forecaster
   is refused outright, since a streaming driver may resume from disk.
 
+**`rollout.py` drives this from the command line** (2026-08-17) — the streaming
+API had no driver until then:
+
+```bash
+python rollout.py model=amip_combined dataset=amip_dailyavg_coarse \
+    +rollout.output_dir=./outputs/cascade \
+    +rollout.ic_start=8 +rollout.horizon=120 \
+    +rollout.forecaster_num_steps=2 +rollout.downscaler_num_steps=5
+```
+
+It adds six things `inference.py` structurally cannot do: two checkpoints and two
+schedulers (each contract-checked before loading); output coords from the
+**downscaler's** grid, read from a store rather than synthesized — `inference.py`
+takes them off the driving store, which would label a 180×360 field with the
+forecaster's 45 latitudes, and inventing a latitude vector would additionally risk
+the row order (§6.4); one `windowed_step` per frame instead of one
+`sample_rollout` over the horizon; mid-rollout resume via an atomically-written
+`(x_bar, eps_prev, step)`; separate forecaster/downscaler solver budgets; and
+month-buffered output instead of one file per IC.
+
 `conf/model/amip_combined.yaml` records the v1 pairing (`amip_si_x` + `amip_x_ddc`
 with their checkpoint paths) in the same shape.
 
@@ -923,6 +943,7 @@ Deterministic recipes (Pangu / SFNO / ArchesWeather):
 AMIP diffusion (§6):
 
 - `train_diffusion.py` — diffusion training entrypoint (single-step + rolling)
+- `rollout.py` — two-stage cascade driver (forecaster → downscaler), streaming
 - `validate_diffusion.py` — mid-training rollout validator (library, no CLI)
 - `eval_diffusion.py` — long-horizon climate eval suite
 - `conf/` — the Hydra config groups above (`model`, `loss`, `sampler`, `dataset`,
