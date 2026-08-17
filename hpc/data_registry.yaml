@@ -223,6 +223,35 @@ datasets:
     copies:
       - {cluster: polaris, years: ""}           # norm_stats/sst_climatology.npz
 
+  amip_noise_scales:                           # SI/SI_X scheduler artifact (2026-08-17)
+    subdir: norm_stats
+    target_years: ""                            # one file per (store, model config)
+    note: "sigma_c_<store>.pt (a few KB): the per-channel noise scaling
+      DriftScheduler (SI) and DynamicInterpolant (SI_X) multiply into their
+      sampled noise via `noise_scale_path`. Upstream's SI runs load their own
+      (sigma_c_lowres_26.pt); this fork shipped noise_scale_path: null and had no
+      way to build one, which is what blocked training this model type. The value
+      is the per-channel std of the model's own 24-hour increment in NORMALIZED
+      units (per level for upper air), i.e. how far each channel actually moves
+      in one model step — so slow channels stop being over-perturbed by isotropic
+      noise.
+      Build:
+        python tools/data/amip/make_noise_scales.py
+          --zarr $AI_ROSSBY_DATA/amip_dailyavg_coarse
+          --model-config examples/weather/ai_rossby/conf/model/amip_si.yaml
+          --mean .../normalize_mean_dailyavg.nc --std .../normalize_std_dailyavg.nc
+          --year-start 1979 --year-end 2015
+          --out $AI_ROSSBY_DATA/norm_stats/sigma_c_amip_dailyavg_coarse.pt
+      The artifact is indexed by PACKED channel, so it is specific to a
+      channel_layout: the builder derives the order from the model config you pass
+      it (that is why it takes one) and records the layout in a sidecar .json. An
+      artifact built for one layout must not be used with another — same silent
+      failure class as the checkpoint contract guard. Saved as a BARE tensor,
+      because that is what torch.load of noise_scale_path expects."
+    raw_source:
+      cluster: polaris                          # derived from amip_dailyavg_coarse
+      path: derived://amip_dailyavg_coarse
+
   imerg:                                       # IMERG global daily precipitation
     subdir: imerg
     target_years: "2000-2025"                   # 2000 partial (from 06-01), 2025 partial (to 04-30)

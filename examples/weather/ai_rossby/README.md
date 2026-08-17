@@ -359,6 +359,43 @@ python train_diffusion.py model=amip_rfm loss=rfm \
     run_name=amip_rfm_run0
 ```
 
+**Training over more than one year.** Point `dataset.zarr_path` at the archive
+*directory* rather than one `.zarr` and the loader routes to
+`ClimateZarrMultiYearDataset` — `dataset=amip_dailyavg_coarse_multiyear` does
+this. Until 2026-08-17 the diffusion recipe opened `ClimateZarrDataset`
+unconditionally and could only ever train on a single year, while the upstream SI
+and ERDM runs trained 1979–2015. Pairs and rolling windows dispatch across year
+boundaries by global index, so no year is skipped at the seams:
+
+```bash
+python train_diffusion.py model=amip_si loss=si \
+    dataset=amip_dailyavg_coarse_multiyear training=amip_diffusion \
+    validation=diffusion_rollout run_name=amip_si_multiyear
+```
+
+**Per-channel noise scaling.** `loss/si.yaml` and `loss/si_x.yaml` ship
+`noise_scale_path: null`, i.e. isotropic noise. Upstream's SI runs load a
+per-channel scale (`sigma_c_lowres_26.pt`); build the equivalent from our own
+store and point the config at it:
+
+```bash
+python tools/data/amip/make_noise_scales.py \
+    --zarr $AI_ROSSBY_DATA/amip_dailyavg_coarse \
+    --model-config examples/weather/ai_rossby/conf/model/amip_si.yaml \
+    --mean $AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_mean_dailyavg.nc \
+    --std  $AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc \
+    --year-start 1979 --year-end 2015 \
+    --out  $AI_ROSSBY_DATA/norm_stats/sigma_c_amip_dailyavg_coarse.pt
+```
+
+The scale is each channel's own 24-hour increment std in normalized units, so a
+channel that barely moves per step stops being perturbed as hard as one that
+does. **It is indexed by packed channel**, hence the required `--model-config`:
+the builder derives the order from that wrapper's own `pack_state`, and an
+artifact built for one `channel_layout` must not be used with another — the same
+silent failure class as §6.2's contract mismatch. A sidecar `.json` records the
+layout, years and channel count it was built from.
+
 Keep `loss` and `model` paired as in §6.3: the loss config **is** the training
 scheduler, and a rolling scheduler with a single-step wrapper (or the reverse) is
 a shape error, not a graceful fallback. `loss.window_size` is the window length —

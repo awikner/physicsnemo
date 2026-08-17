@@ -27,6 +27,7 @@ from the deterministic recipe. The diffusion-specific knobs live here:
 
 from __future__ import annotations
 
+import logging as _logging
 import math
 import sys
 import time
@@ -51,6 +52,7 @@ with warnings.catch_warnings():
     from physicsnemo.experimental.datapipes.climate import (
         ClimateNormalizer,
         ClimateZarrDataset,
+        ClimateZarrMultiYearDataset,
         NanFillTransform,
     )
     from physicsnemo.experimental.datapipes.climate.samplers import (
@@ -103,8 +105,8 @@ def _resolve_amp_dtype(amp: str | None) -> torch.dtype | None:
 
 def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
     data = cfg.dataset
-    ds = ClimateZarrDataset(
-        _resolve_path(data.zarr_path),
+    zarr_path = _resolve_path(data.zarr_path)
+    _ds_kwargs = dict(
         boundary_zarr_path=_resolve_path(data.get("boundary_zarr_path")),
         yearly_repeating_boundary=bool(data.get("yearly_repeating_boundary", False)),
         leap_boundary_zarr_path=_resolve_path(data.get("leap_boundary_zarr_path")),
@@ -113,6 +115,25 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
         ),
         emit_calendar=True,
     )
+    # A DIRECTORY of per-year sub-stores is a multi-year archive; a single
+    # ``.zarr`` is one year. Same routing ``train.py`` (line ~594) and
+    # ``inference.py`` have had since the multi-year port — the diffusion recipe
+    # simply never got it, so until 2026-08-17 it could only ever train on ONE
+    # year while the upstream SI/ERDM runs trained 1979-2015.
+    #
+    # Nothing else here changes: ClimateZarrMultiYearDataset exposes the same
+    # ``transform`` / ``layout`` / ``n_time`` surface, dispatches ``(start, lead)``
+    # by global index across year boundaries, and SequenceDataset's per-frame
+    # ``base[(t, 1)]`` reads inherit that, so rolling windows span years too.
+    _p = Path(zarr_path)
+    if _p.is_dir() and not str(zarr_path).endswith(".zarr"):
+        ds = ClimateZarrMultiYearDataset(zarr_path, **_ds_kwargs)
+        _logging.getLogger(__name__).info(
+            "multi-year archive %s: %d sub-store(s), %d rows",
+            zarr_path, len(getattr(ds, "sub_datasets", []) or []), ds.n_time,
+        )
+    else:
+        ds = ClimateZarrDataset(zarr_path, **_ds_kwargs)
     # The store may serve MORE varying-boundary channels than the model consumes
     # (2026-08-14): the real v1 SI checkpoint lists 3 where amip_dailyavg_coarse
     # has 4, because upstream's run never fed global_mean_co2. When that happens

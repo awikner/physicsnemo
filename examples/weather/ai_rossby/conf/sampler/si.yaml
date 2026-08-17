@@ -13,5 +13,15 @@ sigma_coef: 1.0
 beta_fn: t
 noise: gaussian
 l_max: 45
+# Per-channel noise scaling. ``null`` means isotropic noise. Upstream's SI runs
+# load one (``sigma_c_lowres_26.pt``); build the equivalent from OUR store with
+#   python tools/data/amip/make_noise_scales.py \
+#       --zarr $AI_ROSSBY_DATA/amip_dailyavg_coarse \
+#       --model-config examples/weather/ai_rossby/conf/model/amip_si.yaml \
+#       --mean .../normalize_mean_dailyavg.nc --std .../normalize_std_dailyavg.nc \
+#       --year-start 1979 --year-end 2015 --out $AI_ROSSBY_DATA/norm_stats/sigma_c.pt
+# and set the path here. It is indexed by PACKED channel, so an artifact built
+# for one channel_layout must not be used with another — the builder derives the
+# order from the model config you pass it, which is why it takes one.
 noise_scale_path: null
 integrator: euler
