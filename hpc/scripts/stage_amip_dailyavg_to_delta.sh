@@ -20,8 +20,18 @@
 # one 2-D field-year is 183 chunks + zarr.json = 18.36 MiB stored (23.63 MiB raw,
 # so ~1.29x blosc), and the store holds 154 2-D-equivalents per year (24 2-D
 # fields + 5 upper-air vars x 26 levels) => 2.76 GiB = 2.97 GB/yr, against the
-# registry's recorded 3.0 GB/yr. ~28k files/yr. The boundary store adds roughly
-# 0.44 GB/yr. So: ~11 GB for a 3-year smoke subset, ~136 GB for 1979-2015.
+# registry's recorded 3.0 GB/yr. The boundary store adds roughly 0.44 GB/yr. So:
+# ~11 GB for a 3-year smoke subset, ~136 GB for 1979-2015.
+#
+# File count, MEASURED by the 1979-1981 transfer (2026-08-18): 18,844 files and
+# 40,365 directories for 3 years of BOTH stores, i.e. ~3.1k files per store-year --
+# not the ~28k/yr first estimated here. That estimate multiplied one 2-D field's 183
+# time-chunks by all 154 2-D-equivalents, but the upper-air arrays chunk across the
+# LEVEL axis too, so `temperature` is 183 chunks in total rather than 183 x 26. The
+# byte estimate was unaffected (10.88 GB actual vs ~10.2 predicted). It also means
+# per-file Globus is less punishing here than the tiny-chunk warning implies: that
+# transfer averaged 38 MB/s end to end, ~5 minutes of moving after a slow
+# directory-enumeration phase.
 #
 # Per-file Globus is the slow path for these tiny-chunk stores (tar-bundling is
 # ~5x faster — hpc/scripts/replicate_tar.sh) but tar needs a shell on the SOURCE,
