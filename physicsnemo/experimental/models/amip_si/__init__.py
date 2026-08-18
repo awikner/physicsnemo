@@ -20,6 +20,11 @@ The diffusion schedulers that drive these backbones live at
 CUDA-graph + bf16 friendly metadata advertised in Phase 8f follow-ups.
 """
 
+from ._attention import (
+    attention_dtype,
+    get_attention_dtype,
+    set_attention_dtype,
+)
 from .dit import AmipDiT, DiTBlock, DiTCrossAttentionBlock
 from .erdm_unet import ERDM, CausalTemporalAttention
 from .rolling_dit import CausalTemporalBlock, RollingDiT
@@ -39,6 +44,9 @@ from .x_ddc import XDDCUNet
 DiT = AmipDiT
 
 __all__ = [
+    "attention_dtype",
+    "get_attention_dtype",
+    "set_attention_dtype",
     "AmipDiT",
     "AmipDiTWrapper",
     "CausalTemporalAttention",

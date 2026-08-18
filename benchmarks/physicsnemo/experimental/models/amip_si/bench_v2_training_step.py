@@ -513,6 +513,11 @@ def main() -> int:
     p.add_argument("--amp", choices=("none", "bf16", "fp16"), default="none",
                    help="upstream trains precision: 32-true, so 'none' is parity")
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
+    p.add_argument("--attn-dtype", default=None,
+                   help="run ONLY attention in this dtype (bf16/fp16) with the "
+                        "rest of the graph left alone — the profile-driven knob; "
+                        "applies to both sides, since upstream's blocks are the "
+                        "same code path")
     p.add_argument("--nvtx", action="store_true",
                    help="emit NVTX ranges (timed_step / forward_loss / backward / "
                         "optimizer) for Nsight Systems and Nsight Compute")
@@ -549,6 +554,10 @@ def main() -> int:
         # Turning that backend off leaves flash and mem-efficient, which do work.
         torch.backends.cuda.enable_cudnn_sdp(False)
     amp_dtype = {"none": None, "bf16": torch.bfloat16, "fp16": torch.float16}[args.amp]
+    if args.attn_dtype:
+        from physicsnemo.experimental.models.amip_si import set_attention_dtype
+
+        set_attention_dtype(args.attn_dtype)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     env = {
@@ -563,6 +572,7 @@ def main() -> int:
         "optimizer": args.optimizer,
         "cudnn_sdpa": not args.no_cudnn_sdpa,
         "nvtx": bool(args.nvtx),
+        "attn_dtype": args.attn_dtype,
         "shrink": args.shrink,
         "matmul_precision": torch.get_float32_matmul_precision(),
     }

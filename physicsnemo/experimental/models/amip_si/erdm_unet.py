@@ -18,6 +18,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from ._attention import sdpa
 from einops import rearrange
 
 from dataclasses import dataclass
@@ -121,7 +123,7 @@ class CausalTemporalAttention(nn.Module):
             qkv, 'b s t (three nh hd) -> three (b s) nh t hd', three=3, nh=nh
         ).unbind(0)                                                 # each (b*hw, nh, W, hd)
 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)  # (b*hw, nh, W, hd)
+        out = sdpa(q, k, v, is_causal=True)  # (b*hw, nh, W, hd)
         out = rearrange(out, '(b s) nh t hd -> b s t (nh hd)', b=b)
         out = self.proj(out)                                       # (b, hw, W, c)
         out = rearrange(out, 'b (h w) t c -> (b t) c h w', h=h, w=w)

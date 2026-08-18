@@ -10,16 +10,16 @@
 # vendored backbones (DiTCrossAttentionBlock instantiates it).
 
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 
+from .._attention import sdpa
 from .positional_encoding import apply_2d_rotary_pos_emb
 
 
 class CrossAttention(nn.Module):
     """Multi-head cross-attention with optional 2D RoPE on q and k.
 
-    Uses F.scaled_dot_product_attention. Queries come from `x`, keys/values
+    Uses :func:`.._attention.sdpa`. Queries come from `x`, keys/values
     from `context`. If RoPE frequencies are provided they must correspond to
     the same grid for both the query and context token sequences (i.e. the
     context is expected to live on the same patch grid as the queries).
@@ -56,7 +56,7 @@ class CrossAttention(nn.Module):
             q = apply_2d_rotary_pos_emb(q, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
             k = apply_2d_rotary_pos_emb(k, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
 
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = sdpa(q, k, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 

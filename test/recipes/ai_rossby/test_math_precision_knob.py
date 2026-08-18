@@ -121,3 +121,32 @@ def test_disabling_the_cudnn_sdpa_backend_is_honoured():
 
 def test_the_sdpa_hatch_is_not_applied_unless_asked():
     assert "disable_cudnn_sdpa" not in apply_math_precision(_cfg(amp="bf16"))
+
+
+class _SingleArgLogger:
+    """PhysicsNeMo's PythonLogger: ``info(self, message: str)`` and nothing more.
+
+    The real one lives in physicsnemo/utils/logging/console.py and is what the
+    recipe passes in. Logging with %-style varargs against it raises
+    "PythonLogger.info() takes 2 positional arguments but 3 were given", and since
+    the no-knobs-set branch also logs, that broke every diffusion run rather than
+    only knob-enabled ones. Stubbed here so the failure is one assertion instead of
+    a subprocess.
+    """
+
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def info(self, message: str):
+        if not isinstance(message, str):
+            raise TypeError(f"expected a pre-formatted str, got {type(message)}")
+        self.messages.append(message)
+
+
+def test_it_logs_through_a_single_argument_logger():
+    log = _SingleArgLogger()
+    apply_math_precision(_cfg(amp="none"), log=log)          # the no-knobs branch
+    apply_math_precision(_cfg(matmul_precision="high"), log=log)
+    assert len(log.messages) == 2
+    assert "none set" in log.messages[0]
+    assert "high" in log.messages[1]

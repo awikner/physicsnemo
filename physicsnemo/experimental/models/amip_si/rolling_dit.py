@@ -10,7 +10,8 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from ._attention import sdpa
 from einops import rearrange
 
 from dataclasses import dataclass
@@ -117,7 +118,7 @@ class CausalTemporalBlock(nn.Module):
 
         qkv = self.qkv(h).reshape(b * n, W, 3, self.num_heads, dim // self.num_heads)
         q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)   # each (b*n, heads, W, head_dim)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        out = sdpa(q, k, v, is_causal=True)
         out = rearrange(out, "bn heads W hd -> bn W (heads hd)")
         out = self.attn_out(out)                          # (b*n, W, dim)
 
@@ -197,7 +198,7 @@ class CausalForcingCrossAttentionBlock(nn.Module):
         v = v.reshape(b * n, W, heads, hd).transpose(1, 2)
 
         mask = attn_mask.view(1, 1, W, W)  # broadcast over b*n, heads
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = sdpa(q, k, v, attn_mask=mask)
         out = rearrange(out, "bn heads W hd -> bn W (heads hd)")
         out = self.attn_out(out)
 

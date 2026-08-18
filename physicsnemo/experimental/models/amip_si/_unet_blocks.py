@@ -13,9 +13,9 @@ backbone) and are vendored here to keep the dependency edge tight.
 """
 
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 
+from ._attention import sdpa
 from .layers.conv import SphereConv2d, nonlinearity
 
 
@@ -94,7 +94,7 @@ class ResBlock(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    """Multi-head self-attention with :func:`F.scaled_dot_product_attention`.
+    """Multi-head self-attention via :func:`.._attention.sdpa`.
 
     Parameters
     ----------
@@ -138,7 +138,7 @@ class AttentionBlock(nn.Module):
         qkv = rearrange(qkv, "b (three nh hd) h w -> three b nh (h w) hd", three=3, nh=nh, hd=head_dim)
         q, k, v = qkv.unbind(0)  # each [b, nh, h*w, head_dim]
 
-        out = F.scaled_dot_product_attention(q, k, v)  # [b, nh, h*w, head_dim]
+        out = sdpa(q, k, v)  # [b, nh, h*w, head_dim]
         out = rearrange(out, "b nh (h w) hd -> b (nh hd) h w", h=h, w=w)
 
         return x + self.proj(out)

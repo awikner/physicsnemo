@@ -17,7 +17,8 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from ._attention import sdpa
 from einops import rearrange, repeat
 
 from dataclasses import dataclass
@@ -121,7 +122,7 @@ class DiTBlock(nn.Module):
         q = apply_2d_rotary_pos_emb(q, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
         k = apply_2d_rotary_pos_emb(k, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
 
-        h = F.scaled_dot_product_attention(q, k, v)
+        h = sdpa(q, k, v)
         h = rearrange(h, "bs num_heads seqlen head_dim -> bs seqlen (num_heads head_dim)")
         h = self.attn_out(h) # [b, n, dim]
 
@@ -204,7 +205,7 @@ class DiTCrossAttentionBlock(nn.Module):
         q = apply_2d_rotary_pos_emb(q, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
         k = apply_2d_rotary_pos_emb(k, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
 
-        h = F.scaled_dot_product_attention(q, k, v)
+        h = sdpa(q, k, v)
         h = rearrange(h, "bs num_heads seqlen head_dim -> bs seqlen (num_heads head_dim)")
         h = self.attn_out(h)
 

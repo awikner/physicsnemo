@@ -526,6 +526,7 @@ def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
         ++training.allow_tf32=true              # cuDNN convolutions too
         ++training.cudnn_benchmark=true         # autotune conv algos
         ++training.disable_cudnn_sdpa=true      # REQUIRED for bf16 on GH200
+        ++training.attention_dtype=bf16         # attention only; see the profile
 
     Returns what it applied, so a run's log and any benchmark record agree about
     the settings the numbers were produced under.
@@ -537,6 +538,7 @@ def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
     tf32 = cfg_train.get("allow_tf32", None)
     benchmark = cfg_train.get("cudnn_benchmark", None)
     no_cudnn_sdpa = cfg_train.get("disable_cudnn_sdpa", None)
+    attn_dtype = cfg_train.get("attention_dtype", None)
 
     if precision is not None:
         if str(precision) not in _MATMUL_PRECISIONS:
@@ -564,19 +566,35 @@ def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
         # A no-op on x86, where the cuDNN backend is fine.
         torch.backends.cuda.enable_cudnn_sdp(False)
         applied["disable_cudnn_sdpa"] = True
+    if attn_dtype is not None:
+        # Profile-driven (Nsight Systems on GH200, 2026-08-18): with TF32 on,
+        # ~70% of a training step is fp32 mem-efficient attention running sm80
+        # CUTLASS kernels, which the TF32 flag cannot touch — ERDM's attention
+        # backward measured 3488.8 ms fp32 vs 3510.7 ms TF32, i.e. unchanged,
+        # while its GEMMs fell from 6416 ms to 705 ms. Running ONLY attention in
+        # bf16 reaches the sm90 flash kernels with everything else left fp32.
+        from physicsnemo.experimental.models.amip_si import set_attention_dtype
 
+        applied["attention_dtype"] = str(set_attention_dtype(attn_dtype))
+
+    # Messages are pre-formatted, NOT passed as %-style varargs: the recipe hands
+    # in PhysicsNeMo's PythonLogger, whose info() takes a single string
+    # (physicsnemo/utils/logging/console.py). Passing args raised
+    # "PythonLogger.info() takes 2 positional arguments but 3 were given" and, since
+    # the no-knobs branch logs too, broke EVERY diffusion run — caught by
+    # test_train_diffusion_smoke, which drives the real entry point.
     if log is not None:
+        precision_now = torch.get_float32_matmul_precision()
         if applied:
             log.info(
-                "float32 math knobs applied: %s (effective matmul precision %s)",
-                applied, torch.get_float32_matmul_precision(),
+                f"float32 math knobs applied: {applied} "
+                f"(effective matmul precision {precision_now})"
             )
         else:
             log.info(
-                "float32 math knobs: none set — matmul precision %s. "
-                "++training.matmul_precision=high measured 1.80x on x_DDC/A100 "
-                "and is what upstream amip_v2 trains with.",
-                torch.get_float32_matmul_precision(),
+                f"float32 math knobs: none set — matmul precision {precision_now}. "
+                f"++training.matmul_precision=high measured 1.80x on x_DDC/A100 "
+                f"and is what upstream amip_v2 trains with."
             )
     return applied
 
