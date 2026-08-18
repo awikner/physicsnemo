@@ -549,6 +549,69 @@ def repair_incomplete_slurm_env(*, log=None) -> bool:
     return True
 
 
+def choose_worker_start_method(
+    num_workers: int, requested: Any = None, *, log=None
+) -> Optional[str]:
+    """Pick a DataLoader start method that cannot deadlock (2026-08-18).
+
+    The pipeline contains two things a forked child does not inherit safely:
+    OpenMP (the boundary NaN fill runs ten ``F.conv2d`` iterations per frame) and
+    zarr v3's asyncio event loop, which lives in a background thread. With
+    ``fork``, a child whose parent already initialized a multi-threaded OpenMP
+    runtime hangs on its first parallel region.
+
+    Measured on a GH200, ``model=amip_si`` on the real 3-year store, 5 iterations:
+
+    ==========================  =============  ===================
+    OMP_NUM_THREADS / method    result         batches in 300 s
+    ==========================  =============  ===================
+    8, fork                     **hang**       0
+    1, fork                     ok             5
+    8, forkserver               ok             5
+    0 workers (control)         ok             5
+    ==========================  =============  ===================
+
+    So the trigger is the thread count, and there are two independent fixes. The
+    shipped HPC scripts all export ``OMP_NUM_THREADS=1`` and therefore never hit
+    it, which is why it stayed hidden until a benchmark script raised it for CPU
+    throughput and got a silent hang instead of a warning.
+
+    Policy: honour an explicit request; otherwise keep ``fork`` (the fastest
+    start) only when ``OMP_NUM_THREADS=1`` makes it provably safe, and use
+    ``forkserver`` whenever the runtime would be multi-threaded — including when
+    the variable is unset, since torch then defaults its intra-op pool to the core
+    count. Returns ``None`` to mean "leave torch's default alone".
+
+    NOTE: ``worker_init_fn`` with ``torch.set_num_threads(1)`` does NOT solve this;
+    it runs after the fork, when the child is already wedged. It is kept for
+    oversubscription only.
+    """
+    if int(num_workers) <= 0:
+        return None
+    if requested:
+        method = str(requested)
+        if log is not None:
+            log.info(f"DataLoader start method: {method} (explicitly configured)")
+        return method
+    omp = os.environ.get("OMP_NUM_THREADS")
+    if omp is not None and omp.strip() == "1":
+        if log is not None:
+            log.info(
+                "DataLoader start method: fork (OMP_NUM_THREADS=1, so the "
+                "boundary-smoothing conv2d cannot deadlock in a forked worker)"
+            )
+        return None
+    if log is not None:
+        log.info(
+            f"DataLoader start method: forkserver — OMP_NUM_THREADS="
+            f"{omp if omp is not None else 'unset'} would make forked workers "
+            f"deadlock in the boundary smoothing's conv2d (measured: 0 batches in "
+            f"300 s). Set OMP_NUM_THREADS=1 to use the faster fork start, or "
+            f"dataset.multiprocessing_context to choose explicitly."
+        )
+    return "forkserver"
+
+
 _MATMUL_PRECISIONS = ("highest", "high", "medium")
 
 

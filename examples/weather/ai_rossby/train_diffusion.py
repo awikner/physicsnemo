@@ -77,6 +77,7 @@ from train_loop import (  # noqa: E402
     adopt_ocean_contract,
     apply_math_precision,
     assert_checkpoint_dir_contract,
+    choose_worker_start_method,
     lead_times_for_sampler,
     load_partial_weights,
     make_optimizer,
@@ -287,14 +288,18 @@ def _build_loader(
         if num_workers > 0
         else {}
     )
-    # Optional start method for the workers. `fork` (torch's default on Linux) is
-    # the fast one but inherits the parent's OpenMP runtime and zarr v3's asyncio
-    # event-loop thread, neither of which survives a fork; `forkserver` and
-    # `spawn` start from a clean process instead. Left unset so behaviour does not
-    # change silently -- see docs/dev/context/dataloader-fork-deadlock.md.
-    mp_context = cfg.dataset.get("multiprocessing_context", None)
-    if num_workers > 0 and mp_context:
-        worker_kwargs["multiprocessing_context"] = str(mp_context)
+    # Start method for the workers. `fork` is fastest but inherits the parent's
+    # OpenMP runtime and zarr v3's asyncio event-loop thread, neither of which
+    # survives a fork: with OMP_NUM_THREADS>1 the workers deadlock in the boundary
+    # smoothing's conv2d and training produces zero batches. Chosen rather than
+    # assumed -- see train_loop.choose_worker_start_method for the measurements.
+    mp_context = choose_worker_start_method(
+        num_workers,
+        cfg.dataset.get("multiprocessing_context", None),
+        log=_logging.getLogger(__name__),
+    )
+    if mp_context:
+        worker_kwargs["multiprocessing_context"] = mp_context
     loader = DataLoader(
         dataset,
         batch_size=int(cfg.dataset.batch_size),

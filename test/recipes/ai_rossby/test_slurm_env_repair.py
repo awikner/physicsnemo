@@ -123,3 +123,70 @@ def test_it_logs_through_a_single_argument_logger():
     assert repair_incomplete_slurm_env(log=_Log()) is True
     assert len(messages) == 1
     assert "srun" in messages[0]
+
+
+# ---------------------------------------------------------------------------
+# DataLoader start method (2026-08-18)
+# ---------------------------------------------------------------------------
+from train_loop import choose_worker_start_method  # noqa: E402
+
+
+class _Log:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def info(self, message: str):
+        if not isinstance(message, str):
+            raise TypeError(f"expected a pre-formatted str, got {type(message)}")
+        self.messages.append(message)
+
+
+@pytest.fixture
+def _omp():
+    saved = os.environ.get("OMP_NUM_THREADS")
+    yield
+    if saved is None:
+        os.environ.pop("OMP_NUM_THREADS", None)
+    else:
+        os.environ["OMP_NUM_THREADS"] = saved
+
+
+def test_no_workers_means_no_start_method(_omp):
+    os.environ["OMP_NUM_THREADS"] = "8"
+    assert choose_worker_start_method(0) is None
+
+
+def test_one_omp_thread_keeps_the_faster_fork(_omp):
+    """Measured safe: OMP_NUM_THREADS=1 with forked workers ran 5/5 batches, and
+    every shipped HPC script exports exactly that."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    assert choose_worker_start_method(4) is None
+
+
+@pytest.mark.parametrize("omp", ["2", "8", "16"])
+def test_multiple_omp_threads_switch_to_forkserver(_omp, omp):
+    """Measured deadlock: OMP_NUM_THREADS=8 with forked workers produced 0 batches
+    in 300 s, twice, wedged in the boundary smoothing's conv2d."""
+    os.environ["OMP_NUM_THREADS"] = omp
+    assert choose_worker_start_method(4) == "forkserver"
+
+
+def test_an_unset_thread_count_is_treated_as_unsafe(_omp):
+    """torch defaults its intra-op pool to the core count when the variable is
+    unset, so 'unset' is the multi-threaded case, not the safe one."""
+    os.environ.pop("OMP_NUM_THREADS", None)
+    assert choose_worker_start_method(4) == "forkserver"
+
+
+def test_an_explicit_request_wins_over_the_policy(_omp):
+    os.environ["OMP_NUM_THREADS"] = "1"
+    assert choose_worker_start_method(4, "spawn") == "spawn"
+
+
+def test_it_says_which_method_it_chose_and_why(_omp):
+    """A silent switch would make a throughput change look like a mystery."""
+    os.environ["OMP_NUM_THREADS"] = "8"
+    log = _Log()
+    choose_worker_start_method(4, None, log=log)
+    assert "forkserver" in log.messages[0]
+    assert "OMP_NUM_THREADS=8" in log.messages[0]
