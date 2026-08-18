@@ -77,23 +77,40 @@ def power_sampler(batch_size, p=2.0, device = "cpu"):
     return t ** p
 
 class SphereNoiseGenerator(nn.Module):
+    r"""Band-limited noise on the sphere, via an inverse spherical harmonic transform.
+
+    The coefficient width comes from the transform's own ``mmax`` rather than
+    ``l_max + 1`` (2026-08-18). ``torch_harmonics`` changed that convention:
+    0.8.0 reports ``mmax = lmax + 1`` for ``lmax=180`` while 0.9.1 reports
+    ``mmax = lmax``, and ``sht.py`` asserts ``x.shape[-1] == self.mmax``. The
+    hardcoded ``l_max + 1`` therefore worked on 0.8.0 and died on 0.9.1 with a
+    bare ``AssertionError`` and no mention of either number — found when
+    ``conf/sampler/x_ddc.yaml``'s shipped ``noise: spherical`` crashed on Delta
+    (torch_harmonics 0.9.1) while passing locally (0.8.0).
+    """
+
     def __init__(self, l_max):
         super(SphereNoiseGenerator, self).__init__()
         from torch_harmonics import InverseRealSHT
 
         self.l_max = l_max
         self.isht = InverseRealSHT(lmax = l_max, nlat=l_max, nlon=l_max * 2, grid="equiangular")
+        # Ask the transform, do not assume. Both attributes exist on 0.8 and 0.9.
+        self.m_max = int(getattr(self.isht, "mmax", l_max + 1))
 
     def forward(self, b, c, device, dtype=torch.complex64, l_max=None):
         # sample coefficient in the frequency domain
         # b: batch size, l_max: maximum degree
-        # return: [b, l_max, l_max + 1] # coefficient for real harmonics
+        # return: [b, l_max, m_max] # coefficient for real harmonics
         if l_max is None:
             l_max = self.l_max
-            coeffs = torch.randn(b*c, l_max, l_max + 1, device=device, dtype=dtype)
+            coeffs = torch.randn(b*c, l_max, self.m_max, device=device, dtype=dtype)
         else:
-            assert l_max <= self.l_max
-            coeffs = torch.randn(b*c, self.l_max, self.l_max + 1, device=device, dtype=dtype)
+            if l_max > self.l_max:
+                raise ValueError(
+                    f"l_max={l_max} exceeds this generator's {self.l_max}"
+                )
+            coeffs = torch.randn(b*c, self.l_max, self.m_max, device=device, dtype=dtype)
             # fill with zeros
             coeffs[:, l_max:, :] = 0
 

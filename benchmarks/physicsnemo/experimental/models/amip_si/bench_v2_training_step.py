@@ -352,13 +352,14 @@ def _muon_groups_like_upstream(model, lr: float) -> list[dict]:
     comparison. Mirrored here once, for both.
     """
     # Our wrapper holds the backbone one level down; upstream's model IS the
-    # backbone. Both name their containers the same way — spatial_blocks,
-    # temporal_blocks, forcing_blocks — which is itself a sign the port is
-    # structural rather than a rewrite.
+    # backbone. Both name their containers the same way — RollingDiT's
+    # spatial_blocks / temporal_blocks / forcing_blocks and DiTAE's sa_blocks —
+    # which is itself a sign the port is structural rather than a rewrite.
     root = getattr(model, "backbone", model)
     containers = [
         getattr(root, n)
-        for n in ("spatial_blocks", "temporal_blocks", "forcing_blocks", "blocks")
+        for n in ("spatial_blocks", "temporal_blocks", "forcing_blocks",
+                  "sa_blocks", "blocks")
         if getattr(root, n, None) is not None
     ]
     if not containers:
