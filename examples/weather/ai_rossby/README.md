@@ -905,6 +905,9 @@ Working launchers, in the order you'd use them:
 | `hpc/scripts/smoke_amip_ocean_polaris.pbs` | v2 ocean + warm start + DDP, on real data, with assertions on the log |
 | `hpc/scripts/smoke_amip_v2_layout_2xA40.sbatch` | v2 channel layout under DDP |
 | `hpc/scripts/smoke_amip_diffusion_2xA40.sbatch` | v1 SI wiring smoke (1 mini-epoch) |
+| `hpc/scripts/smoke_amip_si_multiyear_polaris.pbs` | multi-year training + noise scales + resume, on the full archive |
+| `hpc/scripts/smoke_amip_si_multiyear_delta.sbatch` | the same four stages on Delta (derives the noise-scale year range from what is staged) |
+| `hpc/scripts/stage_amip_dailyavg_to_delta.sh` | Globus-stage the coarse + boundary stores Stampede3 → Delta (Delta holds neither) |
 | `hpc/scripts/bench_amip_diffusion_bf16.sbatch` | fp32-vs-bf16 throughput/memory |
 
 ### 6.15 Known limitations & gotchas

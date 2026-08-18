@@ -557,7 +557,11 @@ dead layers (`cross_attention.py`, `conv.py`, `basics.py`,
   from the pre-12e commit in a temp worktree and committed as
   `test/models/amip_si/data/rolling_dit_legacy_v1.pt`: default kwargs
   reproduce the same 48 state-dict keys, the same 244,260 parameters, and a
-  **bit-for-bit equal** forward. Budget/mix modes leave the replaced
+  **bit-for-bit equal** forward. (Qualified 2026-08-18: bit-for-bit held for the
+  thread count that generated the reference. Under `OMP_NUM_THREADS=1` the CPU
+  GEMM reduction order changes and the forward moves by one float32 ULP —
+  4.77e-7 — so the test now compares to `atol=1e-6`. The structural half stays
+  exact. See `docs/dev/context/known-test-failures.md` §3.) Budget/mix modes leave the replaced
   submodules unbuilt (no dead weights in the state dict).
 - **Muon grouping fixed** — a latent bug this feature would have hit: the
   wrapper's `muon_param_groups` listed only the legacy modules, so under

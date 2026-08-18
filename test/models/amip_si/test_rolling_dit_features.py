@@ -8,7 +8,9 @@
 Covers the four features vendored in 12e — budget input projection, mixture
 output head, forcing cross-attention, global conditioning — plus the
 non-negotiable requirement that ``legacy`` modes leave the pre-12e module
-tree and forward **bit-identical** so trained checkpoints still load.
+tree exactly as it was, and the forward unchanged to within one float32 ULP, so
+trained checkpoints still load. (Bitwise was the original bar and turned out to
+be a property of the thread count, not the code — see the test's docstring.)
 
 All synthetic, all tiny. Note the small-width constraints the layers enforce
 (they are real, not test artifacts): ``state_encoder='column'`` needs
@@ -113,12 +115,29 @@ def _legacy_reference_model():
     return m
 
 
-def test_legacy_module_tree_and_forward_are_bit_identical():
+def test_legacy_module_tree_and_forward_are_unchanged():
     """Default (all-legacy) kwargs must reproduce the pre-12e model exactly.
 
     Fixture generated from the commit before 12e landed
     (``data/rolling_dit_legacy_v1.pt``): state-dict key set, parameter count,
     and the forward output on fixed inputs.
+
+    The structural half stays EXACT — key set and parameter count are integers
+    and strings, so a refactor that moved a module shows up here immediately.
+
+    The forward is compared to one float32 ULP rather than bitwise, because
+    bitwise was not a property of the code (2026-08-18). Measured on one machine,
+    same commit, same torch: ``OMP_NUM_THREADS=1`` gives max |diff| 4.77e-7 over
+    12907 of 15360 elements, ``=2`` gives the same 4.77e-7 over 2464, and ``=8``
+    or unset gives exactly 0. That is CPU GEMM reduction order changing with the
+    thread count, and 4.77e-7 IS one ULP at this tensor's 1.68 scale. The test
+    therefore failed for anyone running under a pinned thread count -- which is
+    how the HPC job scripts here run pytest -- and said "legacy forward drifted"
+    when nothing had.
+
+    ``atol=1e-6`` keeps roughly 2x margin over that ULP while staying ~6 orders
+    below the signal: an actual behavioral change from the 12e refactor moves
+    outputs far more than this, so the guard the fixture exists for is intact.
     """
     ref = torch.load(_REF, weights_only=False)
     m = _legacy_reference_model()
@@ -132,7 +151,11 @@ def test_legacy_module_tree_and_forward_are_bit_identical():
     cs = torch.randn(2, 3, 3, generator=gi)
     with torch.no_grad():
         out = m(z, t, c_grid=cg, c_scalar=cs)
-    assert torch.equal(out, ref["out"]), "legacy forward drifted from the pre-12e reference"
+    worst = (out - ref["out"]).abs().max().item()
+    assert torch.allclose(out, ref["out"], rtol=0, atol=1e-6), (
+        f"legacy forward drifted from the pre-12e reference: max |diff| {worst:.3e} "
+        f"(one float32 ULP here is 4.77e-7; anything much above that is a real change)"
+    )
 
 
 def test_legacy_builds_no_new_submodules():
