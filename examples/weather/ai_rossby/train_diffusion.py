@@ -75,6 +75,7 @@ from train import (  # noqa: E402
 )
 from train_loop import (  # noqa: E402
     adopt_ocean_contract,
+    apply_math_precision,
     assert_checkpoint_dir_contract,
     lead_times_for_sampler,
     load_partial_weights,
@@ -563,6 +564,11 @@ def main(cfg: DictConfig) -> None:
     # exactly once.
     raw_ds = _build_dataset(cfg)
     cfg_train = cfg.training
+    # Opt-in float32 math knobs, logged either way so a run records the settings
+    # its throughput was produced under. Off by default: enabling them changes a
+    # trained model's numerics. ++training.matmul_precision=high measured 1.80x on
+    # the v2 x_DDC config (A100), and is what upstream amip_v2 already trains with.
+    apply_math_precision(cfg_train, log=logger)
     stages = list(cfg_train.stages)
     total_epochs = sum(int(s.num_epochs) for s in stages)
     logger.info(

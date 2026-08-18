@@ -502,6 +502,72 @@ def load_partial_weights(
     return {"loaded": sorted(filtered), "skipped": skipped, "fresh": fresh}
 
 
+_MATMUL_PRECISIONS = ("highest", "high", "medium")
+
+
+def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
+    """Opt-in float32 math knobs. Default: change nothing.
+
+    Measured on an A100-40GB with the v2 x_DDC config at its shipped geometry
+    (``benchmarks/.../bench_v2_training_step.py``, 2026-08-18): one training step
+    takes **656 ms** with torch's default ``highest`` matmul precision and
+    **365 ms** with ``high`` — a 1.80x speedup for a mantissa change that stays
+    within ~3 decimals of fp32, well under training noise.
+
+    This is a PARITY gap, not a bonus: upstream amip_v2's ``train.py`` calls
+    ``torch.set_float32_matmul_precision("high")``, so its runs already get the
+    365 ms while ours got 656. ``train.py`` in this repo does the same for
+    Pangu/SFNO and records ~15% there. ``train_diffusion.py`` never did.
+
+    Left OFF by default all the same, because it changes the numerics of a
+    trained model and that is the user's call, not this function's. Enable with::
+
+        ++training.matmul_precision=high        # the 1.80x
+        ++training.allow_tf32=true              # cuDNN convolutions too
+        ++training.cudnn_benchmark=true         # autotune conv algos
+
+    Returns what it applied, so a run's log and any benchmark record agree about
+    the settings the numbers were produced under.
+    """
+    applied: dict[str, Any] = {}
+    if cfg_train is None:
+        return applied
+    precision = cfg_train.get("matmul_precision", None)
+    tf32 = cfg_train.get("allow_tf32", None)
+    benchmark = cfg_train.get("cudnn_benchmark", None)
+
+    if precision is not None:
+        if str(precision) not in _MATMUL_PRECISIONS:
+            raise ValueError(
+                f"training.matmul_precision={precision!r} is not one of "
+                f"{_MATMUL_PRECISIONS}"
+            )
+        torch.set_float32_matmul_precision(str(precision))
+        applied["matmul_precision"] = str(precision)
+    if tf32 is not None and torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
+        torch.backends.cudnn.allow_tf32 = bool(tf32)
+        applied["allow_tf32"] = bool(tf32)
+    if benchmark is not None:
+        torch.backends.cudnn.benchmark = bool(benchmark)
+        applied["cudnn_benchmark"] = bool(benchmark)
+
+    if log is not None:
+        if applied:
+            log.info(
+                "float32 math knobs applied: %s (effective matmul precision %s)",
+                applied, torch.get_float32_matmul_precision(),
+            )
+        else:
+            log.info(
+                "float32 math knobs: none set — matmul precision %s. "
+                "++training.matmul_precision=high measured 1.80x on x_DDC/A100 "
+                "and is what upstream amip_v2 trains with.",
+                torch.get_float32_matmul_precision(),
+            )
+    return applied
+
+
 def make_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimizer:
     """Build an optimizer from a config dict-like.
 
