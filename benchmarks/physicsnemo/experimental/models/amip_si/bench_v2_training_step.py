@@ -477,6 +477,11 @@ def main() -> int:
     p.add_argument("--amp", choices=("none", "bf16", "fp16"), default="none",
                    help="upstream trains precision: 32-true, so 'none' is parity")
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
+    p.add_argument("--no-cudnn-sdpa", action="store_true",
+                   help="disable the cuDNN attention backend. Needed on GH200 "
+                        "with the inherited torch 2.10 build, where bf16 SDPA "
+                        "dies with 'cuDNN Frontend error: No valid execution "
+                        "plans built' — flash/mem-efficient still work")
     p.add_argument("--scheduler", choices=("upstream", "ours"), default=None,
                    help="whose scheduler kwargs BOTH sides use. Default: upstream "
                         "when --amip-repo is given (isolates implementation), else "
@@ -499,6 +504,11 @@ def main() -> int:
         torch.set_float32_matmul_precision("high")
     if args.cudnn_benchmark:
         torch.backends.cudnn.benchmark = True
+    if args.no_cudnn_sdpa:
+        # GH200 + the DeltaAI-inherited torch 2.10 has no valid cuDNN attention
+        # plan for these shapes in bf16 and raises rather than falling back.
+        # Turning that backend off leaves flash and mem-efficient, which do work.
+        torch.backends.cuda.enable_cudnn_sdp(False)
     amp_dtype = {"none": None, "bf16": torch.bfloat16, "fp16": torch.float16}[args.amp]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -512,6 +522,7 @@ def main() -> int:
         "amp": args.amp,
         "compile": bool(args.compile),
         "optimizer": args.optimizer,
+        "cudnn_sdpa": not args.no_cudnn_sdpa,
         "shrink": args.shrink,
         "matmul_precision": torch.get_float32_matmul_precision(),
     }
