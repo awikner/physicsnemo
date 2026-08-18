@@ -141,6 +141,45 @@ as-is on Hopper.
 That is the whole argument for `attention_dtype=bf16` — it is the one part of the
 step that Hopper could not accelerate, and it was 70% of it.
 
+### Kernel counters (Nsight Compute)
+
+`ncu --nvtx --nvtx-include "timed_step/" --kernel-name "regex:fmha|flash|xmma_gemm|sgemm"`,
+per-launch on GH200. Durations are longer than the nsys timeline because counter
+collection replays each kernel; the ratios are the point.
+
+| kernel | dur | compute% | dram% | occ% | tensor% |
+|---|---|---|---|---|---|
+| x_DDC fp32 GEMM `sm80_xmma_..._f32f32_tilesize128x128x8` | 717 µs | 85.3 | 2.9 | 12.5 | **0.0** |
+| x_DDC TF32 GEMM `sm90_xmma_..._tf32f32_tilesize128x128x32` | **92 µs** | 83.3 | 17.1 | 17.8 | **88.7** |
+| x_DDC attention `fmha_cutlassF_f32_aligned_64x64_rf_sm80`, fp32 | 2799 µs | 51.1 | 0.9 | 17.0 | 32.3 |
+| the same kernel with TF32 enabled | **2799 µs** | 51.1 | 0.9 | 17.0 | 32.3 |
+| x_DDC attention `pytorch_flash::flash_fwd_kernel`, bf16 | **325 µs** | 51.3 | 2.1 | 12.3 | 48.4 |
+| ERDM attention `fmha_cutlassF_..._sm80`, TF32 | 15298 µs | 54.4 | 1.1 | 18.5 | 33.5 |
+| ERDM TF32 GEMM `sm90_xmma_..._tilesize128x128x32` | 579–739 µs | 85.8–87.8 | 22–26 | 18.6 | **92.8–98.4** |
+
+What the counters settle:
+
+* **fp32 GEMMs use no tensor cores at all** (0.0%), running at 85% of *fp32* peak.
+  TF32 lifts the same GEMMs to ~90% tensor utilization and **7.8x** faster
+  (717 -> 92 µs). That is the TF32 win, measured rather than inferred.
+* **The attention kernel is unchanged by TF32** — identical duration, identical
+  32.3% tensor, identical 0.9% DRAM — confirming at counter level what the timeline
+  implied. bf16 replaces it with flash at **325 µs, 8.6x faster**, which is what
+  produces the 2.27x step-level speedup.
+* **Nothing is bandwidth-bound.** DRAM throughput is 0.9–2.1% for attention and
+  17–26% for the TF32 GEMMs. That rules out a whole class of optimizations —
+  `channels_last`, layout changes, fusing memory-bound elementwise work — none of
+  which had anything to reclaim. A useful negative result.
+* **What remains is compute-saturated or parallelism-starved, not fixable in the
+  model.** The TF32 GEMMs sit at 84–88% compute and 90%+ tensor. Flash attention is
+  at 51% compute and 12.3% occupancy, i.e. latency-bound on available parallelism,
+  where the lever is batch size (measured: 59.3 ms/sample at batch 2 versus 80.8 at
+  batch 1) rather than any restructuring.
+* One loose end, recorded and not chased: ERDM's TF32 run still contains three small
+  `sm80_xmma_gemm_f32f32_f32f32` kernels at 0.1–0.3% tensor (7.3, 8.5, 40.5 µs) —
+  cuBLAS picking SIMT kernels for shapes too small to profit from TF32. Together
+  well under 1% of the step.
+
 ## Practical notes
 
 * **ERDM needs ~67 GB/GPU in fp32.** A 40 GB A100 cannot train the shipped geometry
