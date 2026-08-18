@@ -44,6 +44,7 @@ def _restore_torch_math_state():
         "benchmark": torch.backends.cudnn.benchmark,
     }
     if torch.cuda.is_available():
+        saved["cudnn_sdp"] = torch.backends.cuda.cudnn_sdp_enabled()
         saved["matmul_tf32"] = torch.backends.cuda.matmul.allow_tf32
         saved["cudnn_tf32"] = torch.backends.cudnn.allow_tf32
     yield
@@ -52,6 +53,7 @@ def _restore_torch_math_state():
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = saved["matmul_tf32"]
         torch.backends.cudnn.allow_tf32 = saved["cudnn_tf32"]
+        torch.backends.cuda.enable_cudnn_sdp(saved["cudnn_sdp"])
 
 
 def _cfg(**kw):
@@ -105,3 +107,17 @@ def test_all_three_together_report_together():
     )
     assert applied["matmul_precision"] == "high"
     assert applied["cudnn_benchmark"] is True
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="SDPA backend flags need CUDA")
+def test_disabling_the_cudnn_sdpa_backend_is_honoured():
+    """The GH200 escape hatch. Without it, `amp: bf16` there cannot run at all:
+    scaled_dot_product_attention raises "cuDNN Frontend error: No valid execution
+    plans built" rather than falling back to flash or mem-efficient."""
+    applied = apply_math_precision(_cfg(disable_cudnn_sdpa=True))
+    assert applied == {"disable_cudnn_sdpa": True}
+    assert torch.backends.cuda.cudnn_sdp_enabled() is False
+
+
+def test_the_sdpa_hatch_is_not_applied_unless_asked():
+    assert "disable_cudnn_sdpa" not in apply_math_precision(_cfg(amp="bf16"))

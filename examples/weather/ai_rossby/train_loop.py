@@ -525,6 +525,7 @@ def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
         ++training.matmul_precision=high        # the 1.80x
         ++training.allow_tf32=true              # cuDNN convolutions too
         ++training.cudnn_benchmark=true         # autotune conv algos
+        ++training.disable_cudnn_sdpa=true      # REQUIRED for bf16 on GH200
 
     Returns what it applied, so a run's log and any benchmark record agree about
     the settings the numbers were produced under.
@@ -535,6 +536,7 @@ def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
     precision = cfg_train.get("matmul_precision", None)
     tf32 = cfg_train.get("allow_tf32", None)
     benchmark = cfg_train.get("cudnn_benchmark", None)
+    no_cudnn_sdpa = cfg_train.get("disable_cudnn_sdpa", None)
 
     if precision is not None:
         if str(precision) not in _MATMUL_PRECISIONS:
@@ -551,6 +553,17 @@ def apply_math_precision(cfg_train: Any, *, log=None) -> dict:
     if benchmark is not None:
         torch.backends.cudnn.benchmark = bool(benchmark)
         applied["cudnn_benchmark"] = bool(benchmark)
+    if no_cudnn_sdpa:
+        # GH200 escape hatch (measured 2026-08-18). With DeltaAI's inherited
+        # torch 2.10, bf16 attention on GH200 raises "cuDNN Frontend error: No
+        # valid execution plans built" out of F.scaled_dot_product_attention
+        # instead of falling back, so `amp: bf16` cannot run there at all.
+        # Disabling that one backend leaves flash and mem-efficient, which work
+        # -- and bf16 is the largest lever measured: 3.83x on ERDM v2 and 3.89x
+        # on x_DDC versus fp32, with a third off ERDM's peak memory.
+        # A no-op on x86, where the cuDNN backend is fine.
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        applied["disable_cudnn_sdpa"] = True
 
     if log is not None:
         if applied:
