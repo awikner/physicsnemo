@@ -180,6 +180,37 @@ What the counters settle:
   cuBLAS picking SIMT kernels for shapes too small to profit from TF32. Together
   well under 1% of the step.
 
+### End to end on real data (loader included)
+
+The synthetic numbers above measure the model step. This measures a real training
+loop over the staged 1979-1981 coarse store with its 1-degree boundary archive,
+4 DataLoader workers, ERDM v2, AdamW, 30 iterations on a GH200. Per-batch times
+are consecutive differences of the bench TSV's elapsed column — that column is
+cumulative, and reading it as per-batch inflates the median ~20x.
+
+| ERDM v2, real data | median per batch | spread | 30 batches |
+|---|---|---|---|
+| knobs off (as shipped) | **2403.1 ms** | 2393–2417 | 86.4 s |
+| `matmul_precision=high` + `allow_tf32` + `attention_dtype=bf16` | **696.3 ms** | 685–712 | 33.4 s |
+
+**3.45x end to end**, and ±1% spread — so nothing stalls on I/O.
+
+**The loader is free at this model size.** End-to-end 2403 ms sits *below* the
+2519 ms synthetic model step, because the synthetic ERDM runs used Muon (upstream's
+configured optimizer, ~12% slower than AdamW) while this used AdamW. Same for the
+optimized pair: 696 ms end-to-end against 793 ms synthetic. So prefetch hides the
+loader completely, which the standalone loader numbers predict:
+
+| read pattern | 0 workers | 4 workers | 8 workers | MB/sample |
+|---|---|---|---|---|
+| single `(start, lead)` | 34.4 ms | 9.3 ms | 7.7 ms | 9.0 |
+| windowed W=6 (ERDM's read) | 158.2 ms | 48.5 ms | 34.8 ms | 27.7 |
+
+A 48.5 ms window against a 696 ms step is 14x of headroom at the shipped worker
+count. Upstream's memmap fast store versus our per-year Zarr therefore cannot
+matter at this model size; it would only start to matter for a model an order of
+magnitude cheaper per step.
+
 ## Practical notes
 
 * **ERDM needs ~67 GB/GPU in fp32.** A 40 GB A100 cannot train the shipped geometry
@@ -194,6 +225,15 @@ What the counters settle:
   A100). Upstream's configs specify it, so compare Muon-to-Muon.
 * **x_DDC at batch 2** is 59.3 ms/sample versus 80.8 at batch 1 (bf16) — 1.36x better
   per-sample throughput for 14.35 GB.
+* **`num_workers > 0` deadlocks unless the start method is chosen.** The boundary
+  NaN fill runs ten `F.conv2d` iterations per frame inside each worker; conv2d is
+  OpenMP-parallel and a forked child inheriting a multi-threaded OpenMP runtime
+  hangs on its first parallel region. Measured: `OMP_NUM_THREADS=8` + 4 forked
+  workers gave **0 batches in 300 s** (twice), while `=1` + fork, `=8` +
+  `forkserver`, and 0 workers all ran with bit-identical losses. The recipe now
+  picks the method (`choose_worker_start_method`); every shipped HPC script exports
+  `OMP_NUM_THREADS=1`, which is why this stayed hidden until a benchmark script
+  raised it.
 * **Shrunken geometry misleads about fixed costs.** At 1/8 backbone width the
   spherical-noise option looked like a 1.6x tax; at production geometry it is
   654.2 ms against 656.4, i.e. nothing.
