@@ -82,6 +82,7 @@ from train_loop import (  # noqa: E402
     make_optimizer,
     make_scheduler,
     model_step_rows,
+    repair_incomplete_slurm_env,
 )
 from validate import Deterministic, GaussianIC, ReplicateOnly  # noqa: E402
 from validate_diffusion import DiffusionRolloutValidator  # noqa: E402
@@ -529,6 +530,10 @@ def _train_step(
 
 @hydra.main(version_base="1.2", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
+    # Before the manager looks at the environment: an sbatch shell without srun
+    # leaves SLURM's launch IP unset, which sends initialize() down a path that
+    # dies on MASTER_ADDR=None. See train_loop.repair_incomplete_slurm_env.
+    repair_incomplete_slurm_env()
     DistributedManager.initialize()
     dist = DistributedManager()
     logger = PythonLogger("amip_diffusion_train")

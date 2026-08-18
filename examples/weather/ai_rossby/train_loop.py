@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import logging
+import os
 import tarfile
 import zipfile
 from pathlib import Path
@@ -500,6 +501,52 @@ def load_partial_weights(
             f"(e.g. {', '.join(fresh[:5])})"
         )
     return {"loaded": sorted(filtered), "skipped": skipped, "fresh": fresh}
+
+
+def repair_incomplete_slurm_env(*, log=None) -> bool:
+    """Make a bare ``python train_diffusion.py`` under ``sbatch`` launch correctly.
+
+    ``DistributedManager.initialize()`` tries the ENV method, falls through to the
+    SLURM branch on TypeError, and there reads ``SLURM_LAUNCH_NODE_IPADDR`` as its
+    address. Measured 2026-08-18: an **sbatch** shell exports ``SLURM_PROCID=0`` and
+    ``SLURM_NPROCS=1`` but NOT that IP — only ``srun`` steps get it — so the manager
+    hands ``addr=None`` to ``setup()`` and the run dies two frames later with::
+
+        TypeError: str expected, not NoneType     (os.environ["MASTER_ADDR"] = addr)
+
+    Nothing in that message names SLURM, the missing variable, or the launcher, and
+    it fires before the model or dataset is touched, which makes it read like a
+    config error. It cost two debugging rounds in one day — once in a job script of
+    mine, once in an ad-hoc benchmark script that reintroduced it after the first fix
+    — so the recipe should not depend on the caller remembering to use torchrun.
+
+    The narrow repair: when SLURM says single-process (``SLURM_NPROCS`` unset or 1),
+    the launch IP is absent, and no ``RANK`` is set, fill in the ENV-method variables
+    for one rank so ``initialize_env()`` succeeds on its own terms. Under ``srun``
+    the IP exists and this does nothing; under ``torchrun`` ``RANK`` exists and this
+    does nothing; genuinely multi-rank SLURM launches are untouched.
+    """
+    if os.environ.get("RANK") is not None:
+        return False                      # torchrun (or an explicit ENV launch)
+    if os.environ.get("SLURM_PROCID") is None:
+        return False                      # not under SLURM at all
+    if os.environ.get("SLURM_LAUNCH_NODE_IPADDR") is not None:
+        return False                      # an srun step: the SLURM branch works
+    if int(os.environ.get("SLURM_NPROCS", "1") or 1) > 1:
+        return False                      # multi-rank: do not paper over it
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0"))
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29513")
+    if log is not None:
+        log.info(
+            "single-process SLURM launch without srun: filled RANK/WORLD_SIZE/"
+            "MASTER_ADDR so the ENV init path applies (SLURM_LAUNCH_NODE_IPADDR "
+            "is unset in an sbatch shell, which would otherwise fail with "
+            "'str expected, not NoneType')"
+        )
+    return True
 
 
 _MATMUL_PRECISIONS = ("highest", "high", "medium")
