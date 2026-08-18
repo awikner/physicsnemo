@@ -66,6 +66,8 @@ Run::
 from __future__ import annotations
 
 import argparse
+import atexit
+import gc
 import json
 import logging
 import statistics
@@ -338,9 +340,78 @@ def step_fn(family: str, model, scheduler, inputs):
 # --------------------------------------------------------------------------- #
 # Timing
 # --------------------------------------------------------------------------- #
-def time_steps(loss_fn, params, *, iters: int, warmup: int, lr: float,
-               amp_dtype, device) -> dict:
-    opt = torch.optim.AdamW(params, lr=lr)
+def _muon_groups_like_upstream(model, lr: float) -> list[dict]:
+    """Upstream's split, applied identically to both sides.
+
+    ``TrainModule.get_rolling_dit_muon_param_groups`` sends the transformer
+    blocks' weight matrices to Muon at 10x lr and everything else — gains, biases,
+    embedders, patchify/unpatchify, output head — to the aux Adam at 1x. Neither
+    "all 2-D tensors" nor our wrapper's own helper is the same rule, and since
+    Muon and Adam carry different amounts of state per parameter, using different
+    rules on the two sides would turn a memory comparison into a grouping
+    comparison. Mirrored here once, for both.
+    """
+    # Our wrapper holds the backbone one level down; upstream's model IS the
+    # backbone. Both name their containers the same way — spatial_blocks,
+    # temporal_blocks, forcing_blocks — which is itself a sign the port is
+    # structural rather than a rewrite.
+    root = getattr(model, "backbone", model)
+    containers = [
+        getattr(root, n)
+        for n in ("spatial_blocks", "temporal_blocks", "forcing_blocks", "blocks")
+        if getattr(root, n, None) is not None
+    ]
+    if not containers:
+        raise ValueError(
+            f"{type(model).__name__} exposes no transformer block containers "
+            f"(looked for spatial_blocks/temporal_blocks/forcing_blocks/blocks)"
+        )
+    hidden = [q for c in containers for q in c.parameters() if q.ndim >= 2]
+    hidden_ids = {id(q) for q in hidden}
+    rest = [q for q in model.parameters() if id(q) not in hidden_ids]
+    return [
+        dict(params=hidden, use_muon=True, lr=lr * 10, weight_decay=0.01),
+        dict(params=rest, use_muon=False, lr=lr, betas=(0.9, 0.95),
+             weight_decay=0.01),
+    ]
+
+
+def build_optimizer(kind: str, model, lr: float):
+    """AdamW or Muon.
+
+    Not cosmetic: Muon keeps ONE momentum buffer for the matrices it owns where
+    AdamW keeps two moments for every parameter, so the choice moves peak memory
+    by gigabytes at this size. It matters here because upstream's ERDM config says
+    ``optimizer: muon`` and trains on 40 GB A100s — benchmarking ours with AdamW
+    and calling the memory difference a port property would be wrong.
+    """
+    if kind == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr)
+    from muon import MuonWithAuxAdam
+
+    # MuonWithAuxAdam.step() pads its parameter list to a multiple of the world
+    # size, so it cannot run outside a process group at all — the same trap
+    # train_loop._make_muon_optimizer guards, hit on Polaris job 7438576. Rather
+    # than demand torchrun for a single-GPU benchmark, stand up a one-rank group
+    # the way upstream's own common.utils.ensure_process_group does: a HashStore
+    # is an in-process rendezvous, so it needs no free port and no shared file.
+    if not torch.distributed.is_initialized():
+        if not torch.distributed.is_available():
+            raise RuntimeError("--optimizer muon needs torch.distributed")
+        torch.distributed.init_process_group(
+            backend="nccl" if torch.cuda.is_available() else "gloo",
+            store=torch.distributed.HashStore(), rank=0, world_size=1,
+        )
+        atexit.register(
+            lambda: torch.distributed.is_initialized()
+            and torch.distributed.destroy_process_group()
+        )
+    return MuonWithAuxAdam(_muon_groups_like_upstream(model, lr))
+
+
+def time_steps(loss_fn, model, *, iters: int, warmup: int, lr: float,
+               amp_dtype, device, optimizer: str = "adamw") -> dict:
+    opt = build_optimizer(optimizer, model, lr)
     samples: list[float] = []
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
@@ -366,6 +437,7 @@ def time_steps(loss_fn, params, *, iters: int, warmup: int, lr: float,
         if i >= warmup:
             samples.append(dt)
 
+    del opt
     out = {
         "median_ms": statistics.median(samples),
         "min_ms": min(samples),
@@ -409,6 +481,9 @@ def main() -> int:
                         "when --amip-repo is given (isolates implementation), else "
                         "ours. Use 'ours' to price our own options, e.g. x_DDC's "
                         "spherical noise.")
+    p.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw",
+                   help="upstream's ERDM/DDC configs say muon; AdamW is the "
+                        "default here only because muon is an optional extra")
     p.add_argument("--json", type=Path, default=None)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
@@ -435,6 +510,7 @@ def main() -> int:
         "cudnn_benchmark": bool(args.cudnn_benchmark),
         "amp": args.amp,
         "compile": bool(args.compile),
+        "optimizer": args.optimizer,
         "shrink": args.shrink,
         "matmul_precision": torch.get_float32_matmul_precision(),
     }
@@ -475,15 +551,24 @@ def main() -> int:
         model.train()
         results[side] = time_steps(
             step_fn(args.family, model, sched, inputs),
-            list(model.parameters()),
+            model,
             iters=args.iters, warmup=args.warmup, lr=args.lr,
-            amp_dtype=amp_dtype, device=device,
+            amp_dtype=amp_dtype, device=device, optimizer=args.optimizer,
         )
         results[side]["label"] = label
         results[side]["params_m"] = n_params[side] / 1e6
-        if side == "upstream":
-            del model
-            torch.cuda.empty_cache() if device.type == "cuda" else None
+        # Free this side COMPLETELY before building the next one. Without this the
+        # second side's peak-memory reading includes the first side's resident
+        # weights, grads and optimizer state — which silently made upstream look
+        # 2.9 GB hungrier than ours in the first A100 run. Peak memory is only
+        # attributable if one model is alive at a time.
+        if side == "ours":
+            our_model = None
+        del model, sched
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
 
     # A geometry mismatch invalidates the whole comparison, so it is fatal.
     if len(n_params) == 2 and n_params["ours"] != n_params["upstream"]:
