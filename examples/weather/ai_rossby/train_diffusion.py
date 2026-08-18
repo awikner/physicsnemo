@@ -192,6 +192,16 @@ def _stage_window_size(cfg: DictConfig, stage: DictConfig) -> int:
     return _window_size_from_loss(cfg)
 
 
+def _init_worker_threads(worker_id: int) -> None:  # noqa: ARG001
+    """Pin each DataLoader worker to a single torch thread.
+
+    See the note at the ``worker_init_fn`` call site: the boundary smoothing's
+    OpenMP-parallel ``conv2d`` deadlocks in a forked worker when the parent's
+    OpenMP runtime was already initialized with more than one thread.
+    """
+    torch.set_num_threads(1)
+
+
 def _build_loader(
     cfg: DictConfig,
     raw_ds: ClimateZarrDataset,
@@ -256,6 +266,23 @@ def _build_loader(
         {
             "prefetch_factor": int(cfg.dataset.prefetch_factor),
             "persistent_workers": bool(cfg.dataset.persistent_workers),
+            # One torch thread per worker. Two reasons, the first fatal
+            # (diagnosed 2026-08-18 on GH200):
+            #
+            # DEADLOCK. The boundary NaN fill runs `smooth_masked_boundary`, ten
+            # iterations of F.conv2d on CPU, inside the worker. conv2d is
+            # OpenMP-parallel, and a forked child that inherits an
+            # already-initialized OpenMP runtime hangs on its first parallel
+            # region. Measured: with OMP_NUM_THREADS=8 and 4 workers, training
+            # produced ZERO batches in 240 s, twice, with py-spy showing every
+            # worker stopped at the same conv2d line 30 s apart -- while
+            # num_workers=0 did the identical work at ~1 s/batch. The shipped HPC
+            # scripts export OMP_NUM_THREADS=1 and therefore never hit it, which
+            # is exactly why it stayed hidden.
+            #
+            # OVERSUBSCRIPTION. Even when it does not deadlock, 4 workers x 8
+            # threads on a 16-CPU allocation is 32 threads contending.
+            "worker_init_fn": _init_worker_threads,
         }
         if num_workers > 0
         else {}
