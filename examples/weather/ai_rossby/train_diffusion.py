@@ -287,6 +287,14 @@ def _build_loader(
         if num_workers > 0
         else {}
     )
+    # Optional start method for the workers. `fork` (torch's default on Linux) is
+    # the fast one but inherits the parent's OpenMP runtime and zarr v3's asyncio
+    # event-loop thread, neither of which survives a fork; `forkserver` and
+    # `spawn` start from a clean process instead. Left unset so behaviour does not
+    # change silently -- see docs/dev/context/dataloader-fork-deadlock.md.
+    mp_context = cfg.dataset.get("multiprocessing_context", None)
+    if num_workers > 0 and mp_context:
+        worker_kwargs["multiprocessing_context"] = str(mp_context)
     loader = DataLoader(
         dataset,
         batch_size=int(cfg.dataset.batch_size),
