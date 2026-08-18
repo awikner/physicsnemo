@@ -514,10 +514,12 @@ def main() -> int:
                    help="upstream trains precision: 32-true, so 'none' is parity")
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
     p.add_argument("--attn-dtype", default=None,
-                   help="run ONLY attention in this dtype (bf16/fp16) with the "
-                        "rest of the graph left alone — the profile-driven knob; "
-                        "applies to both sides, since upstream's blocks are the "
-                        "same code path")
+                   help="run ONLY attention in this dtype (bf16/fp16) with the rest "
+                        "of the graph left alone — the profile-driven knob. OURS "
+                        "ONLY: it works by routing our call sites through "
+                        "amip_si._attention.sdpa, and upstream calls "
+                        "F.scaled_dot_product_attention directly, so a --side both "
+                        "run with this set is a comparison, not a parity check")
     p.add_argument("--nvtx", action="store_true",
                    help="emit NVTX ranges (timed_step / forward_loss / backward / "
                         "optimizer) for Nsight Systems and Nsight Compute")

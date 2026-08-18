@@ -10,10 +10,22 @@ How fast is one training step of the two v2 families in this fork, against
 upstream `amip_v2` @ `e0b7b60` running the same geometry on the same GPU, and what
 can be done to make ours faster?
 
-**Answer up front.** The port is at **parity** — every measured pair is within
-±0.5% and reports byte-identical peak memory. The speed that was available came
-from settings, not from the port: enabling TF32 matmuls is worth **1.80×** on
-x_DDC, and upstream already trains that way while our diffusion recipe did not.
+**Answer up front, in three parts.**
+
+1. **The port is at parity.** Every pair measured under identical settings is within
+   ±0.5% and reports byte-identical peak memory, on A100, H200 and GH200.
+2. **One parity gap was ours to close.** Upstream's `train.py` calls
+   `torch.set_float32_matmul_precision("high")` and our `train_diffusion.py` set
+   nothing, so identical models ran at different matmul precision — worth
+   **1.5–1.8×** and now available as `++training.matmul_precision=high`.
+3. **Then the profile bought more than the settings did.** Nsight Systems showed
+   that after TF32, ~70% of a step is fp32 attention on sm80 CUTLASS kernels that
+   Hopper cannot accelerate and the TF32 flag cannot reach. Running *only*
+   attention in bf16 (`++training.attention_dtype=bf16`) takes the full stack to
+   **4.31× (x_DDC)** and **3.84× (ERDM)** over shipped fp32 — and, since upstream
+   has no equivalent knob, **2.0–2.3× faster than upstream** at matched settings.
+
+Every knob is opt-in; no shipped default moved.
 
 ## Method
 
@@ -69,7 +81,83 @@ Upstream is a plain clone; it needs no Polaris (`git clone
 git@github.com:anthonyzhou-1/amip_v2.git && git checkout e0b7b60`).
 
 ## Results
-<!-- filled from the JSON records under bench_v2_results/ -->
+
+All GH200 120GB unless noted, batch 1, 20 timed iterations after 5 warmup, median.
+ERDM uses Muon (upstream's configured optimizer), x_DDC AdamW.
+
+### Parity: same settings, both sides
+
+| config | ours | upstream | ratio | peak mem |
+|---|---|---|---|---|
+| x_DDC fp32 (A100-40GB) | 656.4 ms | 656.7 ms | 1.000x | 11.67 G both |
+| x_DDC fp32 +TF32 (A100) | 364.7 ms | 365.3 ms | 0.998x | 11.67 G both |
+| x_DDC bf16 (A100) | 143.9 ms | 143.9 ms | 1.000x | 9.70 G both |
+| x_DDC fp32, Muon (A100) | 738.0 ms | 736.1 ms | 1.003x | 10.26 G both |
+| x_DDC fp32 | 314.1 ms | 314.2 ms | 1.000x | 11.71 G both |
+| x_DDC +TF32 | 208.5 ms | 208.6 ms | 1.000x | 11.71 G both |
+| ERDM fp32 | 2519.5 ms | 2525.5 ms | 0.998x | 66.58 G both |
+| ERDM +TF32 | 1632.9 ms | 1627.1 ms | 1.004x | 66.58 G both |
+| ERDM fp32 (H200-141GB) | 2316.0 ms | 2315.3 ms | 1.000x | 66.58 G both |
+| ERDM bf16+compile | 515.4 ms | 517.5 ms | 0.996x | 38.74 G both |
+
+Byte-identical peak memory on every pair, which is the strongest single statement
+about the port: same shapes, same allocations, same order.
+
+### The optimization ladder for our side
+
+fp32 weights everywhere except where noted; each row adds to the one above.
+
+| step | x_DDC | vs fp32 | ERDM | vs fp32 |
+|---|---|---|---|---|
+| fp32 (as shipped) | 314.1 ms / 11.71 G | 1.00x | 2519.5 ms / 66.58 G | 1.00x |
+| `matmul_precision=high` | 208.5 ms / 11.71 G | 1.51x | 1632.9 ms / 66.58 G | 1.54x |
+| `+ attention_dtype=bf16` | **91.8 ms / 10.77 G** | **3.42x** | **793.0 ms / 58.49 G** | **3.18x** |
+| `+ torch.compile` | **72.9 ms / 10.15 G** | **4.31x** | **655.8 ms / 52.65 G** | **3.84x** |
+| full bf16 autocast + compile | 51.3 ms / 8.76 G | 6.12x | 515.4 ms / 38.74 G | 4.89x |
+
+Against **upstream at the same TF32 settings**, the bf16-attention rows are
+**2.28x** (x_DDC) and **2.03x** (ERDM) faster, because that knob exists only on our
+side: it works by routing our call sites through ``amip_si._attention.sdpa``, and
+upstream calls ``F.scaled_dot_product_attention`` directly.
+
+### Where the time went, before and after
+
+Nsight Systems, GH200, `--nvtx`:
+
+| kernel group | fp32 | TF32 |
+|---|---|---|
+| `fmha_cutlass*_f32_aligned_*_sm80` (attention) | 43.6% (ERDM) / 46.2% (x_DDC) | **69.7% / 70.9%** |
+| cuBLAS GEMMs | ~50% | ~10% |
+
+ERDM's four largest GEMMs: **6416 ms -> 705 ms** across the traced steps, the top
+one moving from `sm80_xmma_gemm_f32f32_f32f32` to
+`sm90_xmma_gemm_f32f32_tf32f32`. Its attention kernels over the same change:
+**3488.8 -> 3510.7 ms** backward and **1520.8 -> 1531.2 ms** forward, i.e.
+unchanged. They are hand-written CUTLASS rather than cuBLAS, so the TF32 flag does
+not reach them, and they are **sm80** builds: fp32 has no flash implementation, so
+PyTorch selects the mem-efficient backend whose fp32 path targets Ampere and runs
+as-is on Hopper.
+
+That is the whole argument for `attention_dtype=bf16` — it is the one part of the
+step that Hopper could not accelerate, and it was 70% of it.
+
+## Practical notes
+
+* **ERDM needs ~67 GB/GPU in fp32.** A 40 GB A100 cannot train the shipped geometry
+  at batch 1 and neither can upstream's code, which OOMs at the same point
+  (39.44 GiB ours, 39.48 GiB theirs). bf16 autocast + compile brings it to
+  **38.74 GB**, which does fit; TF32 + bf16 attention + compile reaches 52.65 GB,
+  which does not.
+* **bf16 needs `disable_cudnn_sdpa` on GH200.** With DeltaAI's inherited torch 2.10,
+  bf16 attention raises `cuDNN Frontend error: No valid execution plans built`
+  rather than falling back. A100 is unaffected.
+* **Muon costs ~12% throughput and saves 1.4 GB** versus AdamW (738.0 vs 656.4 ms on
+  A100). Upstream's configs specify it, so compare Muon-to-Muon.
+* **x_DDC at batch 2** is 59.3 ms/sample versus 80.8 at batch 1 (bf16) — 1.36x better
+  per-sample throughput for 14.35 GB.
+* **Shrunken geometry misleads about fixed costs.** At 1/8 backbone width the
+  spherical-noise option looked like a 1.6x tax; at production geometry it is
+  654.2 ms against 656.4, i.e. nothing.
 
 ## What this says about optimizing our side
 
