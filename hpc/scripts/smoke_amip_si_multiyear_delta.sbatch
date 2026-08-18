@@ -51,6 +51,16 @@ FAILED=()
 REPO=/work/nvme/bdiu/awikner/physicsnemo-amip-v2
 VENV=/work/nvme/bdiu/awikner/physicsnemo/.venv     # shared; see the PYTHONPATH note above
 PY=$VENV/bin/python
+# Training goes through torchrun, NOT bare python (measured 2026-08-18). An
+# sbatch script's shell has SLURM_PROCID=0 and SLURM_NPROCS=1 but NO
+# SLURM_LAUNCH_NODE_IPADDR (only srun steps get that). DistributedManager tries
+# initialize_env() first and falls through to the SLURM branch on TypeError,
+# where it reads that missing variable as its `addr` and hands None to setup().
+# torchrun --standalone sets RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT, so the ENV
+# path wins and the launch is deterministic — the same reason every other Delta
+# script here uses torchrun. The noise-scale builder stays bare python: it never
+# touches DistributedManager.
+TORCHRUN="$VENV/bin/torchrun --standalone --nproc-per-node=1"
 cd "$REPO"
 
 export OMP_NUM_THREADS=1
@@ -161,7 +171,7 @@ else
 fi
 rm -rf "$TSV" "$LOG" "$CKPT_DIR"
 # hydra job.chdir=True moves the cwd, so the TSV path is absolute on purpose.
-if $PY examples/weather/ai_rossby/train_diffusion.py \
+if $TORCHRUN examples/weather/ai_rossby/train_diffusion.py \
     model=amip_si \
     loss=si \
     dataset=amip_dailyavg_coarse_multiyear \
@@ -235,7 +245,7 @@ echo
 echo "############################################################"
 echo "### 3: resume — contract guard + load of our own checkpoint"
 echo "############################################################"
-if $PY examples/weather/ai_rossby/train_diffusion.py \
+if $TORCHRUN examples/weather/ai_rossby/train_diffusion.py \
     model=amip_si \
     loss=si \
     dataset=amip_dailyavg_coarse_multiyear \

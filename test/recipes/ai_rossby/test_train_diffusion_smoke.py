@@ -44,6 +44,7 @@ the class of bug this file exists to catch.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -173,6 +174,29 @@ def _write_norm(path: Path, fill: float) -> None:
     ).to_netcdf(path)
 
 
+def _clean_env() -> dict:
+    """The launcher's distributed identity must not leak into the subprocess.
+
+    ``DistributedManager.initialize()`` tries the ENV method first and falls
+    through to the SLURM branch on TypeError, where it reads
+    ``SLURM_LAUNCH_NODE_IPADDR`` as its address. Measured on Delta: an sbatch
+    shell exports ``SLURM_PROCID=0`` and ``SLURM_NPROCS=1`` but NOT that IP, so a
+    bare ``python train_diffusion.py`` there hands ``addr=None`` to ``setup()``;
+    under ``srun`` the IP exists but the port collides with whatever the parent
+    pytest process already bound. Either way the run under test would differ from
+    the single-process path it takes locally and in CI purely because of how
+    pytest was launched.
+
+    Stripping these makes the manager take its documented "single process job"
+    branch — no process group at all — which is exactly the local environment.
+    """
+    drop = ("SLURM_", "OMPI_", "PMI_", "PMIX_")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(drop)}
+    for k in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT"):
+        env.pop(k, None)
+    return env
+
+
 @pytest.fixture(scope="module")
 def smoke_run(tmp_path_factory):
     """Build the archive + noise scales, then run the recipe once."""
@@ -196,7 +220,7 @@ def smoke_run(tmp_path_factory):
          "--zarr", str(state), "--model-config", str(_MODEL_CFG),
          "--mean", str(mean_nc), "--std", str(std_nc),
          "--year-start", "1981", "--year-end", "1983", "--out", str(sigma)],
-        capture_output=True, text=True, cwd=str(_REPO),
+        capture_output=True, text=True, cwd=str(_REPO), env=_clean_env(),
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
@@ -233,7 +257,7 @@ def smoke_run(tmp_path_factory):
             *extra,
         ]
         proc = subprocess.run(  # noqa: S603
-            argv, capture_output=True, text=True, cwd=str(_RECIPE)
+            argv, capture_output=True, text=True, cwd=str(_RECIPE), env=_clean_env()
         )
         out = proc.stdout + proc.stderr
         assert proc.returncode == 0, out[-6000:]
