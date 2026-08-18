@@ -30,7 +30,15 @@
 # nodes are the wrong place to import physicsnemo (CUDA/Warp init), and a green
 # suite here is what says the failure below is about data or GPUs, not the env.
 #
-# Submit:  sbatch hpc/scripts/smoke_amip_si_multiyear_delta.sbatch
+# Serves BOTH Delta and DeltaAI — they share /work, so the same worktree and the
+# same staged stores are visible from either, and the script picks its interpreter
+# from `uname -m` (DeltaAI is aarch64 and cannot run Delta's x86 venv).
+#
+# Submit on Delta:
+#   sbatch hpc/scripts/smoke_amip_si_multiyear_delta.sbatch
+# Submit on DeltaAI (CLI flags override the #SBATCH directives below):
+#   sbatch --partition=ghx4-interactive --account=bdiu-dtai-gh \
+#          hpc/scripts/smoke_amip_si_multiyear_delta.sbatch
 
 #SBATCH --partition=gpuA40x4-interactive
 #SBATCH --account=bdiu-delta-gpu
@@ -49,18 +57,34 @@ set -uo pipefail
 FAILED=()
 
 REPO=/work/nvme/bdiu/awikner/physicsnemo-amip-v2
-VENV=/work/nvme/bdiu/awikner/physicsnemo/.venv     # shared; see the PYTHONPATH note above
+
+# Delta and DeltaAI share /work, so the SAME worktree and the SAME staged data
+# serve both — only the interpreter differs, and it differs hard: DeltaAI is
+# aarch64 (GH200) and cannot run Delta's x86 venv at all.
+case "$(uname -m)" in
+    aarch64)
+        VENV=/work/nvme/bdiu/awikner/physicsnemo/.venv-deltaai
+        MACHINE="DeltaAI (GH200/aarch64)" ;;
+    *)
+        VENV=/work/nvme/bdiu/awikner/physicsnemo/.venv
+        MACHINE="Delta (x86_64)" ;;
+esac
 PY=$VENV/bin/python
-# Training goes through torchrun, NOT bare python (measured 2026-08-18). An
-# sbatch script's shell has SLURM_PROCID=0 and SLURM_NPROCS=1 but NO
-# SLURM_LAUNCH_NODE_IPADDR (only srun steps get that). DistributedManager tries
-# initialize_env() first and falls through to the SLURM branch on TypeError,
-# where it reads that missing variable as its `addr` and hands None to setup().
-# torchrun --standalone sets RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT, so the ENV
-# path wins and the launch is deterministic — the same reason every other Delta
-# script here uses torchrun. The noise-scale builder stays bare python: it never
-# touches DistributedManager.
-TORCHRUN="$VENV/bin/torchrun --standalone --nproc-per-node=1"
+
+# Training goes through a torchrun-equivalent, NOT bare python (measured
+# 2026-08-18). An sbatch script's shell has SLURM_PROCID=0 and SLURM_NPROCS=1 but
+# NO SLURM_LAUNCH_NODE_IPADDR (only srun steps get that). DistributedManager tries
+# initialize_env() first and falls through to the SLURM branch on TypeError, where
+# it reads that missing variable as its `addr` and hands None to setup().
+# --standalone sets RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT, so the ENV path wins
+# and the launch is deterministic. `torchrun` is NOT on DeltaAI's venv PATH (a
+# known caveat there), so invoke the module instead — same entry point.
+if [[ -x "$VENV/bin/torchrun" ]]; then
+    TORCHRUN="$VENV/bin/torchrun --standalone --nproc-per-node=1"
+else
+    TORCHRUN="$PY -m torch.distributed.run --standalone --nproc-per-node=1"
+fi
+# The noise-scale builder stays bare python: it never touches DistributedManager.
 cd "$REPO"
 
 export OMP_NUM_THREADS=1
@@ -82,7 +106,9 @@ mkdir -p "$RUN" "$(dirname "$SIGMA")" hpc/scripts/logs
 echo "############################################################"
 echo "### -1: environment"
 echo "############################################################"
+echo "machine:   $MACHINE"
 echo "repo:      $(git log --oneline -1 | cat)"
+echo "venv:      $VENV"
 echo "python:    $($PY -V 2>&1)"
 RESOLVED=$($PY -c "import physicsnemo; print(physicsnemo.__file__)")
 echo "physicsnemo -> $RESOLVED"
