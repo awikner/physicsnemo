@@ -410,10 +410,38 @@ def build_optimizer(kind: str, model, lr: float):
     return MuonWithAuxAdam(_muon_groups_like_upstream(model, lr))
 
 
+class _Nvtx:
+    """NVTX ranges, off unless asked.
+
+    Two jobs. In Nsight Systems it turns an undifferentiated wall of kernels into
+    forward / backward / optimizer, which is the only way to say *where* the time
+    goes rather than just how much there is. In Nsight Compute it gives
+    ``--nvtx --nvtx-include "timed_step/"`` something to filter on, so ncu replays
+    the kernels of ONE step instead of every kernel in warmup too — the difference
+    between a minute and an hour.
+
+    A no-op object rather than `if nvtx:` at four call sites, so the timed path
+    stays readable and the disabled cost is one attribute lookup.
+    """
+
+    def __init__(self, enabled: bool):
+        self.enabled = bool(enabled)
+
+    def push(self, name: str):
+        if self.enabled:
+            torch.cuda.nvtx.range_push(name)
+
+    def pop(self):
+        if self.enabled:
+            torch.cuda.nvtx.range_pop()
+
+
 def time_steps(loss_fn, model, *, iters: int, warmup: int, lr: float,
-               amp_dtype, device, optimizer: str = "adamw") -> dict:
+               amp_dtype, device, optimizer: str = "adamw",
+               nvtx: bool = False) -> dict:
     opt = build_optimizer(optimizer, model, lr)
     samples: list[float] = []
+    nv = _Nvtx(nvtx and device.type == "cuda")
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
@@ -421,7 +449,9 @@ def time_steps(loss_fn, model, *, iters: int, warmup: int, lr: float,
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
+        nv.push("timed_step" if i >= warmup else "warmup_step")
         opt.zero_grad(set_to_none=True)
+        nv.push("forward_loss")
         with torch.autocast(
             device_type=device.type,
             enabled=amp_dtype is not None,
@@ -430,8 +460,14 @@ def time_steps(loss_fn, model, *, iters: int, warmup: int, lr: float,
             loss = loss_fn()
         if isinstance(loss, tuple):
             loss = loss[0]
+        nv.pop()
+        nv.push("backward")
         loss.backward()
+        nv.pop()
+        nv.push("optimizer")
         opt.step()
+        nv.pop()
+        nv.pop()
         if device.type == "cuda":
             torch.cuda.synchronize()
         dt = (time.perf_counter() - t0) * 1e3
@@ -477,6 +513,9 @@ def main() -> int:
     p.add_argument("--amp", choices=("none", "bf16", "fp16"), default="none",
                    help="upstream trains precision: 32-true, so 'none' is parity")
     p.add_argument("--compile", action="store_true", help="torch.compile the model")
+    p.add_argument("--nvtx", action="store_true",
+                   help="emit NVTX ranges (timed_step / forward_loss / backward / "
+                        "optimizer) for Nsight Systems and Nsight Compute")
     p.add_argument("--no-cudnn-sdpa", action="store_true",
                    help="disable the cuDNN attention backend. Needed on GH200 "
                         "with the inherited torch 2.10 build, where bf16 SDPA "
@@ -523,6 +562,7 @@ def main() -> int:
         "compile": bool(args.compile),
         "optimizer": args.optimizer,
         "cudnn_sdpa": not args.no_cudnn_sdpa,
+        "nvtx": bool(args.nvtx),
         "shrink": args.shrink,
         "matmul_precision": torch.get_float32_matmul_precision(),
     }
@@ -566,6 +606,7 @@ def main() -> int:
             model,
             iters=args.iters, warmup=args.warmup, lr=args.lr,
             amp_dtype=amp_dtype, device=device, optimizer=args.optimizer,
+            nvtx=args.nvtx,
         )
         results[side]["label"] = label
         results[side]["params_m"] = n_params[side] / 1e6
