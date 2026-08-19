@@ -24,6 +24,7 @@ from ._attention import (
     attention_dtype,
     get_attention_dtype,
     set_attention_dtype,
+    maybe_disable_cudnn_sdp,
 )
 from .dit import AmipDiT, DiTBlock, DiTCrossAttentionBlock
 from .erdm_unet import ERDM, CausalTemporalAttention
@@ -44,6 +45,7 @@ from .x_ddc import XDDCUNet
 DiT = AmipDiT
 
 __all__ = [
+    "maybe_disable_cudnn_sdp",
     "attention_dtype",
     "get_attention_dtype",
     "set_attention_dtype",

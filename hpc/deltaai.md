@@ -85,7 +85,73 @@ export AI_ROSSBY_TEST_DATA=/work/nvme/bdiu/awikner/physicsnemo_test_data   # add
    does *not* treat the conda env's torch as satisfying `torch>=2.10`, so it installs the newest
    from PyPI (torch 2.12.1, **wrong CUDA**). Fix: after installing, `uv pip uninstall torch
    torchvision triton` — the venv then falls back to the conda 2.10.0+cu129 build (verified).
-2. **`muon-optimizers` extra needs `allow-direct-references`.** The editable build fails at
+2. **The Cray PE's `CXX=CC` breaks `torch.compile`.** The
+   `python/miniforge3_pytorch/2.10.0` module leaves the Cray programming
+   environment's compiler wrappers exported as `CXX=CC` and `CC=cc`.
+   TorchInductor's CPU backend shells out to `$CXX` to build its generated
+   kernels as a shared object, and through the Cray wrapper the link comes out
+   as an *executable* link instead:
+
+   ```
+   ld: crt1.o: in function `_start': undefined reference to `main'
+   collect2: error: ld returned 1 exit status
+   CppCompileError: C++ compile error
+   ```
+
+   The `note: parameter passing for argument of type 'std::pair<...>' when C++17
+   is enabled changed to match C++14 in GCC 10.1` line printed just above it is a
+   GCC *note*, not the cause — ignore it.
+
+   **Fix: `export CXX=g++ CC=gcc`** (unsetting both also works — torch then does
+   its own detection). Measured 2026-08-18 on `gh043`/`gh099`:
+   `test_multi_diffusion_{losses,predictor,sampling}.py` goes from **40 failed /
+   550 passed** to **590 passed / 0 failed**, and the run gets *faster*
+   (194 s -> 91 s) since the doomed compile attempts are no longer retried.
+   Disabling precompiled headers (`TORCHINDUCTOR_CPP_PRECOMPILE_HEADERS=0`) does
+   **not** help — the PCH path in the traceback is incidental.
+
+   The `deltaai-smoke-test` skill exports both, so anything run through it is
+   already covered; set them by hand for ad-hoc `srun` sessions.
+
+3. **cuDNN 9.20 has no attention plan for the v2 geometries under bf16.**
+   `F.scaled_dot_product_attention` raises inside any amip_si backbone
+   (RollingDiT / DiT spatial attention) as soon as the run is bf16:
+
+   ```
+   RuntimeError: cuDNN Frontend error: [cudnn_frontend] Error:
+                 No valid execution plans built.
+   ```
+
+   Reproduced 2026-08-19 with a standalone 20-line probe — no repo code — at
+   `(B, H, S, D) = (6, 16, 4050, 64)`, i.e. dim 1024 / 16 heads over a 45x90
+   token grid:
+
+   | backend | bf16 | fp32 |
+   |---|---|---|
+   | default | **FAIL** | ok |
+   | cudnn | FAIL | FAIL |
+   | flash | ok | n/a (bf16-only) |
+   | mem-efficient | ok | ok |
+   | math | ok | ok |
+
+   cuDNN attention is simply broken here, and torch's backend *priority* reaches
+   for it first under bf16 — which is why an fp32 run is fine and a bf16 one dies
+   several minutes in. This affects **every** bf16 amip_si run on DeltaAI (ERDM
+   v2 included), not just RSI.
+
+   **Fix: `export AI_ROSSBY_NO_CUDNN_SDPA=1`**, which makes the recipe call
+   `torch.backends.cuda.enable_cudnn_sdp(False)` at startup. `TORCH_CUDNN_SDPA_ENABLED=0`
+   does **not** work on torch 2.10 (verified inert) — it has to go through the
+   Python API, which is why this is a repo-side knob rather than pure env.
+
+   It costs nothing: per `_attention.py`'s own measurements the point of
+   reduced-precision attention is to reach the sm90 *flash* kernels, and cuDNN
+   was never the target. Dropping it selects flash — the intended path.
+
+   Exported automatically by `hpc/scripts/train_rsi_amip.sbatch` (on
+   `AI_ROSSBY_CLUSTER=deltaai`) and by the `deltaai-smoke-test` skill.
+
+4. **`muon-optimizers` extra needs `allow-direct-references`.** The editable build fails at
    metadata construction until `pyproject.toml` has `[tool.hatch.metadata] allow-direct-references
    = true` (the extra installs from a git direct reference). This is a committed repo fix.
 

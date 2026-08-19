@@ -172,6 +172,12 @@ _EXPECTED_LAYOUTS = {
     "amip_erdm_v2_ocean": "v2",
     "amip_erdm_fancy": "v2",
     "amip_x_ddc_dit": "v2",
+    # Rolling Stochastic Interpolants: byte-copies of the amip_erdm_v2 pair
+    # apart from the second output head, so they share its packing exactly —
+    # which is the point, since an RSI-vs-ERDM comparison must differ only in
+    # the generative process.
+    "amip_rsi_v2": "v2",
+    "amip_rsi_v2_ocean": "v2",
 }
 
 

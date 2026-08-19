@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Rolling Stochastic Interpolants (RSI) — the VANILLA configuration.
+#
+# This is ablation A2: the plain coupled rolling interpolant, with the state
+# parameterization and scalar white noise. The two enhancements from the
+# proposal — the residual parameterization (A3) and spectrally shaped latent
+# noise (A4) — are deliberately OFF here, so the plain rolling-SI model is
+# trained and evaluated on its own before either is attempted. Each rung of
+# the ladder is a small delta over this file: rsi_a1 … rsi_a5.yaml.
+#
+# Contract deltas vs. loss/erdm_v2.yaml, both advertised by the scheduler and
+# read by the recipe/drivers rather than configured here:
+#   * anchor_frames = 1 — training needs W+1 state frames (slot 1's anchor is
+#     the frame before the window). The recipe turns on
+#     SequenceDataset(emit_anchor=True); costs no extra I/O at forcing_lag=1.
+#   * init_frames = W+1 — the oracle first window needs the same extra frame.
+# Pair with model=amip_rsi_v2, which is amip_erdm_v2 plus the second output
+# head (RSI regresses H1 and the latent zhat, so the backbone emits 2*C).
+#
+# ``window_size`` (W) must match the model's rolling_dit_kwargs.window_size.
+
+_target_: physicsnemo.experimental.diffusion.RSIScheduler
+window_size: 6
+num_steps: 2
+solver: heun
+# Exact coefficient increments rather than first-order Euler on the velocity:
+# strictly better per step, and it makes the ERDM reduction (A1) an equality
+# to floating point rather than an O(dt) agreement.
+integrator: coeff
+# One extra head evaluation per roll for an exact endpoint readout. Off: the
+# readout uses the last evaluation pair, which is self-consistent and free.
+final_denoise: false
+
+# ── interpolant ─────────────────────────────────────────────────────────
+# state: H1 predicts the clean state y_w (ERDM-like head semantics) and the
+# increment is recovered from the interpolant relation. residual: H1 predicts
+# the increment directly — that is A3, not this file.
+parameterization: state
+beta: linear
+beta_floor: 1.0e-3
+# gamma_0: the latent amplitude at the base end, in units of the per-channel
+# increment std when noise_scale_path is set (below), else in z-scored units.
+# It is mandatory that gamma_0 > 0: with strongly correlated endpoints a
+# vanishing latent makes the conditional law degenerate and the velocity
+# regression ill-conditioned. It also plays the role of the IC perturbation in
+# ensemble NWP — the spread the window dynamics then grow.
+gamma_0: 0.5
+# gamma_1: the emission noise floor, ERDM's sigma_min analogue. Small but
+# nonzero by default (gamma_1 = 0 is a secondary ablation).
+gamma_1: 0.02
+gamma_profile: geometric
+delta_std: 1.0
+time_eps: 1.0e-3
+label_mode: tau
+
+# ── training ────────────────────────────────────────────────────────────
+# Anchor perturbation (exposure-bias control): at inference the anchor is the
+# model's own estimate, not truth. 0 here; swept in A3.
+anchor_noise: 0.0
+# snr_bump is ERDM's lambda(sigma) f(sigma) transplanted onto the interpolant's
+# effective noise level sigma_eff = gamma/(beta * delta_std) — and reduces to it
+# exactly under reduce_to_erdm. P_mean/P_std keep erdm_v2's values.
+weighting: snr_bump
+P_mean: 2.0
+P_std: 1.2
+w_1: 1.0
+w_z: 1.0
+
+# ── sampling (the eps-family dial; 0 => deterministic PF-ODE) ───────────
+# Spread calibration is a POST-HOC knob here, not baked in at training time
+# like ERDM's churn: any eps >= 0 preserves the marginals in the exact-score
+# limit, so it is tuned against spread-skill after training at zero retraining
+# cost. Swept in A5.
+eps_scale: 0.0
+eps_tmin: 0.0
+eps_tmax: 1.0
+
+# ── noise ───────────────────────────────────────────────────────────────
+noise: gaussian
+l_max: 90
+# Per-channel latent amplitude: the std of the model's own one-step increment
+# in normalized units, from tools/data/amip/make_noise_scales.py. Injecting
+# isotropic noise instead over-perturbs the slow channels.
+noise_scale_path: null
+# Spectral Gamma = g(kappa) h(tau, kappa) — Phase C (ablation A4). The
+# scheduler raises rather than silently falling back to white noise.
+spectrum_path: null
+
+# nocean / ocean_grid_indices are NOT set here — the recipe injects them from
+# the model's ocean_state_variables so the tail width and the c_grid indices it
+# is read from can never disagree with the pack. Inert unless the model asks.
+ocean_loss_weight: 1.0

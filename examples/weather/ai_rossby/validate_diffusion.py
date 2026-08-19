@@ -286,6 +286,16 @@ class DiffusionRolloutValidator:
             if self.window_mode
             else 0
         )
+        # Frames the scheduler wants for its first window. ERDM/RFM noise the
+        # true W-frame window onto their t=0 staircase; a data-coupled
+        # scheduler (RSI) additionally needs the frame BEFORE the window, as
+        # slot 1's interpolant anchor. Defaulting to window_size leaves every
+        # existing scheduler on exactly its old path.
+        self.init_frames = (
+            int(getattr(self.scheduler, "init_frames", self.window_size))
+            if self.window_mode
+            else 0
+        )
 
         # Horizon default: training W for rolling, last log_step for
         # single-step. Either way, log_steps[-1] must fit.
@@ -391,7 +401,7 @@ class DiffusionRolloutValidator:
         # window mode needs ``W - 1`` past frames before *and* ``horizon``
         # future frames after.
         last_future = self.horizon * self.step_size
-        first_past = (self.window_size - 1) * self.step_size if self.window_mode else 0
+        first_past = (self.init_frames - 1) * self.step_size if self.window_mode else 0
         max_idx = self.dataset.n_time - last_future - 1
         candidates = list(range(first_past, max_idx + 1, self.ic_stride))
         if not candidates:
@@ -624,21 +634,26 @@ class DiffusionRolloutValidator:
     # ------------------------------------------------------------------ #
 
     def _stack_window(
-        self, batch_ics: list[int], w_offset: int
+        self, batch_ics: list[int], w_offset: int, n_frames: int | None = None
     ) -> dict[str, torch.Tensor]:
-        """Stack a (B, W, ...) window batch ending at ``t + w_offset`` steps.
+        """Stack an (B, n, ...) window batch ending at ``t + w_offset`` steps.
 
         ``w_offset`` and the intra-window spacing are both in MODEL steps, so
         the frames land ``step_size`` store rows apart — the oracle window spans
-        W model steps back from the IC, matching the training window.
+        n model steps back from the IC, matching the training window.
+        ``n_frames`` defaults to the scheduler's ``init_frames`` (= W for
+        ERDM/RFM, W+1 for RSI, whose leading frame is slot 1's anchor); it is
+        always the LAST frame that lands on ``t + w_offset``, so the extra
+        frame is taken further into the past and the IC is unmoved.
         """
+        n_frames = int(n_frames if n_frames is not None else self.init_frames)
         per_batch_windows = []
         for t in batch_ics:
             frames = [
                 self._fetch(
-                    t + (w_offset - self.window_size + 1 + i) * self.step_size
+                    t + (w_offset - n_frames + 1 + i) * self.step_size
                 )
-                for i in range(self.window_size)
+                for i in range(n_frames)
             ]
             # Stack frames into a (W, ...) per-batch dict.
             window = {}

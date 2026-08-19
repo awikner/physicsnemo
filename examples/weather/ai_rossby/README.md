@@ -236,6 +236,8 @@ restates a channel count) and was read back off the instantiated wrapper:
 | `amip_erdm_v2` | `RollingDiTWrapper` | `v2` | `erdm_v2` | `erdm`² | `amip_dailyavg_coarse` | 45×90 | 151 | 5 | 3 | — |
 | `amip_erdm_v2_ocean` | `RollingDiTWrapper` | `v2` | `erdm_v2` | `erdm`² | `amip_dailyavg_coarse` | 45×90 | 153 | 5 | 3 | 2 |
 | `amip_erdm_fancy` | `RollingDiTWrapper` | `v2` | `erdm_v2` | `erdm`² | `amip_dailyavg_coarse` + SST suite | 45×90 | 154 | 6 | 3 | 3 |
+| `amip_rsi_v2` | `RollingDiTWrapper` | `v2` | `rsi` | `rsi`² | `amip_dailyavg_coarse` | 45×90 | 151 | 5 | 3 | — |
+| `amip_rsi_v2_ocean` | `RollingDiTWrapper` | `v2` | `rsi` | `rsi`² | `amip_dailyavg_coarse` | 45×90 | 153 | 5 | 3 | 2 |
 | `amip_x_ddc_dit` | `XDDCWrapper` (`DiTAE`) | `v2` | — (upstream)³ | —³ | `amip_dailyavg` | 180×360 | 151 | — | — | — |
 | `amip_combined` | `CombinedModule` | — | — | — | — | 45×90 → 180×360 | — | — | — | — |
 
@@ -474,6 +476,171 @@ python train_diffusion.py \
     dataset.sst_climatology_path=$AI_ROSSBY_DATA/norm_stats/sst_climatology.npz \
     validation=off run_name=erdm_fancy_run0
 ```
+
+### 6.6b Train — RSI (Rolling Stochastic Interpolants)
+
+RSI is the v2 ERDM forecaster with the *generative process* swapped: instead of
+transporting every window slot from isotropic Gaussian noise, each slot is
+transported from (a perturbed copy of) its temporal predecessor to its target as
+it crosses the window. ERDM's window bookkeeping — local time
+`tau_w(t) = (W-w+t)/W`, the telescoping shift identity, one global diffusion time
+per pass — is kept verbatim, and ERDM is recovered exactly as the uncoupled,
+white-noise, `beta == 1` special case (`loss.reduce_to_erdm=true`; the reduction
+is checked against `ERDMScheduler` trajectory-for-trajectory in
+`test/diffusion/test_rsi_scheduler.py`).
+
+`model=amip_rsi_v2` is a byte-copy of `amip_erdm_v2` with one delta —
+`output_head.num_output_heads: 2` — so an RSI-vs-ERDM comparison differs only in
+the process. RSI's two readouts are `H1` (the clean state, or the increment under
+`parameterization=residual`) and the white latent `zhat`; the velocity, the score
+and the denoised state all follow from them in closed form. The heads are
+separate instances, so a trained ERDM v2 checkpoint warm-starts head 1 verbatim
+and only `output_head_aux.*` starts fresh (zero-init, so `zhat == 0` at step 0).
+
+**Two contract deltas vs. every other rolling scheduler**, both advertised by the
+scheduler and read by the recipe rather than configured:
+
+- `anchor_frames = 1` — training needs `W+1` state frames, because slot 1's
+  anchor is the frame *before* the window. The recipe turns on
+  `SequenceDataset(emit_anchor=True)`; at `forcing_lag=1` that frame is already
+  read (it is where the slot-1 forcing comes from) and today discarded, so it
+  costs **no extra I/O**.
+- `init_frames = W+1` — the oracle first window needs the same extra frame. The
+  window still *ends* at the IC; the extra frame comes from further back, so the
+  last usable IC does not move.
+
+```bash
+# (a) A2 — the VANILLA rolling SI: state parameterization, scalar white noise.
+#     Train and evaluate this before reaching for the residual parameterization
+#     or spectral shaping; loss/rsi.yaml defaults to exactly this rung.
+python train_diffusion.py \
+    model=amip_rsi_v2 loss=rsi loss.window_size=6 \
+    dataset=amip_dailyavg_coarse training=amip_diffusion_bf16 \
+    validation=diffusion_rollout run_name=rsi_a2_run0
+
+# (b) A1 — the ERDM-equivalence sanity run. Should track loss=erdm_v2 within
+#     noise; a gap means an implementation artifact, not a result.
+python train_diffusion.py \
+    model=amip_rsi_v2 loss=rsi_a1 loss.window_size=6 \
+    dataset=amip_dailyavg_coarse training=amip_diffusion_bf16 \
+    validation=off run_name=rsi_a1_run0
+
+# (c) warm-start any rung from a trained ERDM v2 checkpoint. Head 1 loads
+#     one-for-one; expect ONLY `output_head_aux.*` in the skipped list.
+python train_diffusion.py \
+    model=amip_rsi_v2 loss=rsi loss.window_size=6 \
+    dataset=amip_dailyavg_coarse training=amip_diffusion_bf16 \
+    training.partial_checkpoint=./outputs/erdm_v2_run0/checkpoints/RollingDiTWrapper.0.50.mdlus \
+    validation=off run_name=rsi_from_erdm
+```
+
+**The ablation ladder** — each rung a small delta over `loss/rsi.yaml`, and each
+one to be trained *in this order*, gated on the climatology/bias suite and the
+40-year rollout before the next:
+
+| `loss=` | What it adds | Needs |
+|---|---|---|
+| `rsi_a1` | `reduce_to_erdm` — ERDM-equivalence sanity | — |
+| `rsi` | **A2**: coupled rolling SI, state parameterization, scalar white `Gamma` | — |
+| `rsi_a3` | **A3**: residual parameterization (+ an `anchor_noise` sub-rung) | — |
+| `rsi_a4` | **A4**: spectral `Gamma = gamma_0 g(l) h(tau,l)` | `make_rsi_spectrum.py` |
+| `rsi_a5` | **A5**: the `eps`-family SDE sweep — a **sampler** knob, no retraining | a trained ckpt |
+
+A2 and A3 need nothing but the shipped configs. A4 needs the envelope fit first:
+
+```bash
+python tools/data/amip/make_rsi_spectrum.py \
+    --zarr $AI_ROSSBY_DATA/amip_dailyavg_coarse \
+    --model-config examples/weather/ai_rossby/conf/model/amip_rsi_v2.yaml \
+    --std $AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc \
+    --year-start 1979 --year-end 2015 \
+    --out $AI_ROSSBY_DATA/norm_stats/g_l_amip_dailyavg_coarse.pt
+```
+
+A5 is not a training run at all. In ERDM the ensemble dispersion is baked in at
+training time through `(sigma_min, sigma_max, rho)` and the sampler's churn; in
+the interpolant family the SDE's diffusion coefficient `eps(tau)` is a **post-hoc
+dial** — any `eps >= 0` preserves the marginals in the exact-score limit, so it
+is tuned against spread–skill after training at zero retraining cost:
+
+```bash
+for e in 0.0 0.01 0.05 0.1 0.2; do
+  python validate_diffusion.py model=amip_rsi_v2 loss=rsi \
+      validation=rsi_calibration sampler=rsi ++sampler.eps_scale=$e \
+      ++checkpoint_dir=./outputs/rsi_a2_run0/checkpoints run_name=rsi_eps$e
+done
+```
+
+**On a cluster, use the staged job scripts** rather than retyping the above —
+they carry the guards, and every override set in them is verified to compose
+(`hpc/scripts/`):
+
+| Script | What it runs |
+|---|---|
+| `train_rsi_amip.sbatch` | training; `RSI_RUNG=a1\|a2\|a3\|a4` picks the rung |
+| `fit_rsi_spectrum.sbatch` | the `g(l)` envelope fit (CPU) — prerequisite for a4 |
+| `eval_rsi_amip.sbatch` | `RSI_EVAL=climatology\|rollout40\|calibration` — the two gates plus the a5 sweep |
+
+```bash
+# Stampede3, the vanilla rung end to end:
+AI_ROSSBY_DATA=$SCRATCH/physicsnemo-zarr RSI_RUNG=a2 \
+    sbatch -p h100 -A TG-ATM170020 -t 48:00:00 hpc/scripts/train_rsi_amip.sbatch
+
+AI_ROSSBY_DATA=$SCRATCH/physicsnemo-zarr RSI_CKPT=./outputs/rsi_a2_run0/checkpoints \
+    RSI_EVAL=climatology sbatch -p h100 -A TG-ATM170020 -t 12:00:00 \
+    hpc/scripts/eval_rsi_amip.sbatch
+
+AI_ROSSBY_DATA=$SCRATCH/physicsnemo-zarr RSI_CKPT=./outputs/rsi_a2_run0/checkpoints \
+    RSI_EVAL=rollout40 sbatch -p h100 -A TG-ATM170020 -t 24:00:00 \
+    hpc/scripts/eval_rsi_amip.sbatch
+```
+
+`train_rsi_amip.sbatch` **refuses** a >1-GPU run on torch >= 2.11 rather than
+let a silently-degraded DDP job burn the allocation — see the multi-GPU
+pre-flight in `hpc/stampede3.md`, whose verified venv is 2.11.0+cu128.
+
+**A1 is preconditioned, and that is load-bearing.** RSI hands the backbone
+`c_in(tau) * x` with `c_in = 1/sqrt(Gamma^2 + sigma_data^2)`, and reads the
+latent head out through EDM's skip/out form,
+`zhat = x*gamma/(gamma^2+sigma_data^2) + F_z*sigma_data/sqrt(gamma^2+sigma_data^2)`.
+Both reduce to EDM's own coefficients under `loss.reduce_to_erdm=true`. Neither
+is cosmetic, and the failure mode is the same in both cases — healthy skill at
+leads 1-3 and a blown-up frame at lead W, because the affected slots are the
+high-`Gamma` back half of the window:
+
+- without `c_in`, the back slots reach an RMSNorm'd DiT with magnitude ~`sigma_max`;
+- without the output skip, a zero-init network means *zero transport* rather than
+  ERDM's contracting "predict zero", so a slot injected at `sigma_max` is emitted
+  still carrying it (measured with a zero-output net at lead W: ERDM 7.0e-1 vs
+  bare-`zhat` RSI 3.7e2).
+
+Measured on DeltaAI at 30 iterations, lead-6 surface RMSE: 4.65e5 with neither,
+1.85e3 with both, against ERDM's 2.60e3. If you add a parameterization, check
+what its zero-init output *means* before trusting an algebraic equivalence —
+`test_a1_matches_erdm_at_zero_init` exists because the analytic-stub tests all
+passed while this was broken.
+
+Gotchas worth knowing before the first run:
+
+- **`sampler=from_loss` (the default) is the safe choice.** The interpolant
+  profiles (`beta`, `gamma_0/1`, `gamma_profile`, `delta_std`, `parameterization`,
+  `noise_scale_path`) define the forward process the heads were regressed
+  against. Setting `sampler=rsi` and letting one of them drift from the training
+  value is silently wrong, not an error.
+- **`gamma_0 > 0` is mandatory**, not a tuning choice: with strongly correlated
+  endpoints a vanishing latent makes the conditional law degenerate and the
+  velocity regression ill-conditioned. It also plays the role of the IC
+  perturbation in ensemble NWP.
+- **Spectral bandwidth is `nlat // 2`**, not `nlat`. Equiangular quadrature is
+  exact only to half the latitude count; at `lmax = nlat` the analysis/synthesis
+  pair is aliased badly enough that it is not a projection, and since `Gamma` and
+  `Gamma^{-1}` come from that same pair the score identity would fail silently.
+  The fitting tool and the filter default the same way and must agree, or the
+  envelope is the wrong length (which does raise).
+- **The spherical transform runs with autocast disabled.** `torch_harmonics`
+  uses `view_as_complex`, which has no bfloat16 kernel — casting the input to
+  fp32 is not enough, because autocast downcasts inside the transform. Found on
+  a GH200; it is a hard error on GPU and invisible on CPU.
 
 What the run should print, and why each line is worth reading:
 

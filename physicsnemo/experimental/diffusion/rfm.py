@@ -69,6 +69,8 @@ class RFMScheduler(nn.Module):
         super(RFMScheduler, self).__init__()
 
         self.W = int(window_size)
+        # The rolling drivers read `window_size` off the scheduler, not `W`.
+        self.window_size = self.W
         self.num_steps = int(num_steps)
         self.solver = solver
         self.weighting = weighting

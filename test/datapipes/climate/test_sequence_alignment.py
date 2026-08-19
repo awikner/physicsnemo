@@ -183,3 +183,76 @@ def test_constant_boundary_and_bookkeeping_survive_the_shift():
     assert torch.all(s["constant_boundary"] == 7.0)
     assert int(s["start_idx"]) == 3
     assert int(s["unroll_steps"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# emit_anchor — the pre-window state frame a data-coupled scheduler needs
+# ---------------------------------------------------------------------------
+
+
+def test_emit_anchor_returns_the_frame_before_the_window():
+    """Rolling Stochastic Interpolants anchor slot 1 on the frame before W.
+
+    Slot j targets the state at ``t+1+j``; slot 0's anchor is therefore the
+    state at ``t``, which at ``forcing_lag=1`` is already read (it is where
+    slot 0's forcing comes from) and today thrown away.
+    """
+    ds = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1, emit_anchor=True)
+    s = ds[3]
+    assert _frame_times(s["surface_in_seq"]) == [4.0, 5.0, 6.0]
+    # One frame earlier than the window's first target, and unstacked.
+    assert s["surface_in_prev"].shape == (_SURFACE, _H, _W)
+    assert float(s["surface_in_prev"].flatten()[0]) == 3.0
+    assert float(s["upper_air_in_prev"].flatten()[0]) == 3.0
+    assert float(s["diagnostic_prev"].flatten()[0]) == 3.0
+
+
+def test_emit_anchor_costs_no_extra_read():
+    """The anchor is already in the sample; the flag must not lengthen it."""
+    plain = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1)
+    anchored = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1,
+                               emit_anchor=True)
+    assert anchored.frames_per_sample == plain.frames_per_sample
+    assert anchored.row_span == plain.row_span
+    assert len(anchored) == len(plain)
+
+
+def test_emit_anchor_leaves_every_existing_key_untouched():
+    plain = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1,
+                            emit_boundary_next=True)[3]
+    anchored = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1,
+                               emit_boundary_next=True, emit_anchor=True)[3]
+    for k, v in plain.items():
+        assert torch.equal(anchored[k], v), f"{k} changed under emit_anchor"
+    assert set(anchored) - set(plain) == {
+        "surface_in_prev", "upper_air_in_prev", "diagnostic_prev"
+    }
+
+
+def test_anchor_own_time_boundary_is_the_slot_one_forcing_frame():
+    """The W+1 ocean-target stack the recipe builds must line up frame-wise.
+
+    ``_train_step`` prepends ``varying_boundary_seq[:, :1]`` to
+    ``varying_boundary_next_seq`` to get the boundary at each of the W+1 state
+    frames' OWN time. That only works if the anchor's own-time boundary really
+    is the slot-1 conditioning frame.
+    """
+    ds = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1,
+                         emit_boundary_next=True, emit_anchor=True)
+    s = ds[3]
+    anchor_t = float(s["surface_in_prev"].flatten()[0])          # 3.0
+    stack = torch.cat(
+        [s["varying_boundary_seq"][:1], s["varying_boundary_next_seq"]], dim=0
+    )
+    states = [anchor_t] + _frame_times(s["surface_in_seq"])      # [3, 4, 5, 6]
+    assert _frame_times(stack) == [100.0 + t for t in states]
+
+
+def test_emit_anchor_is_refused_at_lag_zero():
+    with pytest.raises(ValueError, match="emit_anchor"):
+        SequenceDataset(_Base(), unroll_steps=2, forcing_lag=0, emit_anchor=True)
+
+
+def test_emit_anchor_defaults_off():
+    s = SequenceDataset(_Base(), unroll_steps=2, forcing_lag=1)[3]
+    assert not any(k.endswith("_prev") for k in s)

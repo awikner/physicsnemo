@@ -72,6 +72,9 @@ class ERDMScheduler(nn.Module):
         super(ERDMScheduler, self).__init__()
 
         self.W = int(window_size)
+        # The rolling drivers (validate_diffusion, inference, rollout) read
+        # `window_size` off the scheduler, not `W`.
+        self.window_size = self.W
         self.num_steps = int(num_steps)
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max

@@ -483,3 +483,92 @@ def test_wrapper_forward_with_all_features(tmp_path):
     assert loaded.backbone.output_head is not None
     assert len(loaded.backbone.forcing_blocks) == 2
     assert loaded.backbone.global_cond is True
+
+
+# ---------------------------------------------------------------------------
+# num_output_heads — RSI's second readout
+# ---------------------------------------------------------------------------
+
+
+_MIX2 = {"mode": "mix", "num_experts": 2, "num_output_heads": 2}
+
+
+def _dit(head, **over):
+    kw = {**_COMMON, "state_layout": _LAYOUT, "input_embed": _BUDGET,
+          "output_head": head, **over}
+    return RollingDiT(**kw)
+
+
+def test_two_heads_double_the_output_width():
+    inp = _inputs()
+    o1 = _forward(_dit(_MIX).eval(), inp)
+    o2 = _forward(_dit(_MIX2).eval(), inp)
+    assert o1.shape[2] == _COMMON["in_channels"]
+    assert o2.shape[2] == 2 * _COMMON["in_channels"]
+    assert o2.shape[:2] == o1.shape[:2] and o2.shape[3:] == o1.shape[3:]
+
+
+def test_single_head_default_is_bit_identical():
+    """Omitting num_output_heads must leave the existing forward untouched."""
+    inp = _inputs()
+    torch.manual_seed(7)
+    a = _dit(_MIX).eval()
+    torch.manual_seed(7)
+    b = _dit({**_MIX, "num_output_heads": 1}).eval()
+    torch.testing.assert_close(_forward(a, inp), _forward(b, inp), rtol=0, atol=0)
+
+
+def test_aux_head_is_zero_initialised():
+    """zhat == 0 at step 0 — a benign soft start for a warm-started run."""
+    out = _forward(_dit(_MIX2).eval(), _inputs())
+    assert out[:, :, _COMMON["in_channels"]:].abs().max().item() == 0.0
+
+
+def test_single_head_checkpoint_warm_starts_head_one():
+    """An ERDM v2 output head must load 1:1; only the aux head starts fresh.
+
+    This is why the second readout is a separate head INSTANCE rather than one
+    widened head — widening would change the trained head's state-dict shapes
+    and silently discard it.
+    """
+    one, two = _dit(_MIX), _dit(_MIX2)
+    missing, unexpected = two.load_state_dict(one.state_dict(), strict=False)
+    assert not unexpected
+    assert missing and all(k.startswith("output_head_aux.") for k in missing)
+    for k, v in one.state_dict().items():
+        if k.startswith("output_head."):
+            torch.testing.assert_close(two.state_dict()[k], v, rtol=0, atol=0)
+
+
+def test_two_heads_reject_the_legacy_output_projection():
+    with pytest.raises(ValueError, match="num_output_heads"):
+        _dit({"mode": "legacy", "num_output_heads": 2})
+
+
+def test_num_output_heads_must_be_positive():
+    with pytest.raises(ValueError, match="num_output_heads"):
+        _dit({**_MIX, "num_output_heads": 0})
+
+
+def test_muon_groups_still_partition_every_parameter():
+    """The aux head is projection territory, like the primary."""
+    w = RollingDiTWrapper(
+        surface_variables=["s0", "s1"],
+        upper_air_variables=["u0", "u1", "u2", "u3", "u4"],
+        diagnostic_variables=["d0", "d1", "d2"],
+        constant_boundary_variables=["c0"],
+        varying_boundary_variables=["v0", "v1"],
+        levels=[100.0, 500.0, 850.0],
+        horizontal_resolution=(_COMMON["nlat"], _COMMON["nlon"]),
+        channel_layout="v2",
+        scalar_dim=_COMMON["scalar_dim"],
+        rolling_dit_kwargs={
+            k: v for k, v in _COMMON.items()
+            if k not in ("in_channels", "nlat", "nlon", "c_grid_dim", "scalar_dim")
+        } | {"input_embed": _BUDGET, "output_head": _MIX2},
+    )
+    groups = w.muon_param_groups(lr=1e-4)
+    grouped = {id(p) for g in groups for p in g["params"]}
+    assert grouped == {id(p) for p in w.parameters()}
+    aux = {id(p) for p in w.backbone.output_head_aux.parameters()}
+    assert aux and aux <= grouped

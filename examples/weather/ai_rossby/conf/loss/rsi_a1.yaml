@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A1 — RSI in the uncoupled white-noise limit: a consistency check
+# that must match the ERDM baseline (loss=erdm_v2) within noise. A discrepancy
+# indicates an implementation or sampler-family artifact, not a scientific
+# result, and A1 is the fallback operating point if the coupled model drifts.
+#
+# The reduction is exact at the level of the sampler (test_rsi_scheduler.py::
+# test_a1_reduces_to_erdm_exactly compares whole trajectories); this config is
+# the TRAINING-side counterpart. Note it still trains the two-head backbone,
+# so it is A1-for-RSI rather than a re-run of ERDM itself.
+defaults:
+  - rsi
+  - _self_
+
+reduce_to_erdm: true
+# beta == 1 under the reduction, so the increment head is inert and the clean
+# readout must come from the interpolant relation.
+parameterization: residual
+# Gamma(tau) becomes ERDM's rho-schedule between these, and the conditioning
+# label becomes ERDM's own log(sigma)/4.
+label_mode: log_sigma_eff
+sigma_min: 0.002
+sigma_max: 500.0
+rho: -10.0
+# sigma_data: 1.0 in erdm_v2 <=> delta_std: 1.0 here (the weight reduces exactly).
+delta_std: 1.0
+noise_scale_path: null

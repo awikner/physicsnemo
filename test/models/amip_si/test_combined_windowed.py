@@ -293,3 +293,116 @@ def test_the_single_step_forward_still_works():
     assert hasattr(cm, "_downscale")
     out = cm._downscale(torch.randn(1, fc.num_state_channels, *_LOW))
     assert out.shape == (1, _STATE, *_HIGH)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler-owned streaming (RSI): CombinedModule delegates rather than
+# hard-coding ERDM's warm-up and shift.
+# ---------------------------------------------------------------------------
+
+
+def _rsi_forecaster(*, ocean=()):
+    """As :func:`_forecaster`, but with RSI's second readout."""
+    fc = _forecaster(ocean=ocean)
+    return RollingDiTWrapper(
+        surface_variables=_SURF,
+        upper_air_variables=_UA,
+        diagnostic_variables=_DIAG,
+        constant_boundary_variables=["c1"],
+        varying_boundary_variables=[
+            "sea_surface_temperature_monthly_interp",
+            "sea_ice_cover_monthly_interp",
+        ],
+        levels=_LEVELS,
+        horizontal_resolution=_LOW,
+        channel_layout="v2",
+        ocean_state_variables=list(ocean),
+        rolling_dit_kwargs=dict(
+            dim=32, num_heads=2, num_blocks=1, temporal_num_heads=2,
+            window_size=_W,
+            input_embed={"mode": "budget", "d_boundary": 8, "d_calendar": 8},
+            output_head={"mode": "mix", "num_experts": 2, "num_output_heads": 2},
+        ),
+    )
+
+
+def _rsi_combined(*, ocean=(), num_steps=2):
+    from physicsnemo.experimental.diffusion import RSIScheduler
+
+    fc = _rsi_forecaster(ocean=ocean).eval()
+    sched = RSIScheduler(
+        window_size=_W, num_steps=num_steps, noise="gaussian",
+        nocean=len(ocean), ocean_grid_indices=[0, 1][: len(ocean)],
+    )
+    if ocean:
+        sched.ocean_grid_indices = list(fc.ocean_grid_indices)
+    return CombinedModule(
+        forecaster=fc,
+        forecaster_scheduler=sched,
+        downscaler=_downscaler().eval(),
+        downscaler_scheduler=_PassThroughDownscalerScheduler(),
+    ).eval(), fc, sched
+
+
+def test_erdm_streaming_is_untouched_by_the_delegation_hook():
+    """The ERDM path must not change when the hook is absent."""
+    cm, fc, sched = _combined()
+    assert not hasattr(sched, "stream_init")
+    torch.manual_seed(0)
+    init = torch.randn(1, _W, fc.in_channels, *_LOW)
+    x_bar, eps = cm.windowed_init(init)
+    assert x_bar.shape == init.shape
+    assert eps.shape == (1, 1, fc.in_channels, *_LOW)
+
+
+def test_rsi_streaming_delegates_to_the_scheduler():
+    """RSI warms up onto a data-coupled interpolant and wants W+1 frames."""
+    cm, fc, sched = _rsi_combined()
+    assert sched.init_frames == _W + 1
+    torch.manual_seed(0)
+    init = torch.randn(1, _W + 1, fc.in_channels, *_LOW)
+    x_bar, eps_prev = cm.windowed_init(init)
+    # The rolling state is still W frames wide; the extra frame was the anchor.
+    assert x_bar.shape == (1, _W, fc.in_channels, *_LOW)
+    # RSI carries no noise history — the anchor is the previous roll's estimate.
+    assert eps_prev is None
+    assert torch.isfinite(x_bar).all()
+
+
+def test_rsi_windowed_step_emits_and_advances():
+    cm, fc, sched = _rsi_combined()
+    torch.manual_seed(0)
+    init = torch.randn(1, _W + 1, fc.in_channels, *_LOW)
+    x_bar, eps = cm.windowed_init(init)
+    c_grid, c_scalar = _forcings(1, _W, fc.c_grid_dim, fc.scalar_dim)
+    with torch.no_grad():
+        y, x_bar2, eps2 = cm.windowed_step(x_bar, eps, c_grid, c_scalar)
+    assert y.shape[-2:] == _HIGH                     # downscaled
+    assert x_bar2.shape == x_bar.shape
+    assert not torch.equal(x_bar2, x_bar)            # the window advanced
+    assert torch.isfinite(y).all()
+
+
+def test_rsi_streaming_reproduces_sample_rollout_frame_for_frame():
+    """The streaming hooks and the batch rollout must be the same math."""
+    cm, fc, sched = _rsi_combined()
+    torch.manual_seed(0)
+    init = torch.randn(1, _W + 1, fc.in_channels, *_LOW)
+    horizon = 3
+    c_grid = torch.randn(1, _W + horizon, fc.c_grid_dim, *_LOW)
+    c_scalar = torch.randn(1, _W + horizon, fc.scalar_dim)
+
+    torch.manual_seed(99)
+    with torch.no_grad():
+        ref = sched.sample_rollout(fc, init, c_grid, c_scalar, horizon=horizon)
+
+    torch.manual_seed(99)
+    x_bar, eps = cm.windowed_init(init)
+    got = []
+    with torch.no_grad():
+        for k in range(horizon):
+            cg = sched._gather_window(c_grid, k)
+            cs = sched._gather_window(c_scalar, k)
+            emitted, (x_bar, eps) = sched.stream_step(fc, (x_bar, eps), cg, cs, 2)
+            got.append(emitted)
+    torch.testing.assert_close(torch.stack(got, dim=1), ref)

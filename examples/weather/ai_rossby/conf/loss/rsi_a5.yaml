@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A5 — the eps-family SDE sampling sweep, applied to the best of
+# A2-A4. This is a SAMPLER-side ablation: eps(tau) is a post-hoc dial, so the
+# whole sweep runs against an already-trained checkpoint at zero retraining
+# cost. Use it as `sampler=`, not `loss=`, on a trained run:
+#
+#   python eval_diffusion.py ... sampler=rsi_a5 sampler.eps_scale=0.05
+#
+# eps_scale = 0 is the deterministic probability-flow rollout (stochasticity
+# then enters only through the entering-slot perturbation Gamma_0 z), and any
+# eps >= 0 preserves the marginals in the exact-score limit. Tune against
+# spread-skill ratio and rank histograms per lead-time band.
+defaults:
+  - rsi
+  - _self_
+
+eps_scale: 0.05
+eps_tmin: 0.0
+eps_tmax: 1.0

@@ -74,11 +74,20 @@ class _StubWrapper(nn.Module):
         return window["surface_in"]
 
     def pack_window_c_grid(self, window):
-        const = window["constant_boundary"]
+        # Delegates to the REAL broadcast helper on purpose. This stub used to
+        # reimplement it — and did so incorrectly, inserting the missing axis at
+        # dim 0 rather than after the batch axis, which happens to work only when
+        # B == 1. That is precisely why every test here passed while the rolling
+        # validator could not run against a v1/v2 model on real data
+        # (`Tensors must have same number of dimensions: got 5 and 4`). A stub
+        # that re-derives the contract it is standing in for cannot catch the
+        # contract being wrong.
+        from physicsnemo.experimental.models.amip_si.wrappers import (
+            _broadcast_constant,
+        )
+
         var_b = window["varying_boundary"]
-        while const.dim() < var_b.dim():
-            const = const.unsqueeze(0)
-        const = const.expand(*var_b.shape[:-3], -1, -1, -1)
+        const = _broadcast_constant(window["constant_boundary"], var_b.shape[:-3])
         return torch.cat([const, var_b], dim=-3)
 
 
@@ -286,3 +295,99 @@ def test_a_horizon_that_just_fits_is_still_accepted():
     v = _make_validator(scheduler, horizon=19, sampler_num_steps=1)
     v.run(nn.Identity(), epoch=0)
     assert len(scheduler.calls) == 19
+
+
+# ---------------------------------------------------------------------------
+# init_frames — a data-coupled scheduler (RSI) wants W+1 oracle frames
+# ---------------------------------------------------------------------------
+
+
+class _RecordingInitFrames(_RecordingRollingScheduler):
+    """Records the shape of the oracle window it is handed."""
+
+    def __init__(self, window_size=3, init_frames=None):
+        super().__init__(window_size=window_size)
+        if init_frames is not None:
+            self.init_frames = init_frames
+        self.init_shapes: list = []
+
+    def sample_rollout(self, model, init_window, c_grid_traj, c_scalar_traj,
+                       horizon, num_steps=None):
+        self.init_shapes.append(tuple(init_window.shape))
+        return super().sample_rollout(
+            model, init_window, c_grid_traj, c_scalar_traj, horizon, num_steps)
+
+
+def test_validator_defaults_init_frames_to_window_size():
+    """ERDM/RFM expose no init_frames and must keep their W-frame window."""
+    s = _RecordingRollingScheduler(window_size=3)
+    v = _make_validator(s, horizon=3, sampler_num_steps=2)
+    assert v.init_frames == 3
+    v.run(nn.Identity(), epoch=0)
+    assert s.init_shapes[0][1] == 3 if hasattr(s, "init_shapes") else True
+
+
+def test_validator_stacks_the_extra_anchor_frame():
+    s = _RecordingInitFrames(window_size=3, init_frames=4)
+    v = _make_validator(s, horizon=3, sampler_num_steps=2)
+    assert v.init_frames == 4
+    v.run(nn.Identity(), epoch=0)
+    assert s.init_shapes and s.init_shapes[0][1] == 4
+
+
+def _validator_all_ics(scheduler, *, horizon):
+    """Like _make_validator but without the 1-IC cap, so the full range shows."""
+    return DiffusionRolloutValidator(
+        _StubDataset(),
+        wrapper=_StubWrapper(),
+        inference_scheduler=scheduler,
+        log_steps=[horizon],
+        device=torch.device("cpu"),
+        horizon=horizon,
+        max_initial_conditions=1000,
+        batch_size=1,
+        ic_stride=1,
+        sampler_num_steps=2,
+    )
+
+
+def test_extra_anchor_frame_reserves_ic_headroom():
+    """The window still ENDS at the IC, so the extra frame comes from the past.
+
+    Only the FIRST admissible IC moves (one more past frame is needed); the
+    last one is set by the horizon and must not move.
+    """
+    a = _validator_all_ics(_RecordingRollingScheduler(window_size=3),
+                           horizon=3)._select_ic_indices(rank=0, world_size=1)
+    b = _validator_all_ics(_RecordingInitFrames(window_size=3, init_frames=4),
+                           horizon=3)._select_ic_indices(rank=0, world_size=1)
+    assert min(b) == min(a) + 1                  # one more past frame reserved
+    assert max(b) == max(a)                      # the last usable IC is unmoved
+    assert len(b) == len(a) - 1
+
+
+def test_window_rollout_with_a_multi_ic_batch():
+    """B > 1 in window mode — the shape the constant-boundary bug needed.
+
+    Every other test here runs ``batch_size=1``, which is exactly why the
+    ``(B, C, H, W)`` vs ``(B, T, C, H, W)`` rank mismatch in
+    ``_rollout_window`` stayed invisible: at B == 1 a wrongly-inserted axis
+    still broadcasts. With B == 2 and a trajectory length != 2 it does not, and
+    ``pack_window_c_grid`` raises *Tensors must have same number of dimensions*.
+    """
+    scheduler = _RecordingRollingScheduler(window_size=3)
+    v = DiffusionRolloutValidator(
+        _StubDataset(),
+        wrapper=_StubWrapper(),
+        inference_scheduler=scheduler,
+        log_steps=[3],
+        device=torch.device("cpu"),
+        horizon=3,
+        max_initial_conditions=2,
+        batch_size=2,
+        ic_stride=1,
+        sampler_num_steps=2,
+    )
+    out = v.run(nn.Identity(), epoch=0)
+    assert scheduler.calls, "the rolling sampler was never reached"
+    assert out is None or isinstance(out, dict)

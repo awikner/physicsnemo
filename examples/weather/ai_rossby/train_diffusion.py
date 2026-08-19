@@ -212,6 +212,7 @@ def _build_loader(
     world_size: int = 1,
     forcing_lag: int = 0,
     emit_boundary_next: bool = False,
+    anchor_frames: int = 0,
     step_stride: int = 1,
 ) -> tuple[DataLoader, bool]:
     """Build the per-stage DataLoader.
@@ -226,7 +227,10 @@ def _build_loader(
 
     ``forcing_lag`` / ``emit_boundary_next`` (Phase 12f) come from the
     model's channel contract, not from a config knob — see
-    ``RollingDiTWrapper.forcing_lag``. ``step_stride`` is the model step in
+    ``RollingDiTWrapper.forcing_lag``. ``anchor_frames`` comes from the
+    *scheduler* instead (``RSIScheduler.anchor_frames``): a data-coupled
+    rolling scheduler anchors slot 1 on the frame before the window, so it
+    needs that frame emitted. It costs no extra read at ``forcing_lag >= 1``. ``step_stride`` is the model step in
     store rows (``resolve_step_stride``); the rolling window advances one model
     step per frame, which on the 6-hourly AMIP archives is 4 rows, not 1.
     """
@@ -239,6 +243,7 @@ def _build_loader(
             unroll_steps=window_size - 1,
             forcing_lag=forcing_lag,
             emit_boundary_next=emit_boundary_next,
+            emit_anchor=bool(anchor_frames),
             step_stride=step_stride,
         )
     else:
@@ -465,14 +470,21 @@ def _pack_single_step(model: nn.Module, sample: dict) -> tuple:
     return x, y, c_grid, c_scalar
 
 
-def _pack_window(model: nn.Module, window: dict) -> tuple:
-    """ERDM / RFM: pack (y, c_grid, c_scalar) from a (B, W, …) window sample.
+def _pack_window(model: nn.Module, window: dict, *, anchor_frames: int = 0) -> tuple:
+    """ERDM / RFM / RSI: pack (y, c_grid, c_scalar) from a (B, W, …) window sample.
 
     :class:`SequenceDataset` emits the per-frame fields stacked under
     ``{key}_seq`` names (plus an unstacked ``constant_boundary``); the
     constant boundary arrives batched as ``(B, C, H, W)`` and is expanded
     across the window axis here so the wrapper's ``pack_window_c_grid``
     sees ``(B, W, C, H, W)`` streams throughout.
+
+    With ``anchor_frames=1`` (Rolling Stochastic Interpolants) the state stack
+    ``y`` is returned with ``W+1`` frames: the loader's ``{key}_prev`` anchor
+    frame packed and prepended, so ``y[:, w]`` is slot ``w``'s target and
+    ``y[:, w-1]`` its interpolant anchor. ``c_grid`` / ``c_scalar`` stay at
+    ``W`` frames aligned to slots 1..W — the anchor is a state, not a slot, and
+    is never itself predicted.
     """
     inner = model.module if hasattr(model, "module") else model
     surface_seq = window["surface_in_seq"]
@@ -491,6 +503,22 @@ def _pack_window(model: nn.Module, window: dict) -> tuple:
         "varying_boundary": window["varying_boundary_seq"],
     })
     c_scalar = window["calendar_seq"]
+    if anchor_frames:
+        if "surface_in_prev" not in window:
+            raise KeyError(
+                "the scheduler asks for an anchor frame (anchor_frames="
+                f"{anchor_frames}) but the loader emitted no 'surface_in_prev'; "
+                "build the SequenceDataset with emit_anchor=True"
+            )
+        y0 = inner.pack_window_state({
+            "surface_in": window["surface_in_prev"].unsqueeze(1),
+            "upper_air_in": window["upper_air_in_prev"].unsqueeze(1),
+            "diagnostic": (
+                window["diagnostic_prev"].unsqueeze(1)
+                if "diagnostic_prev" in window else None
+            ),
+        })
+        y = torch.cat([y0, y], dim=1)
     return y, c_grid, c_scalar
 
 
@@ -509,6 +537,7 @@ def _train_step(
     amp_dtype,
     device,
     window_mode: bool,
+    anchor_frames: int = 0,
 ) -> dict[str, float]:
     optimizer.zero_grad(set_to_none=True)
     sample = {
@@ -523,7 +552,8 @@ def _train_step(
     ):
         ocean_loss = None
         if window_mode:
-            y, c_grid, c_scalar = _pack_window(model, sample)
+            y, c_grid, c_scalar = _pack_window(
+                model, sample, anchor_frames=anchor_frames)
             if getattr(scheduler_loss, "nocean", 0):
                 # The ocean target is the boundary at each state frame's OWN
                 # time — a different slice of the loader's read window than the
@@ -536,6 +566,14 @@ def _train_step(
                         "the scheduler predicts ocean channels but the loader "
                         "emitted no 'varying_boundary_next_seq'; build the "
                         "SequenceDataset with emit_boundary_next=True"
+                    )
+                if anchor_frames:
+                    # y carries the anchor frame, so the ocean target stack
+                    # must too: the anchor's own-time boundary is the slot-1
+                    # CONDITIONING frame (forcing_lag=1), which the loader
+                    # already emits as varying_boundary_seq[:, 0].
+                    bnd_next = torch.cat(
+                        [sample["varying_boundary_seq"][:, :1], bnd_next], dim=1
                     )
                 y = scheduler_loss.append_ocean_target(y, bnd_next)
             loss, ocean_loss = scheduler_loss.compute_loss(
@@ -614,6 +652,14 @@ def main(cfg: DictConfig) -> None:
     # trained model's numerics. ++training.matmul_precision=high measured 1.80x on
     # the v2 x_DDC config (A100), and is what upstream amip_v2 already trains with.
     apply_math_precision(cfg_train, log=logger)
+    # Platform escape hatch, sitting with the other float-math knobs: DeltaAI's
+    # cuDNN 9.20 has no working attention plan at the v2 geometries under bf16,
+    # and torch's backend priority reaches for cuDNN first. A no-op unless
+    # AI_ROSSBY_NO_CUDNN_SDPA is set — see the function's docstring for the
+    # measured backend table.
+    from physicsnemo.experimental.models.amip_si import maybe_disable_cudnn_sdp
+
+    maybe_disable_cudnn_sdp()
     stages = list(cfg_train.stages)
     total_epochs = sum(int(s.num_epochs) for s in stages)
     logger.info(
@@ -738,15 +784,28 @@ def main(cfg: DictConfig) -> None:
     loader: DataLoader | None = None
     window_mode = False
     window_size = 0
+    anchor_frames = 0
     validator: DiffusionRolloutValidator | None = None
     for stage_idx, stage in enumerate(stages):
         stage_epochs = int(stage.num_epochs)
         stage_window_size = _stage_window_size(cfg, stage)
 
-        # (Re)build the DataLoader when the window size changes — and on
-        # the first stage where it has to be built from scratch.
-        if loader is None or stage_window_size != window_size:
+        # (Re)build the diffusion scheduler with this stage's overrides FIRST:
+        # whether the loader has to emit the pre-window anchor frame is a
+        # property of the loss family (RSIScheduler.anchor_frames), so the
+        # loader below cannot be built until the scheduler exists. Nothing in
+        # _build_scheduler_loss depends on the loader.
+        scheduler_loss = _build_scheduler_loss(
+            cfg, stage, dist.device, model=inner_model
+        )
+        stage_anchor_frames = int(getattr(scheduler_loss, "anchor_frames", 0) or 0)
+
+        # (Re)build the DataLoader when the window size or the anchor contract
+        # changes — and on the first stage where it has to be built from scratch.
+        if (loader is None or stage_window_size != window_size
+                or stage_anchor_frames != anchor_frames):
             window_size = stage_window_size
+            anchor_frames = stage_anchor_frames
             loader, window_mode = _build_loader(
                 cfg,
                 raw_ds,
@@ -760,14 +819,18 @@ def main(cfg: DictConfig) -> None:
                 emit_boundary_next=bool(
                     getattr(inner_model, "num_ocean", 0) or 0
                 ),
+                # …and this one from the scheduler's.
+                anchor_frames=anchor_frames,
             )
 
         steps_per_epoch = max(1, len(loader))
-
-        # (Re)build the diffusion scheduler with this stage's overrides.
-        scheduler_loss = _build_scheduler_loss(
-            cfg, stage, dist.device, model=inner_model
-        )
+        if anchor_frames and not int(getattr(inner_model, "forcing_lag", 0) or 0):
+            raise ValueError(
+                f"{type(scheduler_loss).__name__} needs the pre-window anchor "
+                f"frame (anchor_frames={anchor_frames}), which only exists when "
+                f"the forcings lag the state. This model's channel_layout gives "
+                f"forcing_lag=0 — use a v1/v2 layout."
+            )
 
         # The validator shares the (stage-scoped) scheduler instance —
         # the inference sampler num_steps is overridden inside the
@@ -835,6 +898,7 @@ def main(cfg: DictConfig) -> None:
                     amp_dtype=amp_dtype,
                     device=dist.device,
                     window_mode=window_mode,
+                    anchor_frames=anchor_frames,
                 )
                 if ema is not None:
                     ema.update(inner_model, epoch=global_epoch)

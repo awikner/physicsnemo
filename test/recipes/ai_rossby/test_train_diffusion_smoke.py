@@ -101,10 +101,25 @@ def _times(year, nt):
     return [cftime.DatetimeGregorian(year, 1, 1 + i // 4, 6 * (i % 4)) for i in range(nt)]
 
 
-def _write_state(path: Path, year: int, t0: int) -> None:
+def _uniform_field(nt, h, w, seed, t0):
+    """A time-varying but spatially CONSTANT field.
+
+    The ForcingAssembler routes channels named in
+    ``scalar_routed_boundary_variables`` (CO2) onto the scalar row and refuses
+    to do so if they carry spatial structure — correctly, since that would
+    discard it. So the fixture has to write them the way the real store has
+    them.
+    """
+    col = _field(nt, 1, 1, seed, t0)[:, :1, :1]
+    return np.broadcast_to(col, (nt, h, w)).copy()
+
+
+def _write_state(path: Path, year: int, t0: int, vary=None, uniform=()) -> None:
+    vary = list(_VARY if vary is None else vary)
     data, seed = {}, 0
-    for n in _SURF + _DIAG + _VARY:
-        data[n] = (("time", "lat", "lon"), _field(_NT, _HS, _WS, seed, t0))
+    for n in _SURF + _DIAG + vary:
+        gen = _uniform_field if n in uniform else _field
+        data[n] = (("time", "lat", "lon"), gen(_NT, _HS, _WS, seed, t0))
         seed += 1
     for n in _UPPER:
         stack = np.stack(
@@ -129,18 +144,26 @@ def _write_state(path: Path, year: int, t0: int) -> None:
             "diagnostic_variables": _DIAG,
             "pressure_upper_air_variables": _UPPER,
             "constant_boundary_variables": _CONST,
-            "varying_boundary_variables": _VARY,
+            "varying_boundary_variables": vary,
             "lat_row_order": "south_to_north",   # AMIP is S->N
             "climate_zarr_schema_version": 1,
         },
     ).to_zarr(path, mode="w", consolidated=True)
 
 
-def _write_boundary(path: Path, year: int, t0: int) -> None:
-    """Boundaries at 4x the state grid — the upstream pairing (Phase 12d (b))."""
+def _write_boundary(path: Path, year: int, t0: int, vary=None, uniform=()) -> None:
+    """Boundaries at 4x the state grid — the upstream pairing (Phase 12d (b)).
+
+    ``vary`` overrides the varying-boundary set (the v2 contract adds
+    ``global_mean_co2``); ``uniform`` names channels that must be spatially
+    constant because the ForcingAssembler pops them out of the gridded stream
+    onto the scalar row.
+    """
+    vary = list(_VARY if vary is None else vary)
     data, seed = {}, 500
-    for n in _VARY:
-        data[n] = (("time", "lat", "lon"), _field(_NT, _HB, _WB, seed, t0))
+    for n in vary:
+        gen = _uniform_field if n in uniform else _field
+        data[n] = (("time", "lat", "lon"), gen(_NT, _HB, _WB, seed, t0))
         seed += 1
     for n in _CONST:
         data[n] = (("lat", "lon"), _field(1, _HB, _WB, seed, 0)[0])
@@ -156,16 +179,17 @@ def _write_boundary(path: Path, year: int, t0: int) -> None:
             "data_timedelta_hours": 6,
             "surface_variables": [],
             "constant_boundary_variables": _CONST,
-            "varying_boundary_variables": _VARY,
+            "varying_boundary_variables": vary,
             "lat_row_order": "south_to_north",
             "climate_zarr_schema_version": 1,
         },
     ).to_zarr(path, mode="w", consolidated=True)
 
 
-def _write_norm(path: Path, fill: float) -> None:
+def _write_norm(path: Path, fill: float, vary=None) -> None:
     """mean 0 / std 1: the fields above are already O(1)."""
-    data = {n: ((), np.float32(fill)) for n in _SURF + _DIAG + _VARY + _CONST}
+    vary = list(_VARY if vary is None else vary)
+    data = {n: ((), np.float32(fill)) for n in _SURF + _DIAG + vary + _CONST}
     for n in _UPPER:
         data[n] = (("pressure_level",), np.full(len(_LEVELS), fill, "float32"))
     xr.Dataset(

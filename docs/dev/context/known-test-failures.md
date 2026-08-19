@@ -4,7 +4,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Known test failures — all FIXED (2026-08-14, 2026-08-18)
+# Known test failures (2026-08-14, 2026-08-18)
+
+All four are **fixed**. Section 4 was found and fixed on 2026-08-18 and was
+never really an upstream bug at all — it was one environment variable the
+DeltaAI module leaves set.
 
 Found while running the full suite during the Phase 12 work (2026-08-13);
 neither of the first two belonged to that branch (both reproduced with every
@@ -126,3 +130,56 @@ pins the reduction order of whatever machine and thread count generated it.
 Bitwise is the right bar for data movement — `test_channel_layouts.py` compares
 packing and permutation results with `torch.equal` and is correct to, which is
 why those passed here — but not for anything that sums floats.
+
+
+## 4. 40 `multi_diffusion` compile failures on DeltaAI — `CXX=CC`
+
+**Symptom** — running the suite on a DeltaAI GH200 node, 40 tests fail:
+
+| count | file |
+|---|---|
+| 22 | `test/diffusion/test_multi_diffusion_losses.py` |
+| 16 | `test/diffusion/test_multi_diffusion_predictor.py` |
+| 2 | `test/diffusion/test_multi_diffusion_sampling.py` |
+
+All in `TestCompile`-style classes, i.e. `torch.compile` paths. The same tests
+**pass on x86_64** (a full local `pytest test/` run the same day: 14371 passed,
+0 failed).
+
+**Not the fork's code** — established first with a control run: the untouched
+clone at `/work/nvme/bdiu/awikner/physicsnemo` (branch `ai-rossbypalooza`, no RSI
+present) failed **exactly 40**, the same three files. Worth doing that control
+before attributing a platform failure to your branch; it takes 3.7 minutes.
+
+**Root cause.** Every one of the 40 reports `CppCompileError: C++ compile
+error`, and under it:
+
+```
+ld: crt1.o: in function `_start': undefined reference to `main'
+collect2: error: ld returned 1 exit status
+```
+
+which is a link that has lost its `-shared` — an *executable* link of a file
+with no `main`. The `python/miniforge3_pytorch/2.10.0` module leaves the Cray
+programming environment's wrappers exported as **`CXX=CC`, `CC=cc`**, and
+TorchInductor's CPU backend shells out to `$CXX` to build its generated kernels
+as a shared object. Through the Cray wrapper that link comes out wrong.
+
+The GCC line printed just above it — `note: parameter passing for argument of
+type 'std::pair<...>' when C++17 is enabled changed to match C++14 in GCC 10.1`
+— is a *note*, not the error, and the `precompiled_headers/` path in the
+traceback is incidental: `TORCHINDUCTOR_CPP_PRECOMPILE_HEADERS=0` does not help.
+Both are the kind of loud-but-irrelevant detail that makes this look like a
+toolchain incompatibility rather than one stray variable.
+
+**Fixed** — `export CXX=g++ CC=gcc` before pytest (unsetting both also works;
+torch then does its own detection). Measured on `gh043`/`gh099`: **40 failed /
+550 passed -> 590 passed / 0 failed**, and the run gets *faster* (194 s -> 91 s),
+since the doomed compile attempts are no longer retried. Now exported by the
+`deltaai-smoke-test` skill and documented in `hpc/deltaai.md`; set it by hand for
+ad-hoc `srun` sessions.
+
+**The general trap:** a module that helpfully sets `CC`/`CXX` for MPI builds
+silently redirects every other consumer of those variables, including
+`torch.compile`. When codegen fails on one cluster and not another, print the
+toolchain env before reading the C++.

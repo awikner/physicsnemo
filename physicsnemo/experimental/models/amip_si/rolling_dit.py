@@ -376,8 +376,28 @@ class RollingDiT(_PNeMoModule):
             else ({} if output_head is None else {"mode": output_head})
         )
         self.output_head_mode = str(head_cfg.pop("mode", "legacy"))
+        # Rolling Stochastic Interpolants need TWO readouts (the clean-state or
+        # increment head, and the latent zhat head). They are separate head
+        # INSTANCES under a new parameter name rather than one widened head: a
+        # head's expert/gate widths are exactly what a trained state dict
+        # stores, so widening would silently discard a warm-startable ERDM
+        # output head instead of extending it. With this layout an ERDM
+        # checkpoint loads 1:1 into head 1 and only ``output_head_aux.*`` starts
+        # fresh (zero-init => zhat == 0 at step 0, a benign soft start).
+        self.num_output_heads = int(head_cfg.pop("num_output_heads", 1))
+        if self.num_output_heads < 1:
+            raise ValueError(
+                f"num_output_heads must be >= 1, got {self.num_output_heads}"
+            )
+        if self.num_output_heads > 1 and self.output_head_mode == "legacy":
+            raise ValueError(
+                f"num_output_heads={self.num_output_heads} needs a non-legacy "
+                f"output head: the legacy Unpatchify's width is a checkpoint "
+                f"state-dict shape. Set output_head.mode to mix or flat."
+            )
         if self.output_head_mode == "legacy":
             self.output_head = None
+            self.output_head_aux = nn.ModuleList()
             self.unpatchify_layer = Unpatchify(
                 grid_size=(self.grid_x, self.grid_y),
                 patch_size=(self.patch_size, self.patch_size),
@@ -386,10 +406,15 @@ class RollingDiT(_PNeMoModule):
                 cond_dim=dim)
         else:
             self.unpatchify_layer = None
-            self.output_head = RollingDiTOutputHead(
+            _head_kw = dict(
                 dim=dim, out_channels=self.out_channels, nlat=nlat, nlon=nlon,
                 cond_dim=dim,
                 **{**(dict(state_layout) if state_layout else {}), **head_cfg})
+            self.output_head = RollingDiTOutputHead(**_head_kw)
+            self.output_head_aux = nn.ModuleList(
+                RollingDiTOutputHead(**_head_kw)
+                for _ in range(self.num_output_heads - 1)
+            )
 
         if self.nocean:
             # The legacy projections cannot carry the ocean block: PatchEmbed's
@@ -449,19 +474,21 @@ class RollingDiT(_PNeMoModule):
             nn.init.constant_(final.linear.weight, 0)
             nn.init.constant_(final.linear.bias, 0)
         if self.output_head is not None:
-            nn.init.constant_(self.output_head.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(self.output_head.adaLN_modulation[-1].bias, 0)
-            nn.init.constant_(self.output_head.gate[-1].weight, 0)
-            nn.init.constant_(self.output_head.gate[-1].bias, 0)
-            for expert in self.output_head.experts:
-                # Last op of each path only, so every weight still gets
-                # gradient from step 1 (see output_head's module note).
-                if hasattr(expert, "zero_init_last"):
-                    expert.zero_init_last()
-                else:
-                    nn.init.constant_(expert.weight, 0)
-                    nn.init.constant_(expert.bias, 0)
-            self.output_head.zero_init_ocean()
+            heads = [self.output_head, *getattr(self, "output_head_aux", [])]
+            for head in heads:
+                nn.init.constant_(head.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(head.adaLN_modulation[-1].bias, 0)
+                nn.init.constant_(head.gate[-1].weight, 0)
+                nn.init.constant_(head.gate[-1].bias, 0)
+                for expert in head.experts:
+                    # Last op of each path only, so every weight still gets
+                    # gradient from step 1 (see output_head's module note).
+                    if hasattr(expert, "zero_init_last"):
+                        expert.zero_init_last()
+                    else:
+                        nn.init.constant_(expert.weight, 0)
+                        nn.init.constant_(expert.bias, 0)
+                head.zero_init_ocean()
         if self.input_embed is not None:
             self.input_embed.zero_init_last()
 
@@ -595,7 +622,14 @@ class RollingDiT(_PNeMoModule):
             x = sblock(x, t_emb, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
             x = tblock(x, t_emb, b, W, n)
 
-        head = self.unpatchify_layer if self.output_head is None else self.output_head
-        x = head(x, t_emb)                            # (b*W, nlat, nlon, out_channels)
-        x = x.permute(0, 3, 1, 2)                     # (b*W, out_channels, nlat, nlon)
-        return x.reshape(b, W, self.out_channels, H, Wd)
+        if self.output_head is None:
+            x = self.unpatchify_layer(x, t_emb)       # (b*W, nlat, nlon, out_channels)
+        else:
+            # Heads are concatenated on the channel axis, primary first, so a
+            # single-head consumer reading the leading ``out_channels`` slice
+            # sees exactly what it saw before.
+            outs = [self.output_head(x, t_emb)]
+            outs += [h(x, t_emb) for h in self.output_head_aux]
+            x = outs[0] if len(outs) == 1 else torch.cat(outs, dim=-1)
+        x = x.permute(0, 3, 1, 2)                     # (b*W, C_out_total, nlat, nlon)
+        return x.reshape(b, W, self.out_channels * self.num_output_heads, H, Wd)

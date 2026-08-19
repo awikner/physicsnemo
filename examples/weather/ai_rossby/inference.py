@@ -1191,6 +1191,12 @@ def run_diffusion_inference_streaming_per_ic(
     window_size = (
         int(getattr(scheduler, "window_size", 0)) if window_mode else 0
     )
+    # Frames the scheduler wants for its first window: W for ERDM/RFM, W+1 for
+    # a data-coupled scheduler (RSI), whose leading frame is slot 1's anchor.
+    # The default keeps every existing scheduler on its old path.
+    init_frames = (
+        int(getattr(scheduler, "init_frames", window_size)) if window_mode else 0
+    )
 
     # Store rows per MODEL step. The deterministic driver above has carried
     # this since the ArchesWeather port ("24 h = 4 x 6 h"); the diffusion driver
@@ -1275,11 +1281,13 @@ def run_diffusion_inference_streaming_per_ic(
 
         # --- Rollout ---------------------------------------------------- #
         if window_mode:
-            # Build the oracle initial window [ic - W + 1 .. ic], normalize,
-            # replicate across the ensemble, pack.
+            # Build the oracle initial window [ic - init_frames + 1 .. ic],
+            # normalize, replicate across the ensemble, pack. The window always
+            # ENDS at the IC, so a scheduler asking for an extra anchor frame
+            # reaches further back rather than moving the IC.
             init_window = _maybe_normalize(
                 normalizer,
-                _stack_window_initial(dataset, ic, window_size, device, step_size),
+                _stack_window_initial(dataset, ic, init_frames, device, step_size),
             )
             init_window = perturber(init_window, ensemble_size, generator=rng)
             init_y = inner_model.pack_window_state(init_window)

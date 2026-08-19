@@ -46,12 +46,22 @@ tests so the setting cannot leak between them.
 from __future__ import annotations
 
 import contextlib
+import logging
+import os
 from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
 
-__all__ = ["attention_dtype", "get_attention_dtype", "sdpa", "set_attention_dtype"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "attention_dtype",
+    "get_attention_dtype",
+    "maybe_disable_cudnn_sdp",
+    "sdpa",
+    "set_attention_dtype",
+]
 
 _DTYPES = {
     "bf16": torch.bfloat16,
@@ -138,3 +148,68 @@ def sdpa(
         query.to(dtype), key.to(dtype), value.to(dtype), attn_mask=attn_mask, **kwargs
     )
     return out.to(query.dtype)
+
+
+def maybe_disable_cudnn_sdp() -> bool:
+    """Drop the cuDNN attention backend when ``AI_ROSSBY_NO_CUDNN_SDPA`` is set.
+
+    **Why this knob exists.** On DeltaAI (GH200, cuDNN 9.20, torch 2.10+cu129)
+    ``F.scaled_dot_product_attention`` raises at the v2 geometries under bf16::
+
+        RuntimeError: cuDNN Frontend error: [cudnn_frontend] Error:
+                      No valid execution plans built.
+
+    Measured 2026-08-19 with a standalone 20-line probe — no repo code involved —
+    at ``(B, H, S, D) = (6, 16, 4050, 64)``, i.e. RollingDiT v2's spatial
+    attention (dim 1024 / 16 heads over a 45x90 token grid):
+
+    ===============  ======  ======
+    backend          bf16    fp32
+    ===============  ======  ======
+    default          FAIL    ok
+    cudnn            FAIL    FAIL
+    flash            ok      n/a
+    mem-efficient    ok      ok
+    math             ok      ok
+    ===============  ======  ======
+
+    So cuDNN's attention is simply broken for these shapes on that platform, and
+    torch's backend *priority* reaches for it first under bf16 — which is why
+    fp32 runs fine and a bf16 run dies. There is no env var for this in torch
+    2.10 (``TORCH_CUDNN_SDPA_ENABLED=0`` is inert; verified), so it has to go
+    through the Python API.
+
+    **Disabling it costs nothing here.** Per this module's own analysis above,
+    the point of reduced-precision attention is to reach the sm90 *flash*
+    kernels; cuDNN was never the target. With cuDNN dropped, torch selects
+    flash — exactly the intended path.
+
+    Left OFF by default rather than applied unconditionally: on a platform where
+    cuDNN attention works it may be the fastest choice, and a hard crash that
+    names this function is a better failure mode than a silent slowdown
+    everywhere. The launchers that need it export the variable
+    (``hpc/scripts/train_rsi_amip.sbatch``, the ``deltaai-smoke-test`` skill);
+    see the gotcha in ``hpc/deltaai.md``.
+
+    Returns
+    -------
+    bool
+        Whether the backend was disabled.
+    """
+    flag = os.environ.get("AI_ROSSBY_NO_CUDNN_SDPA", "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return False
+    if not hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        logger.warning(
+            "AI_ROSSBY_NO_CUDNN_SDPA is set but this torch has no "
+            "torch.backends.cuda.enable_cudnn_sdp; leaving the backend alone."
+        )
+        return False
+    torch.backends.cuda.enable_cudnn_sdp(False)
+    logger.info(
+        "cuDNN SDPA backend disabled (AI_ROSSBY_NO_CUDNN_SDPA); attention will "
+        "use flash / mem-efficient. Needed on DeltaAI GH200 + cuDNN 9.20, where "
+        "the cuDNN attention path raises 'No valid execution plans built' at the "
+        "v2 geometries under bf16."
+    )
+    return True

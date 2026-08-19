@@ -346,3 +346,52 @@ def test_v1_to_v2_is_a_fixed_channel_permutation():
     x_v1 = _rolling_wrapper("v1").pack_window_state(s)
     x_v2 = _rolling_wrapper("v2").pack_window_state(s)
     assert torch.equal(x_v2, x_v1.index_select(2, perm))
+
+
+# ---------------------------------------------------------------------------
+# _broadcast_constant rank handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("shape,batch,want", [
+    ((2, 4, 8), (3,), (3, 2, 4, 8)),                 # cached sample, no batch
+    ((2, 4, 8), (3, 5), (3, 5, 2, 4, 8)),            # cached sample -> window
+    ((3, 2, 4, 8), (3,), (3, 2, 4, 8)),              # already batched
+    ((3, 2, 4, 8), (3, 5), (3, 5, 2, 4, 8)),         # batched -> window
+    ((3, 5, 2, 4, 8), (3, 5), (3, 5, 2, 4, 8)),      # already windowed
+])
+def test_broadcast_constant_always_matches_the_target_rank(shape, batch, want):
+    """It must reach ``(*batch_dim_shape, C, H, W)`` from any input rank.
+
+    The ``(B, C, H, W)`` -> ``(B, W)`` row is the one that used to fall through
+    and return unchanged, leaving the caller's ``torch.cat(..., dim=-3)`` to die
+    with *Tensors must have same number of dimensions: got 5 and 4*. It is the
+    shape ``validate_diffusion._rollout_window`` builds — its ``_stack`` batches
+    over ICs while the trajectory is stacked over time — which is why the rolling
+    validator could not run against a v1/v2 model on real data.
+    """
+    from physicsnemo.experimental.models.amip_si.wrappers import _broadcast_constant
+
+    out = _broadcast_constant(torch.randn(*shape), batch)
+    assert tuple(out.shape) == want
+
+
+def test_broadcast_constant_replicates_values_across_the_new_axis():
+    from physicsnemo.experimental.models.amip_si.wrappers import _broadcast_constant
+
+    c = torch.arange(3 * 2 * 4 * 8, dtype=torch.float32).reshape(3, 2, 4, 8)
+    out = _broadcast_constant(c, (3, 5))
+    for w in range(5):
+        torch.testing.assert_close(out[:, w], c)
+
+
+@pytest.mark.parametrize("shape,batch", [
+    ((4, 8), (3,)),                 # fewer than (C, H, W)
+    ((3, 5, 2, 4, 8), (3,)),        # more leading dims than the target
+])
+def test_broadcast_constant_refuses_unusable_ranks(shape, batch):
+    """Loud beats a silently mis-broadcast forcing channel."""
+    from physicsnemo.experimental.models.amip_si.wrappers import _broadcast_constant
+
+    with pytest.raises(ValueError):
+        _broadcast_constant(torch.randn(*shape), batch)

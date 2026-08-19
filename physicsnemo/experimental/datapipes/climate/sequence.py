@@ -123,6 +123,17 @@ notes — a 6-hourly archive under a 24-hour model step needs ``step_stride=4``.
         ``forcing_lag >= 1``, because at lag 0 it would be bit-identical to
         ``varying_boundary_seq`` and the ocean task would be an identity
         copy of an input channel.
+    emit_anchor
+        Also emit the state keys of the frame *before* the window, under
+        ``{key}_prev`` (single frames, no leading time axis). This is the
+        anchor a data-coupled rolling scheduler needs: Rolling Stochastic
+        Interpolants transport window slot ``w`` from its predecessor ``y_{w-1}``
+        to ``y_w``, so slot 1 is anchored on the frame preceding the window.
+        Costs **no extra I/O** — at ``forcing_lag >= 1`` that frame is already
+        read (it is where the slot-1 forcing comes from) and its state half is
+        simply discarded today. Requires ``forcing_lag >= 1`` for that reason.
+        Its own-time boundary is ``varying_boundary_seq[0]``, so callers
+        building a ``W+1`` ocean-target stack prepend that slice.
     """
 
     def __init__(
@@ -132,6 +143,7 @@ notes — a 6-hourly archive under a 24-hour model step needs ``step_stride=4``.
         *,
         forcing_lag: int = 0,
         emit_boundary_next: bool = False,
+        emit_anchor: bool = False,
         step_stride: int = 1,
     ):
         if unroll_steps < 0:
@@ -147,10 +159,18 @@ notes — a 6-hourly archive under a 24-hour model step needs ``step_stride=4``.
                 "— the ocean target would be a copy of an input channel in the "
                 "same token (a silent identity task). Set forcing_lag=1."
             )
+        if emit_anchor and forcing_lag == 0:
+            raise ValueError(
+                "emit_anchor=True needs forcing_lag >= 1: the anchor is the "
+                "state frame BEFORE the window, which is only read when the "
+                "forcings lag the state. At lag 0 there is no such frame in "
+                "the sample and honouring the flag would cost an extra read."
+            )
         self.base = base
         self.unroll_steps = int(unroll_steps)
         self.forcing_lag = int(forcing_lag)
         self.emit_boundary_next = bool(emit_boundary_next)
+        self.emit_anchor = bool(emit_anchor)
         self.step_stride = int(step_stride)
         self.layout = getattr(base, "layout", None)
 
@@ -246,6 +266,13 @@ notes — a 6-hourly archive under a 24-hour model step needs ``step_stride=4``.
             out["varying_boundary_next_seq"] = _stack(
                 "varying_boundary", state_frames
             )
+        if self.emit_anchor:
+            # The state half of the frame preceding the window: slot 1's
+            # interpolant anchor. Already in ``frames`` — no extra read.
+            anchor = frames[self.forcing_lag - 1]
+            for key in _STATE_SEQ_KEYS:
+                if key in anchor and isinstance(anchor[key], torch.Tensor):
+                    out[f"{key}_prev"] = anchor[key]
         if "constant_boundary" in frames[0]:
             out["constant_boundary"] = frames[0]["constant_boundary"]
         out["start_idx"] = torch.tensor(start_idx, dtype=torch.long)

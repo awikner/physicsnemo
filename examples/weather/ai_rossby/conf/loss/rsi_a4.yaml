@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A4 — A3 plus spectrally shaped latent noise: the 2-D schedule over
+# (lead time, wavenumber). Run only after A2 (vanilla) and A3 (residual) have
+# each been trained and evaluated.
+#
+#   Gamma(tau, l) = gamma_0 * g(l) * h(tau, l)
+#
+# g(l) is fit offline to the spherical amplitude spectrum of the model's own
+# one-step increment and normalized to unit band-mean, so it REDISTRIBUTES
+# amplitude across scales rather than changing the level:
+#
+#   python tools/data/amip/make_rsi_spectrum.py \
+#       --zarr $AI_ROSSBY_DATA/amip_dailyavg_coarse \
+#       --model-config examples/weather/ai_rossby/conf/model/amip_rsi_v2.yaml \
+#       --std $AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc \
+#       --year-start 1979 --year-end 2015 \
+#       --out $AI_ROSSBY_DATA/norm_stats/g_l_amip_dailyavg_coarse.pt
+#
+# spectral_sharpness staggers WHEN each band is released: high-l bands stay
+# noisy longer (resolve near the window front), low-l bands resolve early — the
+# prior that large scales are pinned down almost immediately while small scales
+# stay uncertain up to short lead times. 0.0 is envelope-only; that is the
+# sub-rung to run first if A4 underperforms, since it separates "shape the
+# noise" from "stagger the release".
+#
+# The scalar special case (g == 1, sharpness == 0) is included in the unit tests
+# and reproduces loss/rsi.yaml's geometric profile exactly, so turning this on
+# cannot silently move the overall noise level.
+#
+# NOTE: ``grid`` must equal the model's horizontal_resolution — the spherical
+# transform is built for exactly that grid and refuses any other. Bandwidth
+# defaults to nlat // 2 (the exactness limit of equiangular quadrature) in both
+# the fitting tool and the filter; they must agree or the envelope is the wrong
+# length and loading raises.
+defaults:
+  - rsi
+  - _self_
+
+parameterization: residual
+spectrum_path: ???            # set to the make_rsi_spectrum.py artifact
+spectral_sharpness: 2.0
+grid: [45, 90]

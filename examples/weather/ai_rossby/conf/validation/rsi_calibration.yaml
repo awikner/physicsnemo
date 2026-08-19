@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Spread calibration for RSI — the eps-family sweep (ablation A5).
+#
+# In ERDM the ensemble dispersion is baked in at training time through
+# (sigma_min, sigma_max, rho) and the sampler's stochastic churn. In the
+# interpolant family the diffusion coefficient eps(tau) of the sampling SDE is a
+# POST-HOC dial: with the velocity and the score both learned, any eps >= 0
+# preserves the marginals in the exact-score limit, so it is tuned against
+# spread-skill diagnostics after training at zero retraining cost.
+#
+# Run against a TRAINED checkpoint, sweeping the sampler rather than retraining:
+#
+#   for e in 0.0 0.01 0.05 0.1 0.2; do
+#     python validate_diffusion.py model=amip_rsi_v2 loss=rsi \
+#       validation=rsi_calibration sampler=rsi ++sampler.eps_scale=$e \
+#       ++checkpoint_dir=... run_name=rsi_eps$e
+#   done
+#
+# eps_scale = 0 is the deterministic probability-flow rollout — the cheapest
+# point, where stochasticity enters only through the entering-slot perturbation
+# Gamma_0 z. Read the sweep off spread-skill ratio and the rank histograms, per
+# lead-time band; eps_tmin/eps_tmax restrict the forcing to part of the traverse
+# if the miscalibration turns out to be lead-time-specific.
+
+defaults:
+  - diffusion_rollout
+  - _self_
+
+rollout:
+  # Spread is the quantity under test, so a single member says nothing.
+  ensemble_size: 8
+  # Long enough for dispersion to develop past the first window.
+  horizon: 20

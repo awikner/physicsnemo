@@ -19,12 +19,38 @@ to `hpc/delta.md`; follows the same ai-rossby smoke-test workflow.
 | GPU account / allocation | `TG-ATM170020` |
 | CPU account / allocation | `TG-ATM170020` |
 | Default smoke-test partition (GPU) | **`h100`** (24 nodes, H100 — verified); submit via `sbatch` / `idev` |
-| Default data-conversion partition (CPU) | **TBD** — likely `skx` or `normal` |
+| Default data-conversion partition (CPU) | **`spr`** (616 nodes, 112-core Sapphire Rapids) — verified 2026-08-19; `skx`/`icx` also open, `skx-dev` for ≤ 2 h tests |
 | Interactive allocator | `idev` (TACC's node-grab; preferred over bare `srun --pty`) |
-| Walltime caps | **TBD** (`sinfo -o "%P %l"` for per-partition limits) |
+| Walltime caps | **2 days** on every production partition — enforced by the partition's **QoS**, not the partition (`sinfo` reports `infinite`); `skx-dev` caps at 2 h. Table below |
 | Single-node constraint | ✅ all smoke tests + data-conversion jobs run on 1 node |
 | Repo path | `$WORK/physicsnemo` |
 | Test-data path | `$WORK/physicsnemo_test_data` (symlinked at `test/_data`) |
+| Heterogeneous jobs (`hetjob`) | ✅ **supported** across partitions — verified 2026-08-19 (`h100` + `spr`); see below |
+| GPU GRES | ❌ **not tracked** (`Gres=(null)`, `SelectType=select/linear`) — nodes allocate whole; `--gres=gpu:N` / `--gpus-per-node` are unusable |
+
+### Partition & QoS limits (verified 2026-08-19)
+
+`sinfo` reports `TIMELIMIT=infinite` for every production partition — the real caps live in each
+partition's **QoS**, so read `sacctmgr`, not `sinfo`:
+
+```bash
+scontrol show partition h100 | grep -o 'QoS=[^ ]*'
+sacctmgr show qos where name=qh100,qspr format=Name,MaxWall,MaxTRESPU,MaxJobsPU,MaxSubmitJobsPU
+```
+
+| Partition | Nodes | Per node | QoS | MaxWall | Nodes/user | Running/user | Submitted/user |
+|---|---|---|---|---|---|---|---|
+| `h100` | 24 | 96 cores, 1006 GB, 4× H100 SXM 80 GB | `qh100` | 2 days | 4 | **2** | 4 |
+| `spr` | 616 | 112 cores, 124 GB | `qspr` | 2 days | 96 | 24 | 36 |
+| `skx` | 1160 | 48 cores, 186 GB | `qskx` | 2 days | 256 | 40 | 60 |
+| `icx` | 224 | 80 cores, 250 GB | `qicx` | 2 days | 48 | 12 | 20 |
+| `skx-dev` (default) | 72 | 48 cores, 186 GB | `qdevelopment` | **2 h** | 16 | 2 | 4 |
+| `pvc` | 18 | 96 cores, 1006 GB, Intel PVC | `qpvc` | 2 days | 4 | 2 | 4 |
+| `nvdimm` | 3 | 80 cores, 3.8 TB | `qnvdimm` | 2 days | 1 | 2 | 4 |
+
+**`qh100` allows only 2 running jobs / 4 nodes per user** — the tightest budget on the machine.
+Plan multi-GPU experiments around that, and remember a hetjob spends one running-job slot in
+*each* component's QoS.
 
 ## Authentication
 
@@ -97,6 +123,42 @@ Verify (login node, CPU-only):
 python -c "import torch, physicsnemo; print('torch', torch.__version__, 'cuda', torch.version.cuda, '/ physicsnemo', physicsnemo.__version__)"
 ```
 
+### ⚠️ Pre-flight for MULTI-GPU training: the venv above is torch 2.11
+
+The 2026-07-02 verification above installed **torch 2.11.0+cu128**, and that is
+fine for the single-GPU smoke it was verified with. It is **not** fine for
+multi-GPU training: torch 2.11/2.12 regressed DDP for these models
+(`docs/dev/context/sfno-ddp-requirements.md`), which is why `pyproject.toml`
+pins `torch>=2.10.0,<2.11.0`. The `uv sync --extra cu12` line above predates
+that pin being enforced here, so a fresh sync today resolves *below* 2.11
+anyway — the risk is an **existing** venv built before it.
+
+Check before submitting any >1-GPU job:
+
+```bash
+cd $WORK/physicsnemo && source .venv/bin/activate
+python -c "import torch; print(torch.__version__)"      # want 2.10.x, NOT 2.11+
+```
+
+If it reports 2.11 or newer, rebuild:
+
+```bash
+cd $WORK/physicsnemo
+unset VIRTUAL_ENV
+export UV_CACHE_DIR=$SCRATCH/.uv-cache
+export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1
+rm -rf .venv
+# The extras are NOT optional: without them uv silently prunes the SFNO/zarr
+# deps and the recipe fails at import time, not at resolve time.
+uv sync --extra cu12 --group dev --python 3.12     --extra sfno-extras --extra utils-extras --extra datapipes-extras
+source .venv/bin/activate
+python -c "import torch; print(torch.__version__, torch.version.cuda)"
+```
+
+You do not have to remember this: `hpc/scripts/train_rsi_amip.sbatch` refuses to
+start a >1-GPU run on torch >= 2.11 rather than let a degraded DDP job burn 48
+hours of allocation. Single-GPU runs are unaffected and are allowed through.
+
 ## Smoke-test contract
 
 Identical to `hpc/delta.md` — a smoke test is `@pytest.mark.smoke` **and** `@pytest.mark.cuda`,
@@ -151,6 +213,67 @@ The `stampede3-smoke-test` skill wraps this.
 **TBD:** confirm whether direct `srun` works from the Stampede3 login node — if so, the
 Delta-style streaming `srun ... bash -lc '...'` one-liner can replace `sbatch --wait`.
 
+### Heterogeneous jobs — one allocation spanning `h100` + `spr`
+
+**Supported and verified 2026-08-19.** Slurm is `23.11.11` with `SchedulerType=sched/backfill`
+(required — hetjobs are *only* scheduled by the backfill loop) and `JobSubmitPlugins=(null)`, so
+nothing site-local rejects them. Useful when a GPU rollout needs a fat CPU-side co-process
+(e.g. Zarr writers / dataloader feeders on `spr` while the model trains on `h100`).
+
+Both the in-script `hetjob` separator and the `:` CLI form are accepted:
+
+```bash
+#!/bin/bash
+#SBATCH -J het-rollout
+#SBATCH -o hpc/scripts/logs/het-%j.out
+#SBATCH -p h100
+#SBATCH -N 1 -n 1 -t 02:00:00 -A TG-ATM170020
+#SBATCH hetjob
+#SBATCH -p spr
+#SBATCH -N 1 -n 1 -t 02:00:00 -A TG-ATM170020
+
+srun --het-group=0 <gpu-side command>     # lands on h100
+srun --het-group=1 <cpu-side command>     # lands on spr
+```
+
+```bash
+# equivalent CLI form
+sbatch -A TG-ATM170020 -p h100 -N 1 -n 1 -t 02:00:00 \
+     : -p spr  -N 1 -n 1 -t 02:00:00  job.sh
+```
+
+Verify acceptance without burning SUs — `sbatch --test-only` runs TACC's submit filter once per
+component and prints a concrete cross-partition placement:
+
+```
+$ sbatch --test-only hetjob_test.sbatch
+--> Verifying access to desired queue (h100)...OK      # filter runs per component
+--> Verifying access to desired queue (spr)...OK
+sbatch: Job 3420806 to start at 2026-08-20T01:08:34 using 208 processors on c521-041,c562-008
+```
+
+A real submission registers as two job records under one leader, and `scancel <leader>` kills
+the whole set:
+
+```
+JobId=3420812 HetJobId=3420812 HetJobOffset=0  Partition=h100  JobState=PENDING
+JobId=3420813 HetJobId=3420812 HetJobOffset=1  Partition=spr   JobState=PENDING
+   HetJobIdSet=3420812-3420813
+```
+
+**Caveats:**
+
+- **`ibrun` is not hetjob-aware** (no `het` handling in the wrapper). Launch with
+  `srun --het-group=N`. A *single* MPI communicator spanning both components
+  (`srun --het-group=0,1`) is **untested** here — with `SwitchType=(null)` and
+  `TopologyPlugin=topology/default`, don't assume it works across the SPR and H100 fabrics.
+- **All components must start simultaneously**, so queue wait is gated by the scarcer side.
+  `h100` runs near-fully-allocated; a 1-node/1-min test estimated a start ~9 h out.
+- **Each component is a separate job record under its own QoS** — a hetjob spends from both
+  budgets, and `qh100` only permits 2 running jobs per user (see the QoS table above).
+- **`idev` cannot do this** — it's TACC's own allocator, not a hetjob front end. Use `sbatch`,
+  or `salloc` with the `:` syntax for interactive.
+
 ## Profiling with Nsight
 
 `nsys`/`ncu` ship with the CUDA / NVHPC modules. Load `cuda/12.8` (or `nvidia/25.3`, the NVHPC
@@ -167,8 +290,8 @@ nsys --version ; ncu --version   # ⚠️ record exact versions on first login
 
 ## Data-conversion CPU jobs
 
-CPU-only preprocessing (HDF5→Zarr, climatology/bias, normalization stats) runs on the CPU
-partition (`skx`/`normal`, **TBD**) under `TG-ATM170020`, via `idev` (interactive) or
+CPU-only preprocessing (HDF5→Zarr, climatology/bias, normalization stats) runs on **`spr`**
+(112 cores/node, 2-day cap) under `TG-ATM170020`, via `idev` (interactive) or
 `sbatch`. Scripts read `SLURM_CPUS_PER_TASK` to size their `multiprocessing.Pool`. See the
 `stampede3-cpu-job` skill.
 
@@ -183,8 +306,8 @@ partition (`skx`/`normal`, **TBD**) under `TG-ATM170020`, via `idev` (interactiv
 ## First-login verification checklist (clears the TBDs)
 
 - [ ] GPU partition name — `sinfo -s | grep -i h100`
-- [ ] CPU partition name — `sinfo -s`
-- [ ] Per-partition walltime caps — `sinfo -o "%P %l"`
+- [x] CPU partition name — **`spr`** (also `skx`, `icx`, `skx-dev`)
+- [x] Per-partition walltime caps — **2 days via QoS** (`sinfo` says `infinite`); `skx-dev` 2 h
 - [ ] CUDA module version — `module avail cuda`
 - [ ] Does TACC ship torch ≥ 2.10? → Option A vs B decision (record here)
 - [ ] Does bare `srun` work from the login node, or is `idev`/`sbatch` required?

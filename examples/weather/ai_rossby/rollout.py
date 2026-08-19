@@ -366,8 +366,11 @@ def main(cfg: DictConfig) -> None:
     else:
         from inference import _stack_window_initial
 
-        W = int(f_sched.window_size)
-        init = _stack_window_initial(dataset, ic, W, dist.device, step_size=step_size)
+        # The oracle stack always ENDS at the IC; a data-coupled scheduler
+        # (RSI) asks for one more frame and reaches further back for it.
+        n_init = int(getattr(f_sched, "init_frames", f_sched.window_size))
+        init = _stack_window_initial(
+            dataset, ic, n_init, dist.device, step_size=step_size)
         x_bar, eps_prev = combined.windowed_init(forecaster.pack_window_state(init))
         start_step = 0
 

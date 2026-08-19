@@ -12,6 +12,10 @@ Five schedulers vendored from the amip repo @ commit
 * :class:`DynamicInterpolant` — x-prediction variant (SI_X variant).
 * :class:`ERDMScheduler` — Elucidated Rolling Diffusion Model.
 * :class:`RFMScheduler` — Rolling Flow Matching.
+* :class:`RSIScheduler` — Rolling Stochastic Interpolants: ERDM's rolling
+  window with a data-coupled base (each slot is transported from its temporal
+  predecessor, not from noise). ERDM is its uncoupled white-noise special
+  case; see ``reduce_to_erdm``.
 * :class:`EDMScheduler` — Elucidated Diffusion (Karras et al.) — single-step
   baseline.
 * :class:`DataDependentInterpolant` — the x_DDC super-resolution cascade's
@@ -52,6 +56,7 @@ from .dynamic_interpolant import DriftScheduler
 from .edm import EDMScheduler
 from .erdm import ERDMScheduler
 from .rfm import RFMScheduler
+from .rsi import RSIScheduler
 from .x_ddc_interpolant import DataDependentInterpolant
 from .x_interpolant import DynamicInterpolant
 
@@ -90,4 +95,5 @@ __all__ = [
     "EDMSchedulerModule",
     "ERDMScheduler",
     "RFMScheduler",
+    "RSIScheduler",
 ]

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI (Rolling Stochastic Interpolants) inference sampler. Rolling scheduler —
+# pairs with model=amip_rsi_v2 only. ``window_size`` must match the wrapper's
+# training window, and the interpolant profiles (beta, gamma_0, gamma_1,
+# gamma_profile, delta_std, parameterization, noise_scale_path) MUST match the
+# ones the checkpoint was trained under: they define the forward process the
+# heads were regressed against, and a mismatch is silently wrong rather than
+# an error.
+#
+# Prefer the default ``sampler=from_loss``, which reuses the training scheduler
+# and makes that class of mistake impossible. This file exists for the case
+# where only the SAMPLING knobs differ — num_steps, solver, final_denoise, and
+# above all eps_scale, the post-hoc spread dial (see loss/rsi_a5.yaml).
+#
+# (The sibling sampler/erdm.yaml is a standing example of the hazard: it still
+# carries v1 statistics — sigma_data 0.5, alpha 1.0, churn off — while
+# loss/erdm_v2.yaml trains at sigma_data 1.0, alpha 0.0, churn on.)
+
+_target_: physicsnemo.experimental.diffusion.RSIScheduler
+window_size: 6
+num_steps: 2
+solver: heun
+integrator: coeff
+final_denoise: false
+
+parameterization: state
+beta: linear
+beta_floor: 1.0e-3
+gamma_0: 0.5
+gamma_1: 0.02
+gamma_profile: geometric
+delta_std: 1.0
+label_mode: tau
+
+# The post-hoc calibration dial. 0 = deterministic probability-flow rollout.
+eps_scale: 0.0
+eps_tmin: 0.0
+eps_tmax: 1.0
+
+noise: gaussian
+l_max: 90
+noise_scale_path: null
+spectrum_path: null

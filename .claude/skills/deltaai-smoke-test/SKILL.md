@@ -37,9 +37,10 @@ cap** — longer runs use `ghx4` (2-day) with their own job script.
    module load python/miniforge3_pytorch/2.10.0 && \
    cd /work/nvme/bdiu/awikner/physicsnemo && source .venv-deltaai/bin/activate && \
    export AI_ROSSBY_TEST_DATA=/work/nvme/bdiu/awikner/physicsnemo_test_data && \
+   export CXX=g++ CC=gcc AI_ROSSBY_NO_CUDNN_SDPA=1 && \
    pytest -m "smoke and cuda" -x -q <TARGET>
    ```
-   Note the venv is **`.venv-deltaai`** (not `.venv`, which is Delta's x86_64). For DDP, prepend
+   Note the venv is **`.venv-deltaai`** (not `.venv`, which is Delta's x86_64). **`CXX=g++ CC=gcc` is required** — the module environment leaves the Cray PE's `CXX=CC`/`CC=cc` wrappers in place, and TorchInductor's CPU backend cannot link through them (40 `torch.compile` tests fail; see `hpc/deltaai.md`). **`AI_ROSSBY_NO_CUDNN_SDPA=1`** is required for any bf16 amip_si run — cuDNN 9.20 has no attention plan at the v2 geometries and torch picks it before flash. For DDP, prepend
    `torchrun --standalone --nproc-per-node=2 -m ` before `pytest` and load
    `nccl-ofi-plugin/1.18.0-cuda129`.
 4. **Submit via `srun`.** Stream output; job ends when pytest does. Do NOT use `--pty` (that's
@@ -55,6 +56,7 @@ srun --partition=ghx4-interactive --account=bdiu-dtai-gh --time=00:30:00 \
   bash -lc 'module load python/miniforge3_pytorch/2.10.0 && \
             cd /work/nvme/bdiu/awikner/physicsnemo && source .venv-deltaai/bin/activate && \
             export AI_ROSSBY_TEST_DATA=/work/nvme/bdiu/awikner/physicsnemo_test_data && \
+            export CXX=g++ CC=gcc AI_ROSSBY_NO_CUDNN_SDPA=1 && \
             pytest -m "smoke and cuda" -x -q test/models/pangu_plasim/'
 ```
 

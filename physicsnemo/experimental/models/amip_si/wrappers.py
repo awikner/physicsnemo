@@ -86,16 +86,40 @@ class MetaData(ModelMetaData):
 def _broadcast_constant(constant: torch.Tensor, batch_dim_shape: tuple[int, ...]) -> torch.Tensor:
     """Broadcast a constant-boundary tensor across the leading shape.
 
-    Input: ``(C, H, W)`` (no batch dim in the cached sample) or already
-    batched ``(B, C, H, W)`` / ``(B, W, C, H, W)``.
-    Output: matches ``(*batch_dim_shape, C, H, W)``.
+    Input: ``(C, H, W)`` (no batch dim in the cached sample), or already batched
+    ``(B, C, H, W)``, or already windowed ``(B, W, C, H, W)``.
+    Output: always ``(*batch_dim_shape, C, H, W)``.
+
+    The "already batched but not yet windowed" case — ``(B, C, H, W)`` against a
+    ``(B, W)`` target — used to fall through the old ``ndim == 3`` check and
+    return unchanged, so the caller's ``torch.cat(..., dim=-3)`` died with
+    ``Tensors must have same number of dimensions: got 5 and 4``. That is
+    exactly the shape ``validate_diffusion._rollout_window`` produces (its
+    ``_stack`` batches over ICs, while the trajectory is stacked over time), and
+    it is why the rolling validator could not run against a v1/v2 model at all;
+    the training path only worked because ``_pack_window`` expands the constant
+    by hand before calling in. Missing leading axes are inserted AFTER the batch
+    axis, since the batch axis is the one the input already has.
     """
-    if constant.ndim == 3:
-        # (C, H, W) — expand across the requested leading dims.
-        for _ in batch_dim_shape:
-            constant = constant.unsqueeze(0)
-        return constant.expand(*batch_dim_shape, *constant.shape[-3:])
-    return constant
+    want = len(batch_dim_shape)
+    have = constant.ndim - 3
+    if have < 0:
+        raise ValueError(
+            f"constant boundary needs at least (C, H, W); got {tuple(constant.shape)}"
+        )
+    if have == 0:
+        # No leading dims at all — prepend every requested one.
+        constant = constant.reshape(*(1,) * want, *constant.shape)
+    elif have < want:
+        # Batched but missing the window/time axis, which sits after the batch.
+        for _ in range(want - have):
+            constant = constant.unsqueeze(1)
+    elif have > want:
+        raise ValueError(
+            f"constant boundary has {have} leading dim(s) but the target has "
+            f"{want}: {tuple(constant.shape)} vs {batch_dim_shape}"
+        )
+    return constant.expand(*batch_dim_shape, *constant.shape[-3:])
 
 
 def _flatten_upper_air(upper_air: torch.Tensor) -> torch.Tensor:
@@ -967,6 +991,7 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
             self.backbone.unpatchify_layer,
             getattr(self.backbone, "input_embed", None),
             getattr(self.backbone, "output_head", None),
+            *getattr(self.backbone, "output_head_aux", []),
             self.backbone.c_grid_embed,
             self.backbone.scalar_embedder,
         ]
@@ -1477,6 +1502,12 @@ class CombinedModule(_PNeMoModule):
         noise latent, which seeds the AR(1) chain.
         """
         sch = self.forecaster_scheduler
+        if hasattr(sch, "stream_init"):
+            # A scheduler whose warm-up is not "noise the oracle window" brings
+            # its own (RSI places each slot on a data-coupled interpolant, and
+            # wants W+1 frames to do it). The ERDM math below stays the
+            # fallback so nothing about the ERDM path changes.
+            return sch.stream_init(init_window)
         b = init_window.shape[0]
         init_window = sch.pad_state(init_window)
         sigma0 = sch.sigma_schedule(torch.zeros(b, device=init_window.device))
@@ -1517,6 +1548,16 @@ class CombinedModule(_PNeMoModule):
                 f"different ocean_state_variables. Start the rollout fresh "
                 f"rather than resuming."
             )
+        if hasattr(sch, "stream_step"):
+            emitted, (x_bar, eps_prev) = sch.stream_step(
+                self.forecaster, (x_bar, eps_prev), c_grid_win, c_scalar_win,
+                num_steps, ocean_win=ocean_win,
+            )
+            # Strip the predicted ocean block before the downscaler: it is a
+            # pretrained, state-width model and must not see the extra channels.
+            y_highres = self._downscale(
+                sch.strip_ocean(emitted), num_steps=downscaler_num_steps)
+            return y_highres, x_bar, eps_prev
         x_bar = sch.sample_window(
             self.forecaster, x_bar, c_grid_win, c_scalar_win, num_steps,
             ocean_win=ocean_win,

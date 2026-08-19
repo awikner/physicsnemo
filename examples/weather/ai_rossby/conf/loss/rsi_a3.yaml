@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A3 — A2 plus the residual parameterization. Run only after A2 (the
+# vanilla rolling SI, loss=rsi) has been trained and evaluated.
+#
+# The head now regresses the increment y_w - a_w directly, so its target has
+# the magnitude of the physical tendency rather than the state, and the
+# clean-state readout no longer divides by (1 - beta) — the state mode's one
+# structural weakness, worst exactly at the window front where the frame is
+# about to be emitted. If A2's last solver steps look unstable, this is the fix
+# and the A2-vs-A3 contrast is the measurement.
+#
+# Sub-rung: anchor_noise > 0 (exposure-bias control) — at inference the anchor
+# is the model's own estimate, and under-representing that at training time is
+# the main technical risk in the proposal. Sweep {0.1, 0.25, 0.5} separately.
+defaults:
+  - rsi
+  - _self_
+
+parameterization: residual
+anchor_noise: 0.0
