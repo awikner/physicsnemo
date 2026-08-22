@@ -771,3 +771,80 @@ def test_spectral_and_erdm_reduction_are_mutually_exclusive():
 def test_constructor_rejects_bad_config(bad, match):
     with pytest.raises(ValueError, match=match):
         RSIScheduler(window_size=3, **bad)
+
+
+# ---------------------------------------------------------------------------
+# h1_precond="edm": the EDM skip/out readout for the H1 head (state mode)
+# ---------------------------------------------------------------------------
+def test_h1_precond_rejects_residual_mode():
+    with pytest.raises(ValueError, match="h1_precond"):
+        RSIScheduler(window_size=3, parameterization="residual",
+                     h1_precond="edm")
+    with pytest.raises(ValueError, match="h1_precond"):
+        RSIScheduler(window_size=3, h1_precond="banana")
+
+
+def test_h1_precond_zero_init_is_the_contract_map():
+    """At F=0 the H1 readout must be c_skip(tau) * x — the safe EDM default.
+
+    Raw-state readout gives h1 = 0 at zero init ("predict the zero field");
+    the edm readout gives the Gaussian-optimal shrinkage of x instead, exactly
+    as ERDM's D does. Under reduce_to_erdm the two coefficient sets coincide
+    with EDM's, so this also pins the A1 story for the H1 head.
+    """
+    W, C, H, Wd = 3, 3, 8, 16
+
+    class _Zero(nn.Module):
+        def forward(self, x, label, c_grid, c_scalar):
+            return torch.cat([torch.zeros_like(x)] * 2, dim=2)
+
+    for kwargs in (dict(), dict(reduce_to_erdm=True)):
+        sched = RSIScheduler(window_size=W, num_steps=2, h1_precond="edm",
+                             **kwargs)
+        x = torch.randn(1, W, C, H, Wd)
+        tau = sched.local_time(torch.rand(1))
+        h1, _ = sched.heads(_Zero(), x, tau, None, None)
+        g = sched.gamma(tau)
+        c_skip = sched.sigma_data ** 2 / (g ** 2 + sched.sigma_data ** 2)
+        torch.testing.assert_close(h1, sched.w5(c_skip) * x)
+
+
+def test_h1_precond_loss_and_grads():
+    """Loss stays finite and gradients reach both heads through the readout."""
+    torch.manual_seed(0)
+    W, C, H, Wd = 3, 3, 8, 16
+    sched = RSIScheduler(window_size=W, num_steps=2, h1_precond="edm")
+    model = _TwoHeadStub(C)
+    loss = sched.compute_loss(model, None, None, torch.randn(2, W + 1, C, H, Wd))
+    assert torch.isfinite(loss)
+    loss.backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None and torch.isfinite(p.grad).all(), name
+        assert float(p.grad.abs().sum()) > 0.0, f"no gradient reached {name}"
+
+
+def test_h1_precond_zero_init_rollout_stays_bounded():
+    """The edm readout keeps the zero-init rollout on-scale (state mode)."""
+    W, C, H, Wd = 3, 3, 8, 16
+
+    class _Zero(nn.Module):
+        def forward(self, x, label, c_grid, c_scalar):
+            return torch.cat([torch.zeros_like(x)] * 2, dim=2)
+
+    sched = RSIScheduler(window_size=W, num_steps=2, h1_precond="edm")
+    init = torch.randn(1, W + 1, C, H, Wd)
+    with torch.no_grad():
+        out = sched.sample_rollout(_Zero(), init, None, None, horizon=8)
+    _assert_bounded(out, what="zero-init h1_precond=edm rollout")
+
+
+def test_h1_precond_denoised_is_the_readout():
+    """State-mode denoised() must return the preconditioned readout itself."""
+    torch.manual_seed(1)
+    W, C, H, Wd = 3, 3, 8, 16
+    sched = RSIScheduler(window_size=W, num_steps=2, h1_precond="edm")
+    model = _TwoHeadStub(C)
+    x = torch.randn(1, W, C, H, Wd)
+    tau = sched.local_time(torch.rand(1))
+    h1, zhat = sched.heads(model, x, tau, None, None)
+    torch.testing.assert_close(sched.denoised(x, tau, h1, zhat), h1)

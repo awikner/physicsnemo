@@ -40,6 +40,22 @@ final_denoise: false
 # increment is recovered from the interpolant relation. residual: H1 predicts
 # the increment directly — that is A3, not this file.
 parameterization: state
+# How the H1 (state) head is read out. "edm" reads H1 through EDM's skip/out
+# form (y_hat = c_skip x + c_out F1), which the proposal's sec 3.4 prescribes:
+# the raw network regresses a unit-variance residual instead of holding a
+# full-precision copy of the state. "none" (raw state regression) is what the
+# first two production runs trained with — both destabilized at ~11.7k steps
+# (2026-08-21/22, Midway jobs 53918582 / 54173034). Root-caused 2026-08-22:
+# the raw head's output-space curvature is lambda*f vs the preconditioned
+# head's f — 16x ERDM's whole loss integrated over training, ~2e6x at the
+# front slot. Confirmed by a 2x-lr three-way on Midway: raw H1 trips at b5795
+# (front-slot-led, the RSI-specific defect), while h1_precond=edm trips at
+# b7092 and ERDM ITSELF at b7145 — i.e. with the edm readout RSI matches the
+# baseline's stability exactly and the remaining 2x-lr onset is the trunk's
+# generic Muon-1e-3 limit, shared by every loss. Full story:
+# docs/dev/context/rsi-h1-precond-instability.md. Do not set "none" for a
+# real run.
+h1_precond: edm
 beta: linear
 beta_floor: 1.0e-3
 # gamma_0: the latent amplitude at the base end, in units of the per-channel

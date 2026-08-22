@@ -5,11 +5,16 @@
 
 import logging
 import math
+import os
 
 import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
+
+# Per-slot loss decomposition cadence; 0 (default) disables. See compute_loss.
+_LOSS_DIAG_EVERY = int(os.environ.get("RSI_LOSS_DIAG", "0") or 0)
+_LOSS_DIAG_CALLS = 0
 
 # Rolling Stochastic Interpolants (RSI)
 #
@@ -119,6 +124,7 @@ class RSIScheduler(nn.Module):
                  final_denoise=False,
                  # ── interpolant profiles ──────────────────────────────────
                  parameterization="state",
+                 h1_precond="none",
                  beta="linear",
                  beta_power=2.0,
                  beta_floor=1e-3,
@@ -183,6 +189,17 @@ class RSIScheduler(nn.Module):
                 f"{parameterization!r}"
             )
         self.parameterization = parameterization
+        if h1_precond not in ("none", "edm"):
+            raise ValueError(
+                f"h1_precond must be 'none' or 'edm', got {h1_precond!r}"
+            )
+        if h1_precond == "edm" and parameterization != "state":
+            raise ValueError(
+                "h1_precond='edm' reads H1 out as an EDM denoiser of the clean "
+                "STATE; under parameterization='residual' H1 is the increment "
+                "and has its own scale. Use it with the state parameterization."
+            )
+        self.h1_precond = h1_precond
         self.beta_mode = beta
         self.beta_power = float(beta_power)
         self.beta_floor = float(beta_floor)
@@ -280,10 +297,11 @@ class RSIScheduler(nn.Module):
             )
 
         logger.info(
-            "RSIScheduler initialized: W=%s, num_steps=%s, param=%s, beta=%s, "
-            "gamma=[%s -> %s] (%s), integrator=%s, solver=%s, weighting=%s, "
+            "RSIScheduler initialized: W=%s, num_steps=%s, param=%s (h1_precond=%s), "
+            "beta=%s, gamma=[%s -> %s] (%s), integrator=%s, solver=%s, weighting=%s, "
             "eps_scale=%s, noise=%s, reduce_to_erdm=%s",
-            self.W, self.num_steps, self.parameterization, self.beta_mode,
+            self.W, self.num_steps, self.parameterization, self.h1_precond,
+            self.beta_mode,
             self.gamma_0, self.gamma_1, self.gamma_mode, self.integrator,
             self.solver, self.weighting, self.eps_scale, noise, self.reduce_to_erdm,
         )
@@ -565,6 +583,31 @@ class RSIScheduler(nn.Module):
         # network means "contract", not "do not move" (see z_precond).
         skip, out_c = self.z_precond(tau)
         zhat = self.w5(skip) * x + self.w5(out_c) * f_z
+        if self.h1_precond == "edm":
+            # Read H1 out through the same EDM denoiser form,
+            #
+            #     y_hat = c_skip(tau) x + c_out(tau) F_1,
+            #     c_skip = sigma_d^2/(gamma^2+sigma_d^2),
+            #     c_out  = gamma sigma_d/sqrt(gamma^2+sigma_d^2),
+            #
+            # instead of regressing the raw state. The proposal (sec 3.4)
+            # prescribes exactly this skip path for the learned heads; reading
+            # H1 raw makes the network responsible for a full-precision copy of
+            # the state at every tau — at the front slots that is an identity
+            # map the backbone must realize to ~gamma_1 precision through its
+            # own layers, a needlessly stiff objective (the raw head's
+            # output-space curvature is lambda*f vs the c_out-scaled head's f;
+            # the ratio is lambda(sigma_eff), ~600-2500 at the front slots).
+            # With the skip, the raw network regresses the unit-variance
+            # residual (y - c_skip x)/c_out, exactly as ERDM's F does — and
+            # under reduce_to_erdm this IS ERDM's D readout, so the A1
+            # reduction holds for the H1 head at zero-init too.
+            g = self.gamma(tau)
+            denom = g ** 2 + self.sigma_data ** 2
+            h1 = (
+                self.w5(self.sigma_data ** 2 / denom) * x
+                + self.w5(g * self.sigma_data / denom.sqrt()) * h1
+            )
         return h1, zhat
 
     def delta_from(self, x, tau, h1, zhat):
@@ -714,6 +757,23 @@ class RSIScheduler(nn.Module):
         err2 = self.w_1 * err_1 ** 2 + self.w_z * err_z ** 2
 
         weight = self.loss_weight(tau)                # (b, W)
+
+        # Diagnostic decomposition, off unless RSI_LOSS_DIAG=<N> is exported:
+        # every N calls, log the weighted per-slot h1-term and z-term sums.
+        # Cheap (reuses tensors already in hand) and exactly what is needed to
+        # see WHICH term leads when a run destabilizes.
+        if _LOSS_DIAG_EVERY > 0:
+            global _LOSS_DIAG_CALLS
+            _LOSS_DIAG_CALLS += 1
+            if _LOSS_DIAG_CALLS % _LOSS_DIAG_EVERY == 0:
+                with torch.no_grad():
+                    p1 = (weight * (self.w_1 * err_1 ** 2).sum(dim=[2, 3, 4])).mean(0)
+                    pz = (weight * (self.w_z * err_z ** 2).sum(dim=[2, 3, 4])).mean(0)
+                    logger.info(
+                        "rsi loss diag: h1/slot=%s z/slot=%s",
+                        ["%.3e" % v for v in p1.tolist()],
+                        ["%.3e" % v for v in pz.tolist()],
+                    )
         if self.nocean:
             n = err2.shape[2] - self.nocean
             state_mse = err2[:, :, :n].sum(dim=[2, 3, 4])
