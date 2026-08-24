@@ -337,3 +337,60 @@ class TestResolveStepsPerBin:
         with caplog.at_level("WARNING"):
             assert fn({"months_per_bin": 1.0, "steps_per_bin": 30}, 30, name="c") == 30
         assert caplog.text == ""
+
+
+# ---------------------------------------------------------------------------
+# scan_rmse_trace: instability scan over the stored per-step RMSE traces
+# ---------------------------------------------------------------------------
+def _trace(group, values, start=1):
+    return {f"rmse_step{start + i}_{group}": v for i, v in enumerate(values)}
+
+
+def test_scan_rmse_trace_clean_series_reports_nothing():
+    from eval_diffusion import scan_rmse_trace
+
+    acc = _trace("surface", [100.0 + (i % 7) for i in range(200)])
+    out = scan_rmse_trace(acc)
+    s = out["surface"]
+    assert s["n_steps"] == 200
+    assert s["n_nonfinite"] == 0
+    assert s["first_nonfinite_step"] is None
+    assert s["jumps"] == []
+
+
+def test_scan_rmse_trace_flags_a_jump_at_the_right_step():
+    from eval_diffusion import scan_rmse_trace
+
+    vals = [100.0] * 120
+    vals[80] = 450.0                      # 4.5x the trailing median of 100
+    out = scan_rmse_trace(_trace("upper_air", vals), jump_factor=3.0)
+    jumps = out["upper_air"]["jumps"]
+    assert len(jumps) == 1
+    step, value, med = jumps[0]
+    assert step == 81                     # steps are 1-indexed in the keys
+    assert value == pytest.approx(450.0)
+    assert med == pytest.approx(100.0)
+
+
+def test_scan_rmse_trace_counts_nonfinite_and_survives_them():
+    from eval_diffusion import scan_rmse_trace
+
+    vals = [50.0] * 60
+    vals[10] = float("nan")
+    vals[30] = float("inf")
+    out = scan_rmse_trace(_trace("diagnostic", vals))
+    s = out["diagnostic"]
+    assert s["n_nonfinite"] == 2
+    assert s["first_nonfinite_step"] == 11
+    # non-finite steps are excluded from the trailing median, not tripped over
+    assert all(pytest.approx(50.0) == m for (_, _, m) in s["jumps"]) or s["jumps"] == []
+
+
+def test_scan_rmse_trace_handles_multiple_groups_and_ignores_other_keys():
+    from eval_diffusion import scan_rmse_trace
+
+    acc = {**_trace("surface", [10.0] * 30), **_trace("upper_air", [20.0] * 30),
+           "some_other_metric": 5.0}
+    out = scan_rmse_trace(acc)
+    assert set(out) == {"surface", "upper_air"}
+    assert out["surface"]["n_steps"] == 30

@@ -289,3 +289,51 @@ def test_climatology_bias_pattern_end_to_end():
     bias = pred_agg.finalize(out_dtype=torch.float64) - truth_agg.finalize(out_dtype=torch.float64)
     # Mean of the noise is ~0, so bias ≈ 0.5 ± O(0.1 / √100) = ± 0.01.
     assert torch.allclose(bias, torch.full(shape, 0.5, dtype=torch.float64), atol=0.03)
+
+
+# ---------------------------------------------------------------------------
+# Non-finite guard: a NaN/Inf update must raise, not poison the statistic
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_streaming_time_mean_rejects_nonfinite(bad):
+    """One bad element in one update used to silently NaN the whole mean —
+    every downstream bias map and gate metric — with no trace of WHERE the
+    rollout blew up (audited 2026-08-24, RSI A2 eval hardening)."""
+    acc = StreamingTimeMean((3, 4, 4), torch.device("cpu"))
+    acc.update(torch.randn(2, 3, 4, 4))
+    x = torch.randn(2, 3, 4, 4)
+    x[1, 2, 0, 0] = bad
+    with pytest.raises(ValueError, match="StreamingTimeMean.*non-finite"):
+        acc.update(x)
+    # the error names the offending channel and the samples already absorbed
+    try:
+        acc.update(x)
+    except ValueError as e:
+        assert "channel indices [2]" in str(e)
+        assert "after 2 accumulated" in str(e)
+
+
+def test_streaming_variance_and_binned_reject_nonfinite():
+    dev = torch.device("cpu")
+    var = StreamingTimeVariance((2, 4, 4), dev)
+    bm = StreamingBinnedMean(3, (2, 4, 4), dev)
+    bv = StreamingBinnedVariance(3, (2, 4, 4), dev)
+    x = torch.randn(2, 2, 4, 4)
+    x[0, 0, 1, 1] = float("nan")
+    idx = torch.tensor([0, 1])
+    with pytest.raises(ValueError, match="StreamingTimeVariance"):
+        var.update(x)
+    with pytest.raises(ValueError, match="StreamingBinnedMean"):
+        bm.update(x, idx)
+    with pytest.raises(ValueError, match="StreamingBinnedVariance"):
+        bv.update(x, idx)
+
+
+def test_streaming_accumulators_accept_clean_data_unchanged():
+    """The guard must be invisible on healthy data (values and counts)."""
+    acc = StreamingTimeMean((2,), torch.device("cpu"))
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    acc.update(x)
+    torch.testing.assert_close(
+        acc.finalize(), torch.tensor([2.0, 3.0]), atol=1e-6, rtol=0
+    )

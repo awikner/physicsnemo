@@ -57,6 +57,31 @@ def _all_reduce_sum(t: torch.Tensor) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _assert_finite(x: torch.Tensor, who: str, n_seen: int) -> None:
+    """Refuse to fold a non-finite field into a running statistic.
+
+    A single NaN/Inf anywhere in one update silently poisons the whole
+    accumulated mean/variance — every downstream bias map, climatology bin
+    and gate metric turns NaN with no indication of WHERE the rollout blew
+    up. None of the eval validators guarded this (audited 2026-08-24), so
+    the failure would have surfaced only as an all-NaN results file after a
+    multi-hour eval. Raising here names the accumulator, how many samples it
+    had already absorbed, and which leading-dim channels are affected.
+    """
+    if torch.isfinite(x).all():
+        return
+    bad = ~torch.isfinite(x)
+    # channel = first dim after batch; reduce everything else
+    ch = bad.any(dim=tuple(i for i in range(bad.dim()) if i != 1))
+    ch_idx = torch.nonzero(ch).flatten().tolist()
+    raise ValueError(
+        f"{who}: non-finite values in update after {n_seen} accumulated "
+        f"sample(s) — {int(bad.sum())} element(s), channel indices "
+        f"{ch_idx[:16]}{'...' if len(ch_idx) > 16 else ''}. The rollout has "
+        f"gone non-finite; the running statistic would be silently poisoned."
+    )
+
+
 class StreamingTimeMean:
     r"""Running mean of a per-pixel field across time + batch.
 
@@ -91,6 +116,7 @@ class StreamingTimeMean:
             raise ValueError(
                 f"update expected (B, *{self.shape}) tensor, got {tuple(x.shape)}"
             )
+        _assert_finite(x, "StreamingTimeMean", self.n)
         self.sum += x.detach().to(self.dtype).sum(dim=0)
         self.n += int(x.shape[0])
 
@@ -152,6 +178,7 @@ class StreamingTimeVariance:
             raise ValueError(
                 f"update expected (B, *{self.shape}) tensor, got {tuple(x.shape)}"
             )
+        _assert_finite(x, "StreamingTimeVariance", self.n)
         x = x.detach().to(self.dtype)
         n_b = int(x.shape[0])
         if n_b == 0:
@@ -259,6 +286,7 @@ class StreamingBinnedMean:
             raise ValueError(
                 f"bin_idx out of range [0, {self.n_bins})"
             )
+        _assert_finite(x, "StreamingBinnedMean", int(self.counts.sum()))
         x = x.detach().to(self.dtype)
         # scatter_add_ with the right index broadcasting.
         # Use index_add_ along dim=0 of the sum buffer.
@@ -333,6 +361,7 @@ class StreamingBinnedVariance:
             )
         if (bin_idx < 0).any() or (bin_idx >= self.n_bins).any():
             raise ValueError(f"bin_idx out of range [0, {self.n_bins})")
+        _assert_finite(x, "StreamingBinnedVariance", int(self.counts.sum()))
         x = x.detach().to(self.dtype)
         bin_idx_cpu = bin_idx.to("cpu").to(torch.long)
         # We update per-bin separately so the Chan parallel formula's

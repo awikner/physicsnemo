@@ -45,6 +45,7 @@ frame).
 from __future__ import annotations
 
 import logging as _logging
+import math
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -77,6 +78,63 @@ def _inner_wrapper(wrapper):
 # ---------------------------------------------------------------------------
 # ClimatologyValidator / BiasValidator
 # ---------------------------------------------------------------------------
+
+
+def scan_rmse_trace(
+    rmse_acc: dict,
+    *,
+    jump_factor: float = 3.0,
+    window: int = 50,
+    max_jumps: int = 20,
+) -> dict:
+    """Instability scan over the per-step RMSE traces a rollout validator logs.
+
+    The suite stores ``rmse_step<N>_<group>`` floats for every rollout step but
+    nothing ever LOOKED at them (audited 2026-08-24): a mid-rollout blow-up or
+    NaN would flow silently into the climatology accumulators. This scans each
+    group's trace for (a) non-finite steps and (b) sudden jumps — a step
+    exceeding ``jump_factor`` x the trailing-``window`` median. Returns
+
+        {group: {"n_steps", "n_nonfinite", "first_nonfinite_step",
+                 "jumps": [(step, value, trailing_median), ...]}}
+
+    with ``jumps`` capped at ``max_jumps`` entries. Purely diagnostic — it
+    flags, the accumulator-level finite guard (climatology._assert_finite) is
+    what actually aborts.
+    """
+    import re as _re
+
+    series: dict[str, list[tuple[int, float]]] = {}
+    for key, val in rmse_acc.items():
+        m = _re.match(r"^rmse_step(\d+)_(.+)$", str(key))
+        if m:
+            series.setdefault(m.group(2), []).append((int(m.group(1)), float(val)))
+
+    out: dict[str, dict] = {}
+    for group, pairs in series.items():
+        pairs.sort()
+        vals = [v for _, v in pairs]
+        finite = [v for v in vals if math.isfinite(v)]
+        first_nf = next(
+            (s for (s, v) in pairs if not math.isfinite(v)), None
+        )
+        jumps: list[tuple[int, float, float]] = []
+        for i, (step, v) in enumerate(pairs):
+            if i < 2 or not math.isfinite(v):
+                continue
+            hist = [x for x in vals[max(0, i - window):i] if math.isfinite(x)]
+            if not hist:
+                continue
+            med = sorted(hist)[len(hist) // 2]
+            if med > 0 and v > jump_factor * med and len(jumps) < max_jumps:
+                jumps.append((step, v, med))
+        out[group] = {
+            "n_steps": len(pairs),
+            "n_nonfinite": len(vals) - len(finite),
+            "first_nonfinite_step": first_nf,
+            "jumps": jumps,
+        }
+    return out
 
 
 class ClimatologyValidator(DiffusionRolloutValidator):
@@ -172,9 +230,26 @@ class ClimatologyValidator(DiffusionRolloutValidator):
         return out
 
     def run(self, model, *, epoch: int = 0) -> dict:
-        """Returns ``{"rmse_acc": {...float...}, "climatology": {...tensor...}}``."""
+        """Returns ``{"rmse_acc", "climatology", "stability"}``."""
         rmse_acc = super().run(model, epoch=epoch)
-        return {"rmse_acc": rmse_acc, "climatology": self._finalize_climatology()}
+        stability = scan_rmse_trace(rmse_acc)
+        for group, s in stability.items():
+            if s["n_nonfinite"]:
+                logger.warning(
+                    "stability: %s trace has %d NON-FINITE step(s), first at "
+                    "step %s — the rollout overflowed",
+                    group, s["n_nonfinite"], s["first_nonfinite_step"],
+                )
+            for step, val, med in s["jumps"]:
+                logger.warning(
+                    "stability: %s RMSE jump at step %d — %.4g vs trailing "
+                    "median %.4g", group, step, val, med,
+                )
+        return {
+            "rmse_acc": rmse_acc,
+            "climatology": self._finalize_climatology(),
+            "stability": stability,
+        }
 
 
 class BiasValidator(ClimatologyValidator):
