@@ -62,13 +62,10 @@ from climatology import (  # noqa: E402
 from validate_diffusion import DiffusionRolloutValidator  # noqa: E402
 
 
-def _ensemble_mean(pred_ensemble: torch.Tensor, ensemble_size: int) -> torch.Tensor:
-    """``(B*E, ...) -> (B, ...)`` ensemble-mean reduction (identity if E=1)."""
-    if ensemble_size <= 1:
-        return pred_ensemble
-    n_ic = pred_ensemble.shape[0] // ensemble_size
-    rest = pred_ensemble.shape[1:]
-    return pred_ensemble.view(n_ic, ensemble_size, *rest).mean(dim=1)
+# Module logger: the validators log stability warnings from inside run(),
+# which executes far from main()'s local PythonLogger — this used to raise
+# NameError exactly when an instability warning fired (found 2026-08-24).
+logger = _logging.getLogger(__name__)
 
 
 def _inner_wrapper(wrapper):
@@ -206,7 +203,7 @@ class ClimatologyValidator(DiffusionRolloutValidator):
         super()._score_step(m_idx, pred_ensemble, truth, kind)
         if kind not in self._clim_pred:
             return
-        pred_mean = _ensemble_mean(pred_ensemble, self.ensemble_size)
+        pred_mean = self._cross_rank_ensemble_mean(pred_ensemble)
         pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
         bin_value = (m_idx // self.steps_per_bin) % self.n_bins
         bin_idx = torch.full(
@@ -233,7 +230,9 @@ class ClimatologyValidator(DiffusionRolloutValidator):
         """Returns ``{"rmse_acc", "climatology", "stability"}``."""
         rmse_acc = super().run(model, epoch=epoch)
         stability = scan_rmse_trace(rmse_acc)
-        for group, s in stability.items():
+        # Inputs are identical on every rank (post-all-reduce), so the scan
+        # result is too — warn once, from rank 0.
+        for group, s in (stability.items() if self._rank == 0 else ()):
             if s["n_nonfinite"]:
                 logger.warning(
                     "stability: %s trace has %d NON-FINITE step(s), first at "
@@ -415,7 +414,7 @@ class QBOValidator(DiffusionRolloutValidator):
         super()._score_step(m_idx, pred_ensemble, truth, kind)
         if kind != "upper_air":
             return
-        pred_mean = _ensemble_mean(pred_ensemble, self.ensemble_size)
+        pred_mean = self._cross_rank_ensemble_mean(pred_ensemble)
         pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
         pred_band = self._band_mean(pred_phys)
         truth_band = self._band_mean(truth_phys)
@@ -498,7 +497,7 @@ class GlobalMeanTimeseriesValidator(DiffusionRolloutValidator):
 
     def _score_step(self, m_idx, pred_ensemble, truth, kind):
         super()._score_step(m_idx, pred_ensemble, truth, kind)
-        pred_mean = _ensemble_mean(pred_ensemble, self.ensemble_size)
+        pred_mean = self._cross_rank_ensemble_mean(pred_ensemble)
         pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
         for name, (grp, idx) in self._flux_index.items():
             if grp != kind:
@@ -621,6 +620,19 @@ def resolve_steps_per_bin(block, per_month: int, *, name: str, log=None) -> int:
     return explicit
 
 
+def _perturber_scales(node) -> dict:
+    """Config-or-dict -> plain dict. An empty DictConfig is FALSY, so the
+    obvious ``to_container(node or {})`` hands to_container a plain dict and
+    raises "Input cfg is not an OmegaConf config object"."""
+    from omegaconf import OmegaConf as _OC
+
+    if node is None:
+        return {}
+    if _OC.is_config(node):
+        return dict(_OC.to_container(node, resolve=True) or {})
+    return dict(node)
+
+
 def _resolve_eval_sampler_num_steps(raw):
     """Mirror ``train_diffusion._build_validator``'s num_steps coercion."""
     if raw is None:
@@ -650,11 +662,16 @@ def main(cfg) -> None:
 
     from train import _resolve_path, build_model  # noqa: E402
     from train_loop import model_step_rows  # noqa: E402
-    from train_diffusion import _build_dataset  # noqa: E402
+    from train_diffusion import _build_dataset, _make_perturber  # noqa: E402
+    from omegaconf import OmegaConf
 
     DistributedManager.initialize()
     dist = DistributedManager()
     logger = PythonLogger("amip_eval_suite")
+    # Per-rank seed (train_diffusion pattern): decorrelates the schedulers'
+    # randn_like member noise across ranks under member-split ensembles, and
+    # makes previously-unseeded single-GPU evals reproducible.
+    torch.manual_seed(int(cfg.seed) + dist.rank)
 
     eval_cfg = cfg.get("eval_suite", None)
     if eval_cfg is None:
@@ -735,7 +752,31 @@ def main(cfg) -> None:
         normalizer=normalizer,
         sampler_num_steps=sampler_num_steps,
         seed=int(cfg.seed),
+        # TOTAL ensemble size, shared by every validator below. Under a
+        # multi-rank launch the members are split EVENLY across ranks
+        # (validator raises unless ensemble_size % world_size == 0) and the
+        # per-step ensemble statistics are completed by cross-rank
+        # reductions — see DiffusionRolloutValidator._cross_rank_ensemble_mean.
+        ensemble_size=int(eval_cfg.get("ensemble_size", 1)),
+        perturber=(
+            _make_perturber(
+                str(eval_cfg.perturber),
+                _perturber_scales(eval_cfg.get("perturber_scales", None)),
+            )
+            if eval_cfg.get("perturber", None) is not None
+            else None
+        ),
+        split_ensemble_across_ranks=(
+            dist.world_size > 1 and int(eval_cfg.get("ensemble_size", 1)) > 1
+        ),
     )
+    if dist.world_size > 1 and int(eval_cfg.get("ensemble_size", 1)) == 1:
+        if dist.rank == 0:
+            logger.warning(
+                f"world_size={dist.world_size} but eval_suite.ensemble_size=1: "
+                f"ranks beyond the IC count idle. Set ensemble_size to a "
+                f"multiple of world_size to split members across GPUs."
+            )
 
     # Bin widths are DERIVED from the model step (2026-08-14). A bin width is a
     # physical duration, so the config states months and the step count follows
@@ -755,10 +796,37 @@ def main(cfg) -> None:
     # (Midway job 54495699, 2026-08-23). Partial files carry a marker so a
     # reader can tell "suite still running / died" from "complete".
     output_path = _resolve_path(str(eval_cfg.output_path))
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    if dist.rank == 0:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    def _to_cpu(obj):
+        """Recursively move tensors to CPU for saving.
+
+        The result tensors live on ``dist.device``; saved as-is a rank-N file
+        would pin ``cuda:N`` at load time (and a CUDA-less reader would need
+        map_location gymnastics).
+        """
+        if torch.is_tensor(obj):
+            return obj.detach().cpu()
+        if isinstance(obj, dict):
+            return {k: _to_cpu(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            t = [_to_cpu(v) for v in obj]
+            return t if isinstance(obj, list) else tuple(t)
+        return obj
 
     def _checkpoint_results():
-        torch.save({**results, "_partial": True}, output_path)
+        # Rank 0 writes; every other rank must still have RUN the validator
+        # (the streaming accumulators all-reduce in finalize — a rank that
+        # skips run() hangs the collectives). Without the gate, multi-rank
+        # launches raced concurrent torch.saves on one path (corrupt zips).
+        #
+        # Known caveat: climatology._assert_finite raising on ONE rank
+        # mid-run desyncs the remaining collectives — the surviving ranks
+        # block in all_reduce until the backend times out. The loud
+        # single-rank error is still preferable to silently NaN results.
+        if dist.rank == 0:
+            torch.save({**_to_cpu(results), "_partial": True}, output_path)
 
 
     clim_cfg = eval_cfg.get("climatology", None)
@@ -820,36 +888,30 @@ def main(cfg) -> None:
 
     ens_cfg = eval_cfg.get("ensemble_envelope", None)
     if ens_cfg is not None and bool(ens_cfg.get("enabled", False)):
-        ensemble_size = int(ens_cfg.get("ensemble_size", 4))
-        perturber_kind = str(ens_cfg.get("perturber", "replicate_only")).lower()
-        if perturber_kind in ("replicate_only", "replicateonly", "replicate"):
-            perturber = ReplicateOnly()
-        elif perturber_kind in ("gaussian_ic", "gaussianic", "gaussian"):
-            from omegaconf import OmegaConf as _OmegaConf
-
-            perturber = GaussianIC(
-                scales=dict(
-                    _OmegaConf.to_container(
-                        ens_cfg.get("perturber_scales", {}), resolve=True
-                    )
-                    or {}
-                )
-            )
-        else:
-            perturber = Deterministic()
+        # Block-level ensemble keys OVERRIDE the top-level eval_suite ones
+        # when present (backward compat: the shipped yaml sets its own
+        # ensemble_size/perturber here). base_kwargs is mutated rather than
+        # passing explicit duplicates — those raised
+        # "TypeError: multiple values" once base_kwargs carried the keys.
         ens_kwargs = dict(base_kwargs)
-        v = EnsembleEnvelopeValidator(
-            raw_ds,
-            ensemble_size=ensemble_size,
-            perturber=perturber,
-            **ens_kwargs,
+        if ens_cfg.get("ensemble_size", None) is not None:
+            ens_kwargs["ensemble_size"] = int(ens_cfg.ensemble_size)
+        if ens_cfg.get("perturber", None) is not None:
+            ens_kwargs["perturber"] = _make_perturber(
+                str(ens_cfg.perturber),
+                _perturber_scales(ens_cfg.get("perturber_scales", None)),
+            )
+        ens_kwargs["split_ensemble_across_ranks"] = (
+            dist.world_size > 1 and int(ens_kwargs["ensemble_size"]) > 1
         )
+        v = EnsembleEnvelopeValidator(raw_ds, **ens_kwargs)
         results["ensemble_envelope"] = v.run(wrapper, epoch=0)
         _checkpoint_results()
         logger.info("ensemble_envelope validator done")
 
-    torch.save(results, output_path)          # final write: no _partial marker
-    logger.info(f"wrote eval suite results to {output_path}")
+    if dist.rank == 0:
+        torch.save(_to_cpu(results), output_path)   # final: no _partial marker
+        logger.info(f"wrote eval suite results to {output_path}")
 
 
 if __name__ == "__main__":

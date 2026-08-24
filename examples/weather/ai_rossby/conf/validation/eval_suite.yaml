@@ -97,3 +97,15 @@ ensemble_envelope:
   ensemble_size: 4
   perturber: replicate_only   # replicate_only | gaussian_ic
   perturber_scales: {}
+
+# ── ensemble over GPUs ────────────────────────────────────────────────────
+# TOTAL ensemble size shared by every validator above. Under torchrun with
+# N > 1 ranks the members are split EVENLY across the ranks (ensemble_size %
+# world_size must be 0 — the suite raises otherwise); each rank rolls the
+# SAME initial conditions with its slice of the members, and the per-step
+# ensemble statistics are completed by cross-rank reductions. The
+# ensemble_envelope block's own ensemble_size/perturber keys override these
+# for that validator only.
+ensemble_size: 1
+perturber: null          # null = validator default | replicate_only | gaussian_ic
+perturber_scales: {}

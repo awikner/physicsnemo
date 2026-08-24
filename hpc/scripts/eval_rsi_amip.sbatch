@@ -68,6 +68,12 @@ source "${VENV}/bin/activate"
 export AI_ROSSBY_DATA
 
 MODE="${RSI_EVAL:-climatology}"
+# GPUs for the eval. >1 splits eval_suite.ensemble_size EVENLY across ranks
+# (the suite raises unless it divides) — pair RSI_NGPUS=4 with
+# `sbatch --gpus-per-node=4 ...` (the CLI overrides the directive above).
+# torch.distributed.run with 1 proc is also what fixes the bare-python
+# MASTER_ADDR=None trap this launcher used to hit under sbatch.
+NGPUS="${RSI_NGPUS:-1}"
 RUNG="${RSI_RUNG:-a2}"
 LOSS="${RSI_LOSS:-rsi}"
 OUTDIR="./outputs/rsi_${RUNG}_eval"
@@ -89,7 +95,8 @@ case "${MODE}" in
     # Gate 1. `sampler=from_loss` (the default) is deliberate: it reuses the
     # TRAINING scheduler, so the interpolant profiles cannot drift from the
     # ones the heads were regressed against.
-    python examples/weather/ai_rossby/eval_diffusion.py \
+    python -m torch.distributed.run --standalone --nproc-per-node="${NGPUS}" \
+        examples/weather/ai_rossby/eval_diffusion.py \
         "${COMMON[@]}" \
         validation=eval_suite \
         "+eval_suite.checkpoint_dir=${RSI_CKPT}" \
@@ -112,7 +119,8 @@ case "${MODE}" in
     YEARS="${RSI_ROLLOUT_YEARS:-40}"
     HORIZON=$(( YEARS * 365 ))
     NBINS=$(( YEARS * 12 ))
-    python examples/weather/ai_rossby/eval_diffusion.py \
+    python -m torch.distributed.run --standalone --nproc-per-node="${NGPUS}" \
+        examples/weather/ai_rossby/eval_diffusion.py \
         "${COMMON[@]}" \
         validation=eval_suite \
         "++eval_suite.horizon=${HORIZON}" \

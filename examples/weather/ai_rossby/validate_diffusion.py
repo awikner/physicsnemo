@@ -120,6 +120,24 @@ class StreamingLatWeightedSpread:
             .view(n_ic, ensemble_size, *rest)
             .var(dim=1, unbiased=False)
         )  # → (B, C, [L,] H, W)
+        self.update_from_var(step_index, var, lat_weights)
+
+    @torch.no_grad()
+    def update_from_var(
+        self,
+        step_index: int,
+        var: torch.Tensor,
+        lat_weights: torch.Tensor,
+    ) -> None:
+        r"""Accumulate an already-computed per-pixel ensemble variance.
+
+        The member-split (multi-GPU) path computes the variance over the
+        member UNION across ranks (validator's ``_cross_rank_ensemble_var``)
+        — a rank-local ``var`` over a subset would be biased low and average
+        wrongly — and hands the finished ``(B, C, [L,] H, W)`` field here.
+        The single-process :meth:`update` delegates to this after its local
+        ``var``, so the non-split path is numerically unchanged.
+        """
         weight_shape = [1] * var.ndim
         weight_shape[-2] = lat_weights.shape[0]
         w = lat_weights.view(weight_shape)
@@ -247,6 +265,7 @@ class DiffusionRolloutValidator:
         normalizer=None,
         sampler_num_steps: "Optional[int | Sequence[int]]" = None,
         seed: int = 0,
+        split_ensemble_across_ranks: bool = False,
     ):
         if ensemble_size < 1:
             raise ValueError("ensemble_size must be ≥ 1")
@@ -259,10 +278,46 @@ class DiffusionRolloutValidator:
         self.scheduler = inference_scheduler
         self.log_steps = log_steps
         self.device = device
+        # ``ensemble_size`` is always the TOTAL ensemble — the config-facing
+        # number that gates spread metrics, the envelope's E>1 check and the
+        # default perturber. Under ``split_ensemble_across_ranks`` the members
+        # are divided EVENLY across the distributed ranks: every rank rolls
+        # the SAME initial conditions with ``local_ensemble_size`` members,
+        # and the per-step ensemble statistics are completed by cross-rank
+        # reductions (see _cross_rank_ensemble_mean/_var). All ranks must run
+        # in lockstep — same ICs, same horizon — or those collectives desync.
         self.ensemble_size = ensemble_size
+        if dist.is_available() and dist.is_initialized():
+            self._rank = dist.get_rank()
+            self._world_size = dist.get_world_size()
+        else:
+            self._rank, self._world_size = 0, 1
+        self.member_split = bool(split_ensemble_across_ranks) and self._world_size > 1
+        if self.member_split:
+            if ensemble_size % self._world_size != 0:
+                raise ValueError(
+                    f"split_ensemble_across_ranks requires the total "
+                    f"ensemble_size ({ensemble_size}) to divide evenly over "
+                    f"the {self._world_size} ranks — members must be spread "
+                    f"evenly or the cross-rank mean is wrong."
+                )
+            self.local_ensemble_size = ensemble_size // self._world_size
+        else:
+            self.local_ensemble_size = ensemble_size
         self.perturber = perturber or (
             Deterministic() if ensemble_size == 1 else ReplicateOnly()
         )
+        # An explicit Deterministic perturber with a real ensemble would
+        # normally raise at call time — but under member-split with
+        # E == world_size each rank replicates by local_E == 1, so it would
+        # NOT raise and every "member" would be identical: a silent
+        # zero-spread ensemble. Refuse at construction instead.
+        if ensemble_size > 1 and isinstance(self.perturber, Deterministic):
+            raise ValueError(
+                f"ensemble_size={ensemble_size} with a Deterministic "
+                f"perturber would make every member identical; use "
+                f"replicate_only (scheduler noise only) or gaussian_ic."
+            )
         self.has_diagnostic = has_diagnostic
         self.batch_size = max(1, int(batch_size))
         self.max_initial_conditions = max(1, int(max_initial_conditions))
@@ -421,6 +476,12 @@ class DiffusionRolloutValidator:
                 f"{max(0, max_horizon)}."
             )
         candidates = candidates[: self.max_initial_conditions]
+        if self.member_split:
+            # Member-parallel mode: every rank rolls the SAME ICs (with its
+            # own slice of the ensemble); the per-step cross-rank reductions
+            # require lockstep, so the rank-modulo IC split must NOT apply —
+            # it would average members of different ICs into one "mean".
+            return candidates
         return [c for i, c in enumerate(candidates) if i % world_size == rank]
 
     # ------------------------------------------------------------------ #
@@ -493,11 +554,11 @@ class DiffusionRolloutValidator:
         ic_indices = self._select_ic_indices(rank, world_size)
         try:
             gen = torch.Generator(device=self.device).manual_seed(
-                self.seed + epoch * 100003
+                self._generator_seed(epoch)
             )
         except (RuntimeError, TypeError):
             gen = torch.Generator(device="cpu").manual_seed(
-                self.seed + epoch * 100003
+                self._generator_seed(epoch)
             )
 
         log_step_to_idx = {s: i for i, s in enumerate(self.log_steps)}
@@ -517,6 +578,68 @@ class DiffusionRolloutValidator:
     # Single-step diffusion rollout (DriftScheduler / DynamicInterpolant).
     # ------------------------------------------------------------------ #
 
+    def _generator_seed(self, epoch: int) -> int:
+        """Seed for the run()'s Generator (GaussianIC perturbations).
+
+        Rank-offset ONLY in member-split mode: there the ranks hold different
+        members of the same ICs, so their perturbations must differ. In
+        IC-split mode ranks hold different ICs and keep the shared seed, as
+        they always have.
+        """
+        return (
+            self.seed
+            + epoch * 100003
+            + (self._rank * 7919 if self.member_split else 0)
+        )
+
+    def _cross_rank_ensemble_mean(self, pred_ensemble: torch.Tensor) -> torch.Tensor:
+        """``(n_ic * local_E, ...)`` -> ``(n_ic, ...)`` mean over ALL members.
+
+        Local mean over ``local_ensemble_size``, then — member-split only —
+        ``all_reduce(SUM)`` divided by ``world_size``, which is exact because
+        every rank holds the same number of members (the divisibility guard).
+        SUM+divide rather than ``ReduceOp.AVG`` because gloo has no AVG.
+        Collective-free (and byte-identical to the old inline reshape-mean)
+        when member_split is off.
+        """
+        if self.local_ensemble_size > 1:
+            rest = pred_ensemble.shape[1:]
+            n_ic = pred_ensemble.shape[0] // self.local_ensemble_size
+            pred_mean = pred_ensemble.view(
+                n_ic, self.local_ensemble_size, *rest
+            ).mean(dim=1)
+        elif self.member_split:
+            # all_reduce is in-place and the E==1 "mean" is the input itself,
+            # which is a live VIEW of the marching rollout state — reducing it
+            # in place would corrupt the trajectory on every rank.
+            pred_mean = pred_ensemble.clone()
+        else:
+            return pred_ensemble
+        if self.member_split:
+            dist.all_reduce(pred_mean, op=dist.ReduceOp.SUM)
+            pred_mean /= self._world_size
+        return pred_mean
+
+    def _cross_rank_ensemble_var(
+        self, pred_ensemble: torch.Tensor, global_mean: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-pixel ensemble variance over the member UNION across ranks.
+
+        Squared deviations from the (already cross-rank) ensemble mean,
+        summed over the local members, all-reduced, divided by the TOTAL
+        ensemble size — exactly ``var(unbiased=False)`` over all members.
+        """
+        rest = pred_ensemble.shape[1:]
+        n_ic = pred_ensemble.shape[0] // self.local_ensemble_size
+        dev = (
+            pred_ensemble.float().view(n_ic, self.local_ensemble_size, *rest)
+            - global_mean.float().unsqueeze(1)
+        )
+        sq = dev.pow(2).sum(dim=1)
+        if self.member_split:
+            dist.all_reduce(sq, op=dist.ReduceOp.SUM)
+        return sq / float(self.ensemble_size)
+
     def _score_step(
         self,
         m_idx: int,
@@ -525,14 +648,7 @@ class DiffusionRolloutValidator:
         kind: str,
     ) -> None:
         """Update RMSE / ACC / spread for one (log_step, channel group)."""
-        n_ic = pred_ensemble.shape[0] // max(self.ensemble_size, 1)
-        if self.ensemble_size > 1:
-            rest = pred_ensemble.shape[1:]
-            pred_mean = (
-                pred_ensemble.view(n_ic, self.ensemble_size, *rest).mean(dim=1)
-            )
-        else:
-            pred_mean = pred_ensemble
+        pred_mean = self._cross_rank_ensemble_mean(pred_ensemble)
 
         # RMSE in physical units.
         pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
@@ -544,9 +660,19 @@ class DiffusionRolloutValidator:
             acc.update(m_idx, pred_mean, truth, self.register_lat)
         spread = getattr(self, f"spread_{kind}", None)
         if spread is not None:
-            spread.update(
-                m_idx, pred_ensemble, self.register_lat, self.ensemble_size
-            )
+            if self.member_split:
+                # Spread over the member UNION (normalized units, like the
+                # local path): local var over a rank's subset would be biased
+                # low and average wrongly across ranks.
+                spread.update_from_var(
+                    m_idx,
+                    self._cross_rank_ensemble_var(pred_ensemble, pred_mean),
+                    self.register_lat,
+                )
+            else:
+                spread.update(
+                    m_idx, pred_ensemble, self.register_lat, self.ensemble_size
+                )
 
     def _rollout_single_step(
         self,
@@ -557,7 +683,7 @@ class DiffusionRolloutValidator:
     ) -> None:
         # Initial dataset sample at each IC, on device + normalized.
         init = self._to_device(self._stack(batch_ics))
-        state = self.perturber(init, self.ensemble_size, generator=gen)
+        state = self.perturber(init, self.local_ensemble_size, generator=gen)
         n_ic = len(batch_ics)
         const_boundary = state.get("constant_boundary")
 
@@ -609,12 +735,12 @@ class DiffusionRolloutValidator:
                 next_step = self._to_device(self._stack(next_times))
                 next_var_boundary = next_step["varying_boundary"]
                 next_calendar = next_step["calendar"]
-                if self.ensemble_size > 1:
+                if self.local_ensemble_size > 1:
                     next_var_boundary = next_var_boundary.repeat_interleave(
-                        self.ensemble_size, dim=0
+                        self.local_ensemble_size, dim=0
                     )
                     next_calendar = next_calendar.repeat_interleave(
-                        self.ensemble_size, dim=0
+                        self.local_ensemble_size, dim=0
                     )
                 unpacked = wrapper.unpack_state(x_next)
                 state = {
@@ -687,7 +813,7 @@ class DiffusionRolloutValidator:
         # Initial oracle window ending at t (so frames span t - W + 1 .. t).
         init_window = self._to_device(self._stack_window(batch_ics, w_offset=0))
         init_window_ens = self.perturber(
-            init_window, self.ensemble_size, generator=gen
+            init_window, self.local_ensemble_size, generator=gen
         )
         init_y = wrapper.pack_window_state(init_window_ens)  # (B*E, W, C, H, W)
 
@@ -732,10 +858,12 @@ class DiffusionRolloutValidator:
             }
         )
         c_scalar_traj = _stack_traj("calendar")
-        if self.ensemble_size > 1:
-            c_grid_traj = c_grid_traj.repeat_interleave(self.ensemble_size, dim=0)
+        if self.local_ensemble_size > 1:
+            c_grid_traj = c_grid_traj.repeat_interleave(
+                self.local_ensemble_size, dim=0
+            )
             c_scalar_traj = c_scalar_traj.repeat_interleave(
-                self.ensemble_size, dim=0
+                self.local_ensemble_size, dim=0
             )
 
         traj = self.scheduler.sample_rollout(

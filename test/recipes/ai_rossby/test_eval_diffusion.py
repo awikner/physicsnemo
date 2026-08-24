@@ -394,3 +394,17 @@ def test_scan_rmse_trace_handles_multiple_groups_and_ignores_other_keys():
     out = scan_rmse_trace(acc)
     assert set(out) == {"surface", "upper_air"}
     assert out["surface"]["n_steps"] == 30
+
+
+def test_perturber_scales_accepts_empty_and_omegaconf_nodes():
+    """An empty DictConfig is FALSY: `to_container(node or {})` passed a plain
+    dict to to_container and crashed every eval that set a perturber with the
+    default empty scales (Midway job 54702336)."""
+    from omegaconf import OmegaConf
+
+    from eval_diffusion import _perturber_scales
+
+    assert _perturber_scales(None) == {}
+    assert _perturber_scales(OmegaConf.create({})) == {}
+    assert _perturber_scales(OmegaConf.create({"t2m": 0.1})) == {"t2m": 0.1}
+    assert _perturber_scales({"t2m": 0.2}) == {"t2m": 0.2}
