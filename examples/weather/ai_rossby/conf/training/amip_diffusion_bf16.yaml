@@ -16,7 +16,23 @@
 
 use_static_capture: False
 amp: bf16                      # bf16-native (Phase 8f, F3) — fp32 default lives in amip_diffusion.yaml
-grad_clip_norm: 0.0
+# Measured, not copied. The diffusion loss is a raw SUM over ~3.7M terms
+# (154 ch x 45 x 90 x 6 frames), so healthy gradient norms here are ~1e5 — five
+# orders above the 1.0 that train.py's SFNO runs use with their mean-reduced
+# loss. Setting 1.0 here does not "clip outliers", it rescales every step to
+# unit norm and silently replaces the optimizer with normalized-gradient
+# descent (observed: gnorm 8.3e4-3.4e5 clipped to 1.0 on 100% of steps).
+#
+# Measured over 271 healthy batches of the RSI A2 run: p50 1.22e5, p90 1.91e5,
+# p99 3.02e5, max 3.41e5 — a tight distribution, max only 2.8x the median. 1e6
+# is ~8x the median and ~3x the observed max, so it never binds in normal
+# operation, while still arresting an exponential runaway within a few e-folds
+# (the 2026-08-21 divergence e-folded every ~93 batches, so it would be caught
+# in ~200 batches instead of destroying the run).
+#
+# Watch `gnorm=` in the training log: if it sits at the ceiling, the clip has
+# become a step-size controller and the LR is the thing to change instead.
+grad_clip_norm: 1.0e6
 max_epochs: 50
 
 # See amip_diffusion.yaml for what this does (Phase 12f).
@@ -43,3 +59,21 @@ stages:
     scheduler:
       type: CosineAnnealingLR
       cosine_eta_min: 1.0e-7
+# Gnorm-triggered lr ratchet + rewind (GnormLrGovernor / RewindBuffer in
+# train_loop.py). OFF by default. Built for the RSI A2 floor instability;
+# v2 as shipped can death-spiral once its rewind snapshots are consumed
+# during a recurring excursion (measured, Midway job 54495702) — see
+# docs/dev/context/rsi-h1-precond-instability.md, including the v3 sketch,
+# before arming it on a long run. Requires grad_clip_norm > 0.
+lr_drop:
+  enabled: false
+  factor: 4.0          # trigger: gnorm > factor * frozen healthy EMA
+  drop: 0.5
+  cooldown: 100        # batches between drops
+  warmup: 100
+  ema_beta: 0.98
+  freeze_factor: 2.0   # EMA updates only while gnorm < this * EMA
+  min_lr: 1.0e-7
+  rewind: true
+  rewind_every: 500
+  rewind_keep: 2

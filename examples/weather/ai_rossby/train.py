@@ -456,6 +456,13 @@ def _flatten_optimizer_cfg(opt_cfg: DictConfig) -> DictConfig:
         "fused": opt_cfg.get("fused", None),
         "selective_weight_decay": bool(opt_cfg.get("selective_weight_decay", False)),
     }
+    # Muon's hidden-weight lr is `lr * muon_lr_multiplier`; the wrapper default
+    # (10x, upstream amip's constant) applies when unset. Plumbed so the trunk
+    # step is tunable independently of the AdamW groups — the RSI floor
+    # instability (docs/dev/context/rsi-h1-precond-instability.md) lives in
+    # the Muon-governed trunk.
+    if opt_cfg.get("muon_lr_multiplier", None) is not None:
+        flat["muon_lr_multiplier"] = float(opt_cfg.muon_lr_multiplier)
     if opt_cfg.get("betas", None) is not None:
         flat["betas"] = list(opt_cfg.get("betas"))
     return OmegaConf.create(flat)

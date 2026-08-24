@@ -63,6 +63,7 @@ with warnings.catch_warnings():
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dataset_setup import (  # noqa: E402
     build_forcing_pipeline,
+    model_varying_pre_rescaler,
     resolve_varying_subset,
 )
 from ema import ModelEMA  # noqa: E402
@@ -74,6 +75,8 @@ from train import (  # noqa: E402
     build_model,
 )
 from train_loop import (  # noqa: E402
+    GnormLrGovernor,
+    RewindBuffer,
     adopt_ocean_contract,
     apply_math_precision,
     assert_checkpoint_dir_contract,
@@ -150,9 +153,11 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
     subset = resolve_varying_subset(cfg, store_varying)
     normalizer_kwargs = {}
     if subset is not None:
-        normalizer_kwargs["varying_boundary_variables"] = [
-            str(v) for v in cfg.model.varying_boundary_variables
-        ]
+        # PRE-rescaler, like the slice above: the normalizer sits between the
+        # subset and the assembler, so it never sees the derived SST-anomaly
+        # channel — and has no stored stats for it either. SSTRescaler then
+        # reads the SST mean/std off this same list.
+        normalizer_kwargs["varying_boundary_variables"] = model_varying_pre_rescaler(cfg)
     normalizer = ClimateNormalizer.from_dataset(
         ds,
         mean_path=_resolve_path(data.mean_path),
@@ -538,6 +543,7 @@ def _train_step(
     device,
     window_mode: bool,
     anchor_frames: int = 0,
+    grad_clip_norm: float = 0.0,
 ) -> dict[str, float]:
     optimizer.zero_grad(set_to_none=True)
     sample = {
@@ -583,15 +589,49 @@ def _train_step(
             x, y, c_grid, c_scalar = _pack_single_step(model, sample)
             loss = scheduler_loss.compute_loss(model, x, c_grid, c_scalar, y)
 
+    # A non-finite loss must stop the run, not be stepped on. Without this the
+    # 2026-08-21 A2 run ground out 39,314 NaN batches over 8.5 h on a dedicated
+    # 4xH100 node before anyone noticed — the optimizer happily propagates NaN
+    # into every weight, so nothing after the first one is recoverable.
+    if not torch.isfinite(loss):
+        raise RuntimeError(
+            f"non-finite training loss ({loss.detach().float().item()}). "
+            f"Refusing to step: one NaN update poisons every parameter and the "
+            f"run cannot recover. Resume from the last finite checkpoint, and "
+            f"see training.grad_clip_norm."
+        )
+
     if grad_scaler is not None:
         grad_scaler.scale(loss).backward()
+    else:
+        loss.backward()
+
+    # Gradient clipping. This path had NONE — train.py clips, train_diffusion
+    # did not, and `amip_diffusion*.yaml` shipped a `grad_clip_norm` key that
+    # nothing in this recipe read, so it looked configured while being a no-op.
+    # Measured consequence (2026-08-21): RSI trained cleanly for 11,700 batches
+    # (loss 1.8e5 -> 1.3e3) and then ran away exponentially, e-folding every ~93
+    # batches, with nothing to arrest it.
+    grad_norm = None
+    if grad_clip_norm and grad_clip_norm > 0:
+        if grad_scaler is not None:
+            grad_scaler.unscale_(optimizer)      # clip real grads, not scaled ones
+        inner = model.module if hasattr(model, "module") else model
+        grad_norm = float(
+            torch.nn.utils.clip_grad_norm_(inner.parameters(), grad_clip_norm)
+        )
+
+    if grad_scaler is not None:
         grad_scaler.step(optimizer)
         grad_scaler.update()
     else:
-        loss.backward()
         optimizer.step()
 
     out = {"loss": float(loss.detach().cpu())}
+    if grad_norm is not None:
+        # The PRE-clip norm, so a run that is quietly riding the clip ceiling is
+        # visible rather than looking healthy.
+        out["grad_norm"] = grad_norm
     if getattr(scheduler_loss, "nocean", 0) and ocean_loss is not None:
         # Logged separately because it is ~1-2% of a channel-summed loss and
         # collapses fast (the target is recoverable from a forcing in the same
@@ -786,8 +826,23 @@ def main(cfg: DictConfig) -> None:
     window_size = 0
     anchor_frames = 0
     validator: DiffusionRolloutValidator | None = None
+    prior_stage_epochs = 0
     for stage_idx, stage in enumerate(stages):
         stage_epochs = int(stage.num_epochs)
+        # Resume bookkeeping. Two pre-existing resume flaws, both harmless
+        # under the flat 50-epoch cosine and both live once the schedule
+        # actually decays (CosineToFloor): (a) the epoch loop always ran the
+        # FULL stage_epochs after a resume, overshooting the total; (b) the
+        # per-stage LR scheduler restarted from step 0, snapping a decayed lr
+        # back to its peak mid-training — on the RSI objective that is an
+        # excursion invitation. ``done_in_stage`` is 0 on a fresh run, so
+        # fresh behavior is bit-identical.
+        done_in_stage = min(
+            stage_epochs, max(0, global_epoch - 1 - prior_stage_epochs)
+        )
+        prior_stage_epochs += stage_epochs
+        if done_in_stage >= stage_epochs:
+            continue
         stage_window_size = _stage_window_size(cfg, stage)
 
         # (Re)build the diffusion scheduler with this stage's overrides FIRST:
@@ -867,6 +922,56 @@ def main(cfg: DictConfig) -> None:
         lr_scheduler = make_scheduler(
             optimizer, sched_cfg, total_steps=steps_per_epoch * stage_epochs
         )
+        if done_in_stage > 0:
+            # Fast-forward to the resume point so the schedule continues
+            # where it left off instead of restarting at peak lr.
+            for _ in range(done_in_stage * steps_per_epoch):
+                lr_scheduler.step()
+            logger.info(
+                f"resume: lr scheduler fast-forwarded "
+                f"{done_in_stage * steps_per_epoch} steps "
+                f"(lr now {optimizer.param_groups[0]['lr']:.3e})"
+            )
+        # Optional gnorm-triggered lr ratchet (off unless training.lr_drop.
+        # enabled) — the RSI A2 floor destabilizes at ANY constant lr, so the
+        # governor steps lr down permanently whenever the gradient norm leaves
+        # its healthy band. Needs grad_clip_norm > 0 (that is what measures
+        # the pre-clip gnorm it feeds on). See GnormLrGovernor.
+        lr_governor = None
+        lr_rewinder = None
+        _drop_cfg = cfg_train.get("lr_drop", None)
+        if _drop_cfg is not None and bool(_drop_cfg.get("enabled", False)):
+            if not float(cfg_train.get("grad_clip_norm", 0.0) or 0.0) > 0:
+                raise ValueError(
+                    "training.lr_drop.enabled needs training.grad_clip_norm "
+                    "> 0: the governor feeds on the pre-clip gradient norm "
+                    "that clipping measures."
+                )
+            lr_governor = GnormLrGovernor(
+                factor=float(_drop_cfg.get("factor", 4.0)),
+                drop=float(_drop_cfg.get("drop", 0.5)),
+                cooldown=int(_drop_cfg.get("cooldown", 100)),
+                warmup=int(_drop_cfg.get("warmup", 100)),
+                ema_beta=float(_drop_cfg.get("ema_beta", 0.98)),
+                min_lr=float(_drop_cfg.get("min_lr", 1.0e-7)),
+                freeze_factor=float(_drop_cfg.get("freeze_factor", 2.0)),
+            )
+            # Rewind-on-drop: cutting lr AFTER an excursion freezes the
+            # damage; restoring a healthy snapshot makes the drop
+            # restorative. On by default with the governor.
+            if bool(_drop_cfg.get("rewind", True)):
+                lr_rewinder = RewindBuffer(
+                    every=int(_drop_cfg.get("rewind_every", 500)),
+                    keep=int(_drop_cfg.get("rewind_keep", 2)),
+                )
+            else:
+                lr_rewinder = None
+            logger.info(
+                f"lr governor armed: factor={lr_governor.factor}, "
+                f"drop={lr_governor.drop}, cooldown={lr_governor.cooldown}, "
+                f"freeze_factor={lr_governor.freeze_factor}, "
+                f"rewind={'on' if lr_rewinder is not None else 'off'}"
+            )
         logger.info(
             f"stage {stage_idx} {stage.name!r} starting at "
             f"global_epoch={global_epoch}: window_mode={window_mode} "
@@ -884,7 +989,7 @@ def main(cfg: DictConfig) -> None:
         )
         stage_iter = 0
 
-        for _ in range(stage_epochs):
+        for _ in range(stage_epochs - done_in_stage):
             for batch_idx, sample in enumerate(loader):
                 if max_iterations is not None and stage_iter >= max_iterations:
                     break
@@ -899,9 +1004,22 @@ def main(cfg: DictConfig) -> None:
                     device=dist.device,
                     window_mode=window_mode,
                     anchor_frames=anchor_frames,
+                    grad_clip_norm=float(cfg_train.get("grad_clip_norm", 0.0) or 0.0),
                 )
                 if ema is not None:
                     ema.update(inner_model, epoch=global_epoch)
+                if lr_governor is not None:
+                    dropped = lr_governor.update(
+                        losses.get("grad_norm"), optimizer, lr_scheduler
+                    )
+                    if lr_rewinder is not None:
+                        if dropped:
+                            lr_rewinder.restore(inner_model, optimizer)
+                        else:
+                            lr_rewinder.maybe_snapshot(
+                                stage_iter, inner_model, optimizer,
+                                healthy=lr_governor.healthy,
+                            )
                 lr_scheduler.step()
                 if bench_tsv_file is not None:
                     bench_tsv_file.write(
@@ -920,6 +1038,12 @@ def main(cfg: DictConfig) -> None:
                         if "loss_ocean" in losses
                         else ""
                     )
+                    # The PRE-clip gradient norm. Logged because the failure this
+                    # guards against is silent: a run riding the clip ceiling
+                    # looks identical to a healthy one in the loss alone, and the
+                    # 2026-08-21 runaway was only visible in hindsight.
+                    if "grad_norm" in losses:
+                        extra += f" gnorm={losses['grad_norm']:.3e}"
                     logger.info(
                         f"epoch {global_epoch} batch {batch_idx}/{steps_per_epoch} "
                         f"loss={losses['loss']:.4e}{extra}"

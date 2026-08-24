@@ -46,7 +46,23 @@
 
 use_static_capture: False
 amp: none                       # fp32 default per Phase 8 decision A5
-grad_clip_norm: 0.0
+# Measured, not copied. The diffusion loss is a raw SUM over ~3.7M terms
+# (154 ch x 45 x 90 x 6 frames), so healthy gradient norms here are ~1e5 — five
+# orders above the 1.0 that train.py's SFNO runs use with their mean-reduced
+# loss. Setting 1.0 here does not "clip outliers", it rescales every step to
+# unit norm and silently replaces the optimizer with normalized-gradient
+# descent (observed: gnorm 8.3e4-3.4e5 clipped to 1.0 on 100% of steps).
+#
+# Measured over 271 healthy batches of the RSI A2 run: p50 1.22e5, p90 1.91e5,
+# p99 3.02e5, max 3.41e5 — a tight distribution, max only 2.8x the median. 1e6
+# is ~8x the median and ~3x the observed max, so it never binds in normal
+# operation, while still arresting an exponential runaway within a few e-folds
+# (the 2026-08-21 divergence e-folded every ~93 batches, so it would be caught
+# in ~200 batches instead of destroying the run).
+#
+# Watch `gnorm=` in the training log: if it sits at the ceiling, the clip has
+# become a step-size controller and the LR is the thing to change instead.
+grad_clip_norm: 1.0e6
 max_epochs: 50
 
 # Phase 12f: warm-start weights from a DIFFERENT run's checkpoint (a

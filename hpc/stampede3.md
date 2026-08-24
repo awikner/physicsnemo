@@ -123,10 +123,18 @@ Verify (login node, CPU-only):
 python -c "import torch, physicsnemo; print('torch', torch.__version__, 'cuda', torch.version.cuda, '/ physicsnemo', physicsnemo.__version__)"
 ```
 
-### ⚠️ Pre-flight for MULTI-GPU training: the venv above is torch 2.11
+### Pre-flight for MULTI-GPU training: check the venv's torch
 
-The 2026-07-02 verification above installed **torch 2.11.0+cu128**, and that is
-fine for the single-GPU smoke it was verified with. It is **not** fine for
+> **Checked 2026-08-19: the live `$WORK/physicsnemo/.venv` reports
+> `torch 2.10.0+cu128`, i.e. it already satisfies the pin — no rebuild needed.**
+> The 2.11.0 figure in the 2026-07-02 verification note above is stale; a sync
+> after the pin landed resolved below 2.11. Extras verified present at the same
+> time: zarr 3.2.1, xarray, torch_harmonics 0.9.1, hydra, netCDF4, einops.
+> Re-check rather than assume, since a venv can be rebuilt at any time — the
+> guard in `hpc/scripts/train_rsi_amip.sbatch` does exactly that at submit.
+
+A venv built at **torch 2.11.0+cu128** — as the 2026-07-02 note records — is
+fine for the single-GPU smoke it was verified with, and **not** fine for
 multi-GPU training: torch 2.11/2.12 regressed DDP for these models
 (`docs/dev/context/sfno-ddp-requirements.md`), which is why `pyproject.toml`
 pins `torch>=2.10.0,<2.11.0`. The `uv sync --extra cu12` line above predates

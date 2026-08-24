@@ -34,6 +34,17 @@
 #   RSI_WARMSTART      an ERDM v2 .mdlus to warm-start head 1 from. Expect ONLY
 #                      `output_head_aux.*` in the skipped list — anything else
 #                      means the contracts disagree, so read that report.
+#   RSI_MODEL          model config (default: amip_rsi_v2). Use
+#                      `amip_rsi_fancy` to train on the ERDM_fancy contract
+#                      (154 ch, nocean 3, SST-anomaly channel + global_mean_sst
+#                      trend scalar) — the only contract that is comparable to
+#                      the real trained `erdm_fancy` checkpoint. It additionally
+#                      needs the SST suite on the dataset side, which
+#                      RSI_SST=1 turns on.
+#   RSI_SST            1 => append the SST anomaly channel and route the
+#                      global_mean_sst trend scalar. Needs RSI_SST_CLIM.
+#   RSI_SST_CLIM       path to sst_climatology.npz (see
+#                      tools/data/amip/make_sst_climatology.py).
 #   RSI_DATASET        dataset config (default: amip_dailyavg_coarse). Use
 #                      `amip_dailyavg_coarse_multiyear` when AI_ROSSBY_DATA holds
 #                      a DIRECTORY of per-year stores rather than one year — the
@@ -60,11 +71,14 @@
 #    it at 2.10.x/cu128 before any MULTI-GPU run — the guard below refuses
 #    rather than letting a silently-degraded DDP run burn an allocation.
 
+# NOTE: no --gpus-per-node / --mem directive here on purpose. TACC Stampede3's
+# `h100` partition configures no gres (GPUs come with the whole node), so a
+# --gpus-per-node request is rejected outright with "Invalid generic resource
+# (gres) specification"; Delta/DeltaAI need one. Pass it at submit on the
+# clusters that want it, and the GPU count below is discovered either way.
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128g
 #SBATCH --job-name=train-rsi-amip
 #SBATCH --output=hpc/scripts/logs/train-rsi-amip-%j.out
 
@@ -104,7 +118,14 @@ for d in amip_dailyavg_coarse amip_dailyavg_boundary; do
   fi
 done
 
-NPROC="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-4}}"
+# Prefer what SLURM granted; fall back to what the node actually exposes, since
+# a gres-less partition reports neither.
+NPROC="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
+if [ -z "${NPROC}" ]; then
+  NPROC="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || true)"
+fi
+NPROC="${NPROC:-1}"
+[ "${NPROC}" -ge 1 ] 2>/dev/null || NPROC=1
 NNODES="${SLURM_NNODES:-1}"
 if [ "${NNODES}" -gt 1 ]; then
   echo "ERROR: multi-node (${NNODES}) not wired here — add rdzv args for >1 node." >&2
@@ -150,6 +171,13 @@ if [ -n "${RSI_WARMSTART:-}" ]; then
   EXTRA+=("training.partial_checkpoint=${RSI_WARMSTART}")
 fi
 DATASET="${RSI_DATASET:-amip_dailyavg_coarse}"
+MODEL="${RSI_MODEL:-amip_rsi_v2}"
+if [ "${RSI_SST:-0}" = "1" ]; then
+  : "${RSI_SST_CLIM:?RSI_SST=1 needs RSI_SST_CLIM (the sst_climatology.npz path)}"
+  EXTRA+=("dataset.sst_anomaly_channel=append"
+          "dataset.scalar_forcing=global_mean_sst"
+          "dataset.sst_climatology_path=${RSI_SST_CLIM}")
+fi
 # Word-split on purpose: RSI_EXTRA is a list of Hydra overrides.
 if [ -n "${RSI_EXTRA:-}" ]; then
   # shellcheck disable=SC2206
@@ -172,8 +200,8 @@ python -m torch.distributed.run \
     examples/weather/ai_rossby/train_diffusion.py \
         --config-dir=examples/weather/ai_rossby/conf \
         --config-name=config \
-        run_name="rsi_${RUNG}_run0" \
-        model=amip_rsi_v2 \
+        run_name="${RSI_RUN_NAME:-rsi_${RUNG}_run0}" \
+        "model=${MODEL}" \
         loss="${LOSS}" \
         loss.window_size=6 \
         "dataset=${DATASET}" \

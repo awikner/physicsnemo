@@ -178,6 +178,7 @@ _EXPECTED_LAYOUTS = {
     # the generative process.
     "amip_rsi_v2": "v2",
     "amip_rsi_v2_ocean": "v2",
+    "amip_rsi_fancy": "v2",
 }
 
 

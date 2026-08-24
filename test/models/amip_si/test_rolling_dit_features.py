@@ -572,3 +572,25 @@ def test_muon_groups_still_partition_every_parameter():
     assert grouped == {id(p) for p in w.parameters()}
     aux = {id(p) for p in w.backbone.output_head_aux.parameters()}
     assert aux and aux <= grouped
+
+
+def test_output_head_accepts_a_config_node_not_just_dict():
+    """An OmegaConf node must configure the head, not be swallowed as a mode.
+
+    ``isinstance(x, dict)`` is False for a ``DictConfig``, which sent the whole
+    node down the "it is a mode string" branch: every option was dropped,
+    ``num_output_heads`` silently fell back to 1, and the model built without a
+    murmur. The recipe converts via ``OmegaConf.to_container`` so it never hit
+    this, but constructing from a config node directly did.
+    """
+    from omegaconf import OmegaConf
+
+    node = OmegaConf.create({"mode": "mix", "num_experts": 2, "num_output_heads": 2})
+    dit = _dit(node)
+    assert dit.num_output_heads == 2
+    assert len(dit.output_head_aux) == 1
+
+
+def test_output_head_rejects_an_unusable_type():
+    with pytest.raises(TypeError, match="output_head must be"):
+        _dit(object())

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import math
 import json
 import logging
 import os
@@ -817,10 +818,14 @@ def _make_muon_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimi
             "`torchrun --standalone --nproc-per-node=1 <script>` is enough for "
             "a single-process run — or set optimizer.type=AdamW."
         )
-    param_groups = model.muon_param_groups(
+    muon_kwargs = dict(
         lr=float(cfg.lr),
         weight_decay=float(getattr(cfg, "weight_decay", 0.01)),
     )
+    mult = getattr(cfg, "muon_lr_multiplier", None)
+    if mult is not None:
+        muon_kwargs["muon_lr_multiplier"] = float(mult)
+    param_groups = model.muon_param_groups(**muon_kwargs)
     return MuonWithAuxAdam(param_groups)
 
 
@@ -841,6 +846,36 @@ def make_scheduler(
       (``num_warmup_steps``) with cosine annealing to ``eta_min``.
     """
     name = getattr(cfg, "scheduler", "OneCycleLR")
+    if name == "CosineToFloor":
+        # Cosine from the base lr down to ``ct_floor_lr`` over
+        # ``ct_decay_steps`` optimizer steps, then HOLD the floor for the rest
+        # of the stage (LambdaLR: monotone, never climbs back — unlike
+        # CosineAnnealingLR past T_max, which is periodic). Exists for
+        # objectives whose loss surface keeps sharpening as the fit improves
+        # (progressive sharpening / edge-of-stability): a schedule spanning the
+        # whole run is flat on the few-thousand-step timescale where the
+        # sharpening happens, so a constant-magnitude optimizer (Muon) gets
+        # pinned at the stability boundary and oscillates instead of
+        # converging — measured on RSI A2, see
+        # docs/dev/context/rsi-h1-precond-instability.md. The multiplicative
+        # lambda preserves per-group lr ratios (Muon hidden vs aux AdamW).
+        decay = int(cfg.ct_decay_steps)
+        ratio = float(cfg.ct_floor_lr) / float(cfg.lr)
+        if not 0.0 < ratio <= 1.0:
+            raise ValueError(
+                f"ct_floor_lr must be in (0, lr], got ct_floor_lr/lr={ratio}"
+            )
+
+        def _cosine_to_floor(t, decay=decay, ratio=ratio):
+            if t >= decay:
+                return ratio
+            return ratio + (1.0 - ratio) * 0.5 * (
+                1.0 + math.cos(math.pi * t / decay)
+            )
+
+        return torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=_cosine_to_floor
+        )
     if name == "OneCycleLR":
         return OneCycleLR(
             optimizer,
@@ -892,6 +927,167 @@ _AMP_DTYPES = {
     "fp16": torch.float16,
     "float16": torch.float16,
 }
+
+
+class GnormLrGovernor:
+    """Ratchet the learning rate DOWN when the gradient norm spikes.
+
+    The classical drop-lr-on-instability recipe, made automatic. Exists for
+    objectives whose loss surface keeps sharpening as the fit improves: on the
+    RSI A2 objective, every constant lr — Muon at trunk 5e-4 down to 3e-5,
+    AdamW at 5e-5 — holds its loss floor for ~4-6k steps and then enters
+    edge-of-stability excursions (gnorm 10-1000x the healthy band, loss
+    bouncing off its floor), while a *decaying* lr stayed clean for as long as
+    it kept decaying. See docs/dev/context/rsi-h1-precond-instability.md. The
+    governor keeps lr where the optimizer converges fastest until the
+    landscape objects, then steps it down permanently — asymptotically the
+    ~1/t decay that tracks linear sharpening growth, with the timing measured
+    from the run itself rather than guessed.
+
+    Mechanics: a slow EMA of the gradient norm is the "healthy band"; a batch
+    with ``gnorm > factor * ema`` (after ``warmup`` batches, outside a
+    ``cooldown``) multiplies every param group's lr — and, crucially, the LR
+    scheduler's ``base_lrs``, or the next ``scheduler.step()`` would undo the
+    drop — by ``drop``. Spike batches do not update the EMA (the threshold
+    must not chase the excursion). Per-group ratios (Muon hidden-weight
+    multiplier) are preserved because the drop is multiplicative.
+    """
+
+    def __init__(self, *, factor=4.0, drop=0.5, cooldown=100, warmup=100,
+                 ema_beta=0.98, min_lr=1e-7, freeze_factor=2.0):
+        self.factor = float(factor)
+        self.drop = float(drop)
+        self.cooldown = int(cooldown)
+        self.warmup = int(warmup)
+        self.ema_beta = float(ema_beta)
+        self.min_lr = float(min_lr)
+        self.freeze_factor = float(freeze_factor)
+        self.ema = None
+        self.seen = 0
+        self.cooldown_left = 0
+        self.drops = 0
+        #: True while the last gnorm sat inside the healthy band — the
+        #: trainer's rewind buffer snapshots only on healthy batches, so a
+        #: restore never lands mid-excursion.
+        self.healthy = False
+
+    def update(self, gnorm, optimizer, scheduler=None) -> bool:
+        """Feed one batch's pre-clip gradient norm. Returns True on a drop."""
+        if gnorm is None or not math.isfinite(gnorm):
+            self.healthy = False
+            return False
+        self.seen += 1
+        if self.cooldown_left > 0:
+            self.cooldown_left -= 1
+        # The healthy band is FROZEN the moment gnorm leaves it
+        # (freeze_factor x ema): v1 clipped each EMA update at the trigger
+        # threshold, but a sustained excursion still ratcheted the band up
+        # 48x over a few hundred elevated batches (measured, job 54457716),
+        # so the trigger chased the excursion and fired ~1.5k batches late.
+        self.healthy = (
+            self.ema is None or gnorm < self.freeze_factor * self.ema
+        )
+        spike = (
+            self.ema is not None
+            and self.seen > self.warmup
+            and gnorm > self.factor * self.ema
+        )
+        if not spike:
+            if self.ema is None:
+                self.ema = gnorm
+            elif self.healthy:
+                self.ema = (
+                    self.ema_beta * self.ema + (1.0 - self.ema_beta) * gnorm
+                )
+            return False
+        if self.cooldown_left > 0:
+            return False
+        floor_hit = any(
+            g["lr"] * self.drop < self.min_lr for g in optimizer.param_groups
+        )
+        if floor_hit:
+            return False
+        for g in optimizer.param_groups:
+            g["lr"] *= self.drop
+        if scheduler is not None and hasattr(scheduler, "base_lrs"):
+            scheduler.base_lrs = [b * self.drop for b in scheduler.base_lrs]
+        self.cooldown_left = self.cooldown
+        self.drops += 1
+        logger.warning(
+            "GnormLrGovernor: gnorm %.3e > %.1fx healthy EMA %.3e — lr *= %s "
+            "(drop #%d; new lrs %s)",
+            gnorm, self.factor, self.ema, self.drop, self.drops,
+            ["%.2e" % g["lr"] for g in optimizer.param_groups],
+        )
+        return True
+
+
+class RewindBuffer:
+    """Rolling CPU snapshots of (model, optimizer) state for excursion rewind.
+
+    Cutting the lr AFTER an edge-of-stability excursion freezes the damage:
+    by the time the gradient norm is unmistakably excursion-level, the
+    parameters have already left the basin, and at the reduced lr they crawl
+    back over thousands of batches, if at all (measured, job 54457716 —
+    lr driven to 1.3e-6 with the state stranded at 3x its loss floor). The
+    buffer makes the drop restorative instead: on a governor trigger the
+    trainer rewinds model AND optimizer state (momenta carry the excursion
+    too) to a snapshot taken on a HEALTHY batch, then continues at the
+    reduced lr — an excursion costs at most ``keep * every`` batches of
+    progress. The lr itself is not rewound: schedulers recompute each step
+    from ``base_lrs``, which the governor already scaled down.
+
+    Under DDP every rank snapshots at the same step and triggers on the same
+    (allreduced) gradient norm, so restores are rank-consistent by
+    construction.
+    """
+
+    def __init__(self, *, every=500, keep=2):
+        self.every = int(every)
+        self.keep = int(keep)
+        self._snaps = []          # oldest first: (step, model_sd, opt_sd)
+
+    @staticmethod
+    def _to_cpu(obj):
+        if torch.is_tensor(obj):
+            return obj.detach().to("cpu", copy=True)
+        if isinstance(obj, dict):
+            return {k: RewindBuffer._to_cpu(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            t = [RewindBuffer._to_cpu(v) for v in obj]
+            return t if isinstance(obj, list) else tuple(t)
+        return obj
+
+    def maybe_snapshot(self, step, model, optimizer, *, healthy=True):
+        """Snapshot every ``every`` steps, but only from a healthy state."""
+        if not healthy or step % self.every != 0:
+            return False
+        self._snaps.append((
+            int(step),
+            self._to_cpu(model.state_dict()),
+            self._to_cpu(optimizer.state_dict()),
+        ))
+        if len(self._snaps) > self.keep:
+            self._snaps.pop(0)
+        return True
+
+    def restore(self, model, optimizer):
+        """Rewind to the OLDEST kept snapshot; returns its step or None.
+
+        Oldest, not newest: the newest may already sit on the excursion's
+        onset ramp (sub-threshold but climbing). The oldest is ``keep *
+        every`` batches back — cheap insurance. The used snapshots are
+        discarded so an immediate re-trigger cannot restore mid-excursion
+        state.
+        """
+        if not self._snaps:
+            return None
+        step, model_sd, opt_sd = self._snaps[0]
+        model.load_state_dict(model_sd)
+        optimizer.load_state_dict(opt_sd)
+        self._snaps.clear()
+        logger.warning("RewindBuffer: rewound model+optimizer to step %d", step)
+        return step
 
 
 def _resolve_amp_dtype(amp: str | bool | None) -> Optional[torch.dtype]:

@@ -98,9 +98,17 @@ eps_tmax: 1.0
 # ── noise ───────────────────────────────────────────────────────────────
 noise: gaussian
 l_max: 90
-# Per-channel latent amplitude: the std of the model's own one-step increment
-# in normalized units, from tools/data/amip/make_noise_scales.py. Injecting
-# isotropic noise instead over-perturbs the slow channels.
+# Per-channel latent amplitude: the std of the data's one-step increment in
+# normalized units (tools/data/amip/make_rsi_delta_scales.py for the fancy
+# contract; make_noise_scales.py for contracts without derived channels).
+# SET THIS FOR ANY REAL RUN and pair it with gamma_0=1.0, gamma_1=0.04 (then
+# in increment units). Leaving it null injects a fixed z-scored amplitude
+# into every channel — 30x the natural one-step variability of the slow ones
+# (surface_pressure: 0.017) — which measurably fed the A2 training
+# instability: the artificial-denoising signal is a pool of perfectly
+# reducible loss that keeps sharpening the landscape. The path is
+# cluster-specific, so it stays an override, not a default here. See
+# docs/dev/context/rsi-h1-precond-instability.md.
 noise_scale_path: null
 # Spectral Gamma = g(kappa) h(tau, kappa) — Phase C (ablation A4). The
 # scheduler raises rather than silently falling back to white noise.

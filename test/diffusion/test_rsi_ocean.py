@@ -303,3 +303,62 @@ def test_rollout_imposes_and_strips_the_ocean_block():
     # legitimately off unit scale and must not be included here.
     _assert_bounded(s.strip_ocean(out), what="ocean-run state rollout")
     assert torch.isfinite(out).all()
+
+
+def test_impose_ocean_with_per_channel_scales(tmp_path):
+    """Ocean imposition must work when noise_scale_path is set.
+
+    The imposition builds its interpolant on the nocean-channel TAIL block
+    alone, so the per-channel scale S must be tail-sliced for that path.
+    Untested, this combination shipped broken: training never calls
+    impose_ocean (sampling-only), no incr-config run reached its first
+    validation, and the ocean suite never set noise_scale_path — the first
+    eval of a real checkpoint died on a (3) vs (154) shape mismatch
+    (Midway job 54491307, 2026-08-23).
+    """
+    full_c = _C + _NOCEAN
+    scales = torch.linspace(0.05, 0.3, full_c)[:, None, None]
+    path = tmp_path / "scales.pt"
+    torch.save(scales, path)
+    s = _sched(gamma_0=1.0, gamma_1=0.04, noise_scale_path=str(path))
+    x = torch.zeros(_B, _W, full_c, _H, _WD)
+    bnd_curr, bnd_next = _bnd(_W, base=0.0), _bnd(_W, base=1000.0)
+    out = s.impose_ocean(x, bnd_next, bnd_curr)
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+    # The tail slice must be the OCEAN channels' scales: at the back slot
+    # (tau=0, beta=0) the imposed block is a + gamma_0 * S_ocean * z, so its
+    # deviation from the anchor-time truth is bounded by ~5 sigma of the
+    # LARGEST ocean-channel scale — feasible only if the tail slice (not the
+    # head) was used.
+    a_back = s.ocean_truth(bnd_curr, (_H, _WD))[:, -1]
+    dev = (out[:, -1, -_NOCEAN:] - a_back).abs().max()
+    s_ocean_max = float(scales[-_NOCEAN:].max())
+    assert dev < 5.0 * s_ocean_max * s.gamma_0
+
+    # A sub-width tensor that is NOT the ocean tail must raise, not
+    # silently tail-slice.
+    import pytest as _pytest
+    bad = torch.randn(_B, _W, _NOCEAN + 1, _H, _WD)
+    with _pytest.raises(ValueError, match="delta_scale"):
+        s.gamma_apply(bad, s.local_time(torch.zeros(_B)))
+
+
+def test_rollout_with_per_channel_scales_and_ocean(tmp_path):
+    """End-to-end sample_rollout under scales+ocean — the eval-crash path."""
+    full_c = _C + _NOCEAN
+    scales = torch.full((full_c, 1, 1), 0.1)
+    path = tmp_path / "scales.pt"
+    torch.save(scales, path)
+    s = _sched(gamma_0=1.0, gamma_1=0.04, noise_scale_path=str(path),
+               h1_precond="edm")
+
+    class _Zero(torch.nn.Module):
+        def forward(self, x, label, c_grid, c_scalar):
+            return torch.cat([torch.zeros_like(x)] * 2, dim=2)
+
+    init = torch.randn(_B, _W + 1, _C, _H, _WD)
+    c_grid = _bnd_unit(_W + 8)
+    with torch.no_grad():
+        out = s.sample_rollout(_Zero(), init, c_grid, None, horizon=4)
+    _assert_bounded(out, what="scales+ocean rollout")

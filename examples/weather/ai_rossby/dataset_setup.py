@@ -102,6 +102,48 @@ class VaryingBoundarySubset:
         return out
 
 
+def model_varying_pre_rescaler(cfg: DictConfig) -> list[str]:
+    """The model's varying list as the STORE supplies it, before the SST rescaler.
+
+    ``cfg.model.varying_boundary_variables`` is written in POST-rescaler order —
+    ``amip_erdm_fancy`` lists ``sea_surface_temperature_anomaly``, which no store
+    holds: :class:`SSTRescaler` derives it inside the assembler. But the two
+    consumers of that list, :func:`resolve_varying_subset` and the normalizer,
+    both run BEFORE the assembler, on raw store channels.
+
+    Comparing the two stages directly is what broke the fancy contract: the
+    derived name is absent from the store, the subset test
+    (``set(model).issubset(set(store))``) fails, no slice is applied, and
+    ``global_mean_co2`` — which this contract replaces with the SST trend scalar
+    — survives into the grid. The result is
+    ``c_grid_dim=6 but the data pipeline produces 7``, which is why
+    ``amip_erdm_fancy`` could not be trained at all (verified 2026-08-19 on
+    DeltaAI: it fails identically to ``amip_rsi_fancy``). The static config
+    gates never caught it because they never build a pipeline, and the
+    checkpoint translator reconstructs the order arithmetically without one.
+
+    Inverts :func:`~physicsnemo.experimental.datapipes.climate.sst_forcing.grid_forcing_names`:
+    ``append`` inserted the anomaly after the SST channel, so drop it;
+    ``replace`` substituted it for the SST channel, so put SST back.
+    """
+    from physicsnemo.experimental.datapipes.climate.sst_forcing import (
+        SST_ANOMALY_CHANNEL_NAME,
+        SST_VARIABLE_NAMES,
+    )
+
+    names = [str(v) for v in _cfg_list(cfg.model, "varying_boundary_variables")]
+    data = cfg.get("dataset") or {}
+    mode = str(data.get("sst_anomaly_channel", "none") or "none")
+    if mode == "none" or SST_ANOMALY_CHANNEL_NAME not in names:
+        return names
+    if mode == "append":
+        return [n for n in names if n != SST_ANOMALY_CHANNEL_NAME]
+    # "replace": the anomaly occupies the absolute SST channel's slot. Restore
+    # whichever SST name the store actually uses, so the subset can find it.
+    store_sst = next(iter(SST_VARIABLE_NAMES))
+    return [store_sst if n == SST_ANOMALY_CHANNEL_NAME else n for n in names]
+
+
 def resolve_varying_subset(
     cfg: DictConfig, store_varying: Sequence[str] | None
 ) -> Optional[list[int]]:
@@ -113,7 +155,9 @@ def resolve_varying_subset(
     downstream (``ForcingPipeline.assert_matches``) name it better than a
     silent reordering would.
     """
-    model_varying = [str(v) for v in _cfg_list(cfg.model, "varying_boundary_variables")]
+    # PRE-rescaler: the slice runs on store channels, so a derived pseudo-channel
+    # must not be looked for there (see model_varying_pre_rescaler).
+    model_varying = model_varying_pre_rescaler(cfg)
     store = [str(v) for v in (store_varying or [])]
     if not model_varying or not store or model_varying == store:
         return None

@@ -219,8 +219,25 @@ class ForcingAssembler:
 
     @property
     def active(self) -> bool:
-        """Whether any channel is actually routed (else a passthrough)."""
-        return bool(self.scalar_routed_variables)
+        """Whether this assembler does anything (else a passthrough).
+
+        Routing channels is not the only thing it does: it also carries the
+        Phase-12g ``sst_rescaler`` hook, which derives the SST anomaly channel
+        and can append the trend scalar. Gating purely on
+        ``scalar_routed_variables`` dropped the whole assembler — rescaler
+        included — from the transform chain for any contract that routes
+        nothing, which is exactly ``amip_erdm_fancy`` / ``amip_rsi_fancy``
+        (``scalar_routed_boundary_variables: []``, the SST trend scalar taking
+        CO2's slot).
+
+        The effect was silent and then fatal: the anomaly channel was never
+        derived and the trend scalar never appended, while :attr:`c_grid_dim`
+        below *does* count the rescaler's channel — so the run died at
+        ``ForcingPipeline.assert_matches`` with
+        ``c_grid_dim=6 but the data pipeline produces 7``. Measured 2026-08-19:
+        neither fancy config could start a training run at all.
+        """
+        return bool(self.scalar_routed_variables) or self.sst_rescaler is not None
 
     @property
     def c_grid_dim(self) -> int:
@@ -286,10 +303,13 @@ class ForcingAssembler:
     def __call__(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if self.sst_rescaler is not None:
             sample = self.sst_rescaler(sample)
-        if not self.active:
+        if not self.scalar_routed_variables:
             # No CO2-style routing: the rescaler (which may already have
             # appended the SST trend scalar to the calendar itself) is all there
-            # was to do.
+            # was to do. Gated on the routed list rather than :attr:`active`,
+            # which is now also True for a rescaler-only assembler — falling
+            # through here with nothing to route reaches
+            # ``torch.stack([], dim=-1)``.
             return sample
 
         out = dict(sample)

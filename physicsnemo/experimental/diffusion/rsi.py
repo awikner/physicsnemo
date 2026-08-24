@@ -420,10 +420,27 @@ class RSIScheduler(nn.Module):
 
     # ── Gamma = gamma(tau) * S, diagonal in channel space ─────────────────
     def _scale(self, ref):
-        """Per-channel latent scale S broadcast against (b, W, C, H, W)."""
+        """Per-channel latent scale S broadcast against (b, W, C, H, W).
+
+        One caller legitimately works on a sub-width tensor: the ocean
+        imposition builds its interpolant on the nocean-channel TAIL block
+        alone, so it gets the tail slice of the scale. Any other width
+        mismatch is a packing bug and raises — a silent tail-slice would
+        scale the wrong channels without changing a single shape.
+        """
         if self.delta_scale is None:
             return None
-        return self.delta_scale.to(device=ref.device, dtype=ref.dtype)
+        s = self.delta_scale.to(device=ref.device, dtype=ref.dtype)
+        c = ref.shape[-3]
+        if s.shape[0] == c:
+            return s
+        if self.nocean and c == self.nocean:
+            return s[-self.nocean:]
+        raise ValueError(
+            f"delta_scale carries {s.shape[0]} channels but the tensor has "
+            f"{c}; the only sub-width path is the {self.nocean}-channel ocean "
+            f"tail (impose_ocean)."
+        )
 
     def gamma_apply(self, v, tau):
         """Gamma(tau) v -- amplitude times per-channel scale."""
@@ -773,6 +790,17 @@ class RSIScheduler(nn.Module):
                         "rsi loss diag: h1/slot=%s z/slot=%s",
                         ["%.3e" % v for v in p1.tolist()],
                         ["%.3e" % v for v in pz.tolist()],
+                    )
+                    # Channel-resolved: which channels carry the loss right
+                    # now (weighted, summed over slots+space, batch-mean).
+                    # Indices are the wrapper's pack order; with nocean the
+                    # ocean block is the trailing block.
+                    pc = (self.w5(weight) * err2).sum(dim=[1, 3, 4]).mean(0)
+                    top = torch.topk(pc, k=min(5, pc.numel()))
+                    logger.info(
+                        "rsi loss diag: top channels %s",
+                        [(int(i), "%.3e" % v) for i, v in
+                         zip(top.indices.tolist(), top.values.tolist())],
                     )
         if self.nocean:
             n = err2.shape[2] - self.nocean

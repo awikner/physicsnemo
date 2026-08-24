@@ -674,6 +674,17 @@ def main(cfg) -> None:
         return resolve_steps_per_bin(block, per_month, name=name, log=logger)
 
     results: dict = {}
+    # Save-as-you-go: each validator below costs GPU-hours, and the suite
+    # used to write results only at the very end — a 6 h time limit killed a
+    # run mid-QBO and threw away a finished climatology AND bias validator
+    # (Midway job 54495699, 2026-08-23). Partial files carry a marker so a
+    # reader can tell "suite still running / died" from "complete".
+    output_path = _resolve_path(str(eval_cfg.output_path))
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    def _checkpoint_results():
+        torch.save({**results, "_partial": True}, output_path)
+
 
     clim_cfg = eval_cfg.get("climatology", None)
     if clim_cfg is not None and bool(clim_cfg.get("enabled", False)):
@@ -686,6 +697,7 @@ def main(cfg) -> None:
             **base_kwargs,
         )
         results["climatology"] = v.run(wrapper, epoch=0)
+        _checkpoint_results()
         logger.info("climatology validator done")
 
     bias_cfg = eval_cfg.get("bias", None)
@@ -699,6 +711,7 @@ def main(cfg) -> None:
             **base_kwargs,
         )
         results["bias"] = v.run(wrapper, epoch=0)
+        _checkpoint_results()
         logger.info("bias validator done")
 
     qbo_cfg = eval_cfg.get("qbo", None)
@@ -716,6 +729,7 @@ def main(cfg) -> None:
             **base_kwargs,
         )
         results["qbo"] = v.run(wrapper, epoch=0)
+        _checkpoint_results()
         logger.info("qbo validator done")
 
     gm_cfg = eval_cfg.get("global_mean", None)
@@ -726,6 +740,7 @@ def main(cfg) -> None:
             **base_kwargs,
         )
         results["global_mean"] = v.run(wrapper, epoch=0)
+        _checkpoint_results()
         logger.info("global_mean validator done")
 
     ens_cfg = eval_cfg.get("ensemble_envelope", None)
@@ -755,11 +770,10 @@ def main(cfg) -> None:
             **ens_kwargs,
         )
         results["ensemble_envelope"] = v.run(wrapper, epoch=0)
+        _checkpoint_results()
         logger.info("ensemble_envelope validator done")
 
-    output_path = _resolve_path(str(eval_cfg.output_path))
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(results, output_path)
+    torch.save(results, output_path)          # final write: no _partial marker
     logger.info(f"wrote eval suite results to {output_path}")
 
 

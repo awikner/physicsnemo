@@ -370,11 +370,27 @@ class RollingDiT(_PNeMoModule):
                     dropout=dropout)
 
         # ── Output projection (Phase 12e) ─────────────────────────────────
-        head_cfg = (
-            dict(output_head)
-            if isinstance(output_head, dict)
-            else ({} if output_head is None else {"mode": output_head})
-        )
+        # Accept any Mapping, not just `dict`. An OmegaConf DictConfig is NOT a
+        # dict, so `isinstance(..., dict)` sent it down the "it must be a mode
+        # string" branch and produced a head with mode=str(DictConfig) and every
+        # option silently dropped — including num_output_heads, which then
+        # defaulted to 1 and gave a single-head backbone with no error anywhere.
+        # The recipe is unaffected (build_model calls OmegaConf.to_container),
+        # but anyone constructing RollingDiT straight from a config node hits it.
+        from collections.abc import Mapping
+
+        if output_head is None:
+            head_cfg = {}
+        elif isinstance(output_head, Mapping):
+            head_cfg = dict(output_head)
+        elif isinstance(output_head, str):
+            head_cfg = {"mode": output_head}
+        else:
+            raise TypeError(
+                f"output_head must be a mapping, a mode string, or None; got "
+                f"{type(output_head).__name__}. A config node that is neither "
+                f"would silently lose every option it carries."
+            )
         self.output_head_mode = str(head_cfg.pop("mode", "legacy"))
         # Rolling Stochastic Interpolants need TWO readouts (the clean-state or
         # increment head, and the latent zhat head). They are separate head

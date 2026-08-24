@@ -100,13 +100,162 @@ identical 2x lr destabilizes at b7145** (`mw_ctrl_erdm.sbatch`, job 54297413)
 | RSI h1_precond=edm (54285356) | b7092 |
 | ERDM baseline (54297413)| b7145  |
 
-So the back-slot-led onset is the generic Muon-1e-3 limit shared by every
-loss; the raw-H1 excess is the only RSI-specific defect, and it trips 1300
-batches before the generic limit. At the production lr (5e-5) ERDM is
-empirically stable over its full multi-epoch production training, raw-H1 RSI
-tripped at ~11.7k steps, and RSI-edm — matching ERDM's stability at matched
-lr — is expected stable. Do not raise base lr to 1e-4 on this trunk for ANY
-of these losses.
+So the back-slot-led onset is the generic sharp-at-the-floor limit shared at
+2x lr by every loss; the raw-H1 excess is the only RSI-specific defect of the
+HEAD, and it trips 1300 batches before the generic limit. Do not raise base
+lr to 1e-4 on this trunk for ANY of these losses.
+
+**2026-08-22 evening update — the "expected stable at 1x" extrapolation was
+WRONG.** The edm production run at 5e-5 (job 54309737) reached its floor 4x
+faster than raw (b~3000 vs b~11k — the readout no longer has to be learned
+through the trunk) and then destabilized b3968, back-slot-led, as a SLOW
+runaway (gnorm e-fold ~500 batches vs ~30-90 at 2x); no recovery over 800+
+batches. Unifying invariant across all six runs: onset follows the RSI loss
+floor by 300–1600 batches at every tested (lr, head) combination, while ERDM
+at 5e-5 sits at its own floor indefinitely. I.e. the RSI objective's floor
+region is intrinsically sharper than ERDM's — most plausibly because the
+coupled interpolant makes the back/mid slots genuinely learnable and RSI's
+near-flat lambda*f trains them ~100x harder than ERDM's bump.
+
+**The lr axis is exhausted.** The 2.5e-5 arm (job 54317233) also tripped,
+onset b9145, back-slot-led, same slow runaway — halving lr delays onset
+(~2.3x) but does not stabilize. Consistent with the optimizers being
+scale-free: Muon's orthogonalized update has CONSTANT magnitude regardless
+of gradient scale (and Adam normalizes), so global-norm gradient clipping
+cannot modulate step sizes here either — which is why clip=1e6 "contained
+but never recovered" in run 54173034. Once the floor region's progressive
+sharpening crosses the threshold for a given lr, divergence follows.
+
+**Second objective-vs-proposal deviation, now the active fix (delta_std).**
+The proposal defines the weighting SNR as beta^2 Var[Delta]/Gamma^2 with
+Var[Delta] the INCREMENT variance; the shipped `delta_std: 1.0` uses state
+variance, overstating the signal scale ~8-10x. Measured on
+amip_dailyavg_coarse (1990, all 136 state channels, plain-zarr probe
+`probes/measure_delta_std.py`): normalized 1-step increment std mean 0.117,
+median 0.089, range 0.017-0.30. At the corrected `delta_std: 0.12` the
+per-slot weight lambda*f becomes [0.43, 0.27, 0.16, 0.10, 0.045, 0.0034]
+(front-loaded, ERDM-like emphasis on the demixing region) instead of the
+shipped near-flat [0.32, 0.49, 0.53, 0.37, 0.18, 0.070] — the back slot
+that leads every post-fix blow-up is de-weighted 20x and the total
+network-facing curvature drops 4.3x. Result (job 54331263, lr 5e-5,
+h1_precond=edm + delta_std=0.12): qualitatively better but still not
+converging — the run reached a LOWER floor (6.3e2 at b4499, vs ~1.2e3
+before), then entered a LIMIT CYCLE instead of a one-way runaway: excursion
+to gnorm ~7.6e7 at b4859, self-recovery to gnorm ~1e4, partial descent,
+second excursion at b6749, recovery again — bouncing between loss 2.4e3 and
+5e3 every ~1.5-2k batches, never returning to its floor. Mid-slot-led now
+(the sharpening follows the weight mass). The ocean sub-loss spikes
+disproportionately (~13x) at each excursion.
+
+**Interpretation.** RSI's objective has far more REDUCIBLE signal than
+ERDM's (the coupling's whole point), so weight-space sharpness keeps growing
+as the model fits; Muon's orthogonalized update has CONSTANT magnitude — no
+adaptive shrinkage — so the run gets pinned at the edge-of-stability
+boundary and oscillates there, destroying its best fit each cycle. The
+"floors" every run reached are EoS-limited losses, not the objective's true
+floor. Both remaining knobs shrink the trunk step where the blow-ups live
+(probe: runaway gradients flow through the Muon-governed trunk; the AdamW
+groups self-stabilize): base lr (global, slow) or `muon_lr_multiplier`
+(surgical; upstream's 10x is a transplant constant, not measured). The
+multiplier is now plumbed through `training.optimizer.muon_lr_multiplier`
+(train.py `_flatten_optimizer_cfg` -> train_loop.py `_make_muon_optimizer`).
+
+**Knob ladder results (all at base lr 5e-5 unless noted).** Each fix slows
+the sharpening — floor residence before onset grows monotonically — but
+none alone stops it:
+
+| arm | onset | floor residence |
+|---|---|---|
+| raw H1 (jobs 53918582/54173034) | b11.7k | ~700 |
+| + h1_precond=edm (54309737) | b3968 (floor 4x sooner) | ~1000 |
+| + delta_std 0.12 (54331263) | b4627, LIMIT CYCLE (self-recovers) | ~1500 |
+| edm+ds012 + muon mult 3 (54342683) | b9094 | ~2x delay |
+| + noise_scale_path (incr units, 54356351) | b~6900 | ~2400 |
+
+The channel-resolved diag (RSI_LOSS_DIAG) shows the excursions are
+CHANNEL-WANDERING: healthy top-5 is stably the cloud/precip diagnostics;
+at onset v@900 spikes 30x, three minutes later the spike has moved to
+2m_temperature — whichever weight-space direction is currently sharpest
+oscillates first. No specific term is the root; it is edge-of-stability
+dynamics of a reducible-signal-rich objective under a constant-step
+optimizer.
+
+**Increment-units configuration (the plan's actual Phase-A default,
+previously never run).** `noise_scale_path` was null in the shipped A2 —
+every channel got 0.5-sigma WHITE corruption, 30x the natural one-step
+variability of slow channels (surface_pressure 0.017) — a huge pool of
+perfectly-reducible artificial-denoising signal, i.e. sharpening fuel. The
+artifact is now built per-channel from the store
+(`probes/build_delta_scale.py` -> `norm_stats/sigma_c_fancy154.pt` on
+Midway; surface_pressure 0.017, v@900 0.29, PRATE 0.37, monthly-interp ocean
+floored at 0.01). With it (gamma_0=1.0, gamma_1=0.04 in increment units,
+delta_std back to 1.0): lowest healthy gnorm of any arm (4-6e3), ocean loss
+30x lower, longest floor residence — but still onset at ~b6900 at
+multiplier 10, and at b10747 with muon_lr_multiplier 3 stacked (job
+54372888, 6k-batch floor residence).
+
+**The schedule test settles the mechanism (job 54390053).** A new
+`CosineToFloor` scheduler option in `make_scheduler` (cosine 5e-5 -> 1e-5
+over 15k steps, then hold; LambdaLR, monotone, group-ratio-preserving) on
+top of the full stack: the run sailed through the ENTIRE decay phase —
+floor ~540-650 from b11k, clean epoch-1 checkpoint SAVED (loss 559; in
+`checkpoints_fullstack/` on Midway — the first clean trained RSI
+checkpoint) — and tripped exactly 1.6k steps AFTER the lr froze at its
+floor (onset global step 16626 = e2 b3483), even at trunk lr 3e-5, 17x
+below baseline. I.e. while lr fell the stability threshold stayed ahead;
+the moment it went constant, sharpening caught up. The sharpening does not
+saturate within any practical fixed-lr range: **Muon (constant-magnitude
+updates) cannot take this objective to convergence at any floored lr.** The
+options are perpetual ~1/t decay (training crawls) or an adaptive trunk
+(AdamW).
+
+**AdamW is not immune either (job 54423079).** Identical objective stack,
+AdamW at 5e-5: floor ~505-527 (healthy gnorm 1-2.5e3, 5-10x below any Muon
+arm; clean e1 checkpoint in `checkpoints_adamw/`), ~4-5k steps of floor
+residence, then excursions from global step ~15k — gentler (spikes absorbed
+in tens of batches, partial recoveries) but the loss still bounces 10x off
+its floor. The invariant across Muon-frozen, Muon-decaying and AdamW: **~4-6k
+steps of floor residence, then excursions, at any constant lr.**
+
+**Governor + rewind (jobs 54457716 v1, 54495702 v2) — helped, then
+death-spiraled.** v1 (trigger 8x, EMA merely clipped) fired 1.5k batches
+late because the band chased the excursion. v2 (trigger 4x, band FROZEN
+outside 2x, RewindBuffer restoring model+optimizer to a healthy snapshot)
+produced clean e1/e2 checkpoints and rode to step 30k without a 1e7 runaway
+— but with a new failure mode: the first rewind consumes the snapshots, a
+recurring excursion then triggers with nothing to restore, the frozen band
+sits far below the elevated gnorms, and the trigger re-fires every cooldown
+— 8 drops ratcheted lr to 5.8e-7 with the state stranded ~10x above its
+floor. A v3 would need (i) a permanent "golden" best-loss snapshot so rewind
+never runs dry, and (ii) a re-arm condition (no further drops until the
+state has actually returned to band). Not built — see the production recipe
+below for why.
+
+## Production recipe (current): decay-and-harvest
+
+What is measured to WORK: the run is clean while the lr is decaying and for
+a while at the floor, every excursion onset is chaotic (identical configs
+tripped at b12.4k and b16.6k), and no gradient-triggered mechanism preserves
+the basin once an excursion is underway. So the practical A2 recipe is:
+
+    train with CosineToFloor (5e-5 -> 1e-5 over 15k steps), harvest the
+    per-epoch checkpoints, stop at the first excursion (the non-finite
+    guard + watcher make it visible); the last pre-excursion checkpoint is
+    the model.
+
+Clean checkpoints in hand on Midway (all fancy-contract, edm + increment
+units): `checkpoints_fullstack/` e1 (loss 559, Muon+decay),
+`checkpoints_adamw/` e1 (loss ~527, AdamW), `checkpoints_gov2/` e1
+(+ e2, post-excursion — check before use). Whether e1-scale training passes
+the rung gates is exactly what the climatology/bias eval decides
+(`outputs/rsi_a2_eval/fullstack_e1_eval_suite.pt`, save-as-you-go).
+
+**Open question (documented, deliberately not pursued further now):** why
+the RSI objective's sharpening does not saturate — candidate: the coupled
+anchor makes the back/mid-slot task near-deterministic and the model keeps
+extracting fit (the design goal!), so curvature grows with fit quality
+indefinitely. If the ladder later needs longer training, governor v3 or a
+persistent ~1/t decay are the leads.
 
 ## The fix
 

@@ -253,3 +253,83 @@ def test_ocean_target_stack_carries_the_anchors_own_time_boundary():
     state_t = [float(b["surface_in_seq"][0, i].flatten()[0]) for i in range(W)]
     got = [float(stack[0, i].flatten()[0]) for i in range(W + 1)]
     assert got == [100.0 + t for t in ([anchor_t] + state_t)]
+
+
+# ---------------------------------------------------------------------------
+# Gradient clipping and the non-finite-loss guard
+# ---------------------------------------------------------------------------
+
+
+def _step(model, sched, batch, window_mode=True, **kw):
+    opt = torch.optim.SGD(model.parameters(), lr=1e-4)
+    return _train_step(
+        model=model, scheduler_loss=sched, sample=batch, optimizer=opt,
+        grad_scaler=None, amp_dtype=None, device=torch.device("cpu"),
+        window_mode=window_mode, anchor_frames=1, **kw,
+    )
+
+
+def test_grad_clipping_is_applied_and_reported():
+    """train_diffusion had NO clipping — train.py clips, this recipe did not.
+
+    Worse, `amip_diffusion*.yaml` shipped a ``grad_clip_norm`` key that nothing
+    in this recipe read, so it looked configured while being a no-op. An RSI A2
+    run then trained cleanly for 11,700 batches and ran away exponentially with
+    nothing to arrest it (e-folding every ~93 batches).
+    """
+    W = 3
+    loader, _ = _rsi_loader(W)
+    batch = next(iter(loader))
+    sched = RSIScheduler(window_size=W, num_steps=2)
+
+    out = _step(_wrapper(), sched, batch, grad_clip_norm=1.0)
+    assert "grad_norm" in out, "the pre-clip norm must be reported"
+    assert out["grad_norm"] >= 0.0
+
+    # …and stays absent when clipping is off, so the two paths are distinguishable.
+    out_off = _step(_wrapper(), sched, batch, grad_clip_norm=0.0)
+    assert "grad_norm" not in out_off
+
+
+def test_grad_clipping_actually_bounds_the_update():
+    W = 3
+    loader, _ = _rsi_loader(W)
+    batch = next(iter(loader))
+    sched = RSIScheduler(window_size=W, num_steps=2)
+    model = _wrapper()
+    opt = torch.optim.SGD(model.parameters(), lr=0.0)   # measure grads, don't move
+    _train_step(
+        model=model, scheduler_loss=sched, sample=batch, optimizer=opt,
+        grad_scaler=None, amp_dtype=None, device=torch.device("cpu"),
+        window_mode=True, anchor_frames=1, grad_clip_norm=1e-4,
+    )
+    total = torch.sqrt(sum((p.grad.detach() ** 2).sum()
+                           for p in model.parameters() if p.grad is not None))
+    assert float(total) <= 1e-4 * 1.01, f"grads not clipped: {float(total)}"
+
+
+def test_non_finite_loss_aborts_instead_of_stepping():
+    """One NaN update poisons every weight; the run cannot recover from it.
+
+    The A2 run ground out 39,314 NaN batches over 8.5 h on a dedicated 4xH100
+    node because nothing checked.
+    """
+    W = 3
+    loader, _ = _rsi_loader(W)
+    batch = next(iter(loader))
+
+    class _NanScheduler(RSIScheduler):
+        def compute_loss(self, *a, **kw):
+            out = super().compute_loss(*a, **kw)
+            loss = out[0] if isinstance(out, tuple) else out
+            nan = loss * float("nan")
+            return (nan, out[1]) if isinstance(out, tuple) else nan
+
+    sched = _NanScheduler(window_size=W, num_steps=2)
+    model = _wrapper()
+    before = [p.detach().clone() for p in model.parameters()]
+    with pytest.raises(RuntimeError, match="non-finite"):
+        _step(model, sched, batch, grad_clip_norm=1.0)
+    # and it must not have stepped
+    for p, b in zip(model.parameters(), before):
+        torch.testing.assert_close(p.detach(), b)
