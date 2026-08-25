@@ -121,3 +121,22 @@ ensemble_size: 1
 # produce E identical members and exactly zero spread (the driver raises).
 perturber: null
 perturber_scales: {}
+
+# ── upstream-parity knobs (Combined-cascade bias protocol) ────────────────
+# Pin the (single) initial condition to a calendar date (YYYY-MM-DD, 00Z),
+# resolved against the store's own time coordinate. null = the default
+# earliest-admissible-IC behavior.
+ic_date: null
+# Solver steps for the downscaler stage on the combined path; null = the
+# downscaler sampler config's own num_steps (x_ddc: 5).
+downscaler_num_steps: null
+# Bilinear factor for downsampling the oracle init window when the drive's
+# dataset is a finer grid than the forecaster's; null = the downscaler's own
+# downsample_factor on the combined path, off otherwise.
+init_downsample_factor: null
+# Upstream bias.py's headline table: lat-weighted mean + RMSE of the
+# time-mean bias per field. Entries are [label, variable, level-hPa|null];
+# null variables list = upstream's default nine fields.
+headline:
+  enabled: False
+  variables: null

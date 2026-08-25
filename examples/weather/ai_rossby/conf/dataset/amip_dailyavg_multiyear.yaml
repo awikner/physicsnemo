@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP daily-avg FULL-RESOLUTION (180x360) archive — MULTI-YEAR variant.
+#
+# Identical to dataset/amip_dailyavg.yaml except zarr_path names the archive
+# DIRECTORY, which routes the loader to ClimateZarrMultiYearDataset (the same
+# directory-vs-.zarr routing amip_dailyavg_coarse_multiyear.yaml uses). Built
+# for the upstream-parity Combined-model bias evaluation: the eval drive runs
+# ON this store, so truth frames, lat weights and every scorer accumulator
+# come out at 180x360; the coarse forecaster's oracle init window is
+# bilinearly downsampled on the fly (validate_diffusion's
+# init_downsample_factor — the coarse store's own build operator, so the two
+# are numerically identical).
+#
+# boundary_zarr_path stays null: the full-res store carries its own boundary
+# variables at native resolution, which is exactly what amip_erdm_fancy's
+# c_grid contract wants (c_grid_downsample: 4 reduces them internally).
+#
+# The SST suite is ON here (the fancy contracts require it); the climatology
+# .npz is per-gridpoint at 180x360 and lives beside the stores under
+# norm_stats/.
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/scratch/09979/awikner/physicsnemo-zarr}/amip_dailyavg
+val_zarr_path: null
+mean_path: ${oc.env:AI_ROSSBY_DATA,/scratch/09979/awikner/physicsnemo-zarr}/amip_dailyavg/normalize_mean_dailyavg.nc
+std_path: ${oc.env:AI_ROSSBY_DATA,/scratch/09979/awikner/physicsnemo-zarr}/amip_dailyavg/normalize_std_dailyavg.nc
+delta_std_path: null
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+forecast_lead_times: [4]
+num_samples_per_epoch: null
+batch_size: 1
+num_workers: 4
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+nan_fill_default: 0.0
+nan_fill_values:
+  sea_surface_temperature_monthly_interp: 270.0
+  sea_ice_cover_monthly_interp: 0.0
+shuffle: True
+normalize_constant_boundary: False
+normalize_diagnostic: True
+# Runtime coast fade — live here (the full-res boundaries carry NaN),
+# matching upstream's smooth_nan_boundaries training-time fill exactly.
+smooth_nan_boundaries: True
+smooth_sigma: 1.5
+smooth_kernel_size: 5
+smooth_n_iters: 10
+# SST suite ON: the fancy contracts derive the anomaly channel + the
+# global-mean trend scalar from the boundary stream at load time.
+sst_anomaly_channel: append
+scalar_forcing: global_mean_sst
+sst_anomaly_scale: anom_std
+sst_climatology_path: ${oc.env:AI_ROSSBY_DATA,/scratch/09979/awikner/physicsnemo-zarr}/norm_stats/sst_climatology.npz

@@ -177,6 +177,35 @@ def _interleave_ensemble(sample, ensemble_size):
     return out
 
 
+def _downsample_state_window(window: dict, factor: int) -> dict:
+    """Bilinearly downsample the STATE keys of a stacked window dict.
+
+    Applies ``F.interpolate(scale_factor=1/factor, mode="bilinear",
+    align_corners=False)`` — bit-for-bit the operator that built the coarse
+    store (tools/data/amip/coarsen_zarr.py) — to ``surface_in`` /
+    ``upper_air_in`` / ``diagnostic`` only. Boundary and calendar entries are
+    the forcing side and must NOT be touched: a coarse-grid forecaster with an
+    internal c_grid stride consumes them at native resolution. Upper air is
+    6-D ``(B, W, Cu, L, H, W)``; interpolate is 4-D-only, so leading dims are
+    flattened (bilinear is per-channel, so this is exact).
+    """
+    import torch.nn.functional as F
+
+    out = dict(window)
+    for key in ("surface_in", "upper_air_in", "diagnostic"):
+        v = out.get(key)
+        if not torch.is_tensor(v):
+            continue
+        lead = v.shape[:-2]
+        flat = v.reshape(-1, 1, *v.shape[-2:])
+        ds = F.interpolate(
+            flat, scale_factor=1.0 / factor, mode="bilinear",
+            align_corners=False,
+        )
+        out[key] = ds.reshape(*lead, *ds.shape[-2:])
+    return out
+
+
 @dataclass
 class StepContext:
     """Everything a scorer may need for one (frame, channel-group) — computed
@@ -293,6 +322,10 @@ class DiffusionRolloutValidator:
         split_ensemble_across_ranks: bool = False,
         scorers: Sequence = (),
         on_frame_scored: Optional[Callable[[int], None]] = None,
+        ic_indices: Optional[Sequence[int]] = None,
+        frame_transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        unpack_wrapper=None,
+        init_downsample_factor: Optional[int] = None,
     ):
         if ensemble_size < 1:
             raise ValueError("ensemble_size must be ≥ 1")
@@ -367,6 +400,29 @@ class DiffusionRolloutValidator:
         # validation path is unchanged.
         self.scorers = list(scorers)
         self.on_frame_scored = on_frame_scored
+        # Explicit initial conditions (e.g. a calendar-date IC resolved by the
+        # eval driver). Overrides candidate GENERATION in _select_ic_indices;
+        # the admissibility bound still applies and violating it raises.
+        self.explicit_ic_indices = (
+            [int(i) for i in ic_indices] if ic_indices is not None else None
+        )
+        # Upstream-parity cascade hooks (all default-off; the mid-training
+        # path is byte-identical without them):
+        #   frame_transform  — applied to each emitted packed frame BEFORE
+        #     unpacking/scoring (e.g. strip_ocean -> downscale to 180x360).
+        #   unpack_wrapper   — the wrapper whose unpack_state matches the
+        #     TRANSFORMED frame (e.g. the downscaler); defaults to `wrapper`.
+        #   init_downsample_factor — bilinearly downsample the oracle init
+        #     window's STATE keys by this factor before packing, so a
+        #     coarse-grid forecaster can be driven from a full-res store
+        #     (F.interpolate bilinear align_corners=False — bit-for-bit the
+        #     coarse store's own build operator, and stats are per-channel
+        #     scalars, so downsample-then-normalize == the coarse store).
+        self.frame_transform = frame_transform
+        self.unpack_wrapper = unpack_wrapper
+        self.init_downsample_factor = (
+            int(init_downsample_factor) if init_downsample_factor else None
+        )
 
         # Dispatch on scheduler: rolling = has sample_rollout.
         self.window_mode = hasattr(self.scheduler, "sample_rollout")
@@ -375,6 +431,16 @@ class DiffusionRolloutValidator:
             if self.window_mode
             else 0
         )
+        if not self.window_mode and (
+            self.frame_transform is not None
+            or self.unpack_wrapper is not None
+            or self.init_downsample_factor
+        ):
+            raise ValueError(
+                "frame_transform / unpack_wrapper / init_downsample_factor are "
+                "window-mode (rolling scheduler) features; this scheduler has "
+                "no sample_rollout."
+            )
         # Frames the scheduler wants for its first window. ERDM/RFM noise the
         # true W-frame window onto their t=0 staircase; a data-coupled
         # scheduler (RSI) additionally needs the frame BEFORE the window, as
@@ -509,6 +575,25 @@ class DiffusionRolloutValidator:
             last_future = self.horizon * self.step_size
             first_past = 0
         max_idx = self.dataset.n_time - last_future - 1
+        if self.explicit_ic_indices is not None:
+            # Explicit ICs (calendar-date pinning): honor them verbatim, but
+            # the admissibility bound is not negotiable — an IC too close to
+            # the store's end would clamp the forcing gather and silently
+            # roll the last frames on stale forcings.
+            bad = [i for i in self.explicit_ic_indices
+                   if not (first_past <= i <= max_idx)]
+            if bad:
+                raise ValueError(
+                    f"explicit initial condition(s) {bad} outside the "
+                    f"admissible range [{first_past}, {max_idx}] for "
+                    f"horizon={self.horizon}, step_size={self.step_size}, "
+                    f"n_time={self.dataset.n_time}."
+                )
+            candidates = list(self.explicit_ic_indices)
+            if self.member_split:
+                return candidates
+            return [c for i, c in enumerate(candidates)
+                    if i % world_size == rank]
         candidates = list(range(first_past, max_idx + 1, self.ic_stride))
         if not candidates:
             # Refuse rather than score nothing (2026-08-14). An empty IC list
@@ -915,6 +1000,10 @@ class DiffusionRolloutValidator:
         init_window = self._to_device(
             self._stack_window(batch_ics, w_offset=self.window_size)
         )
+        if self.init_downsample_factor:
+            init_window = _downsample_state_window(
+                init_window, self.init_downsample_factor
+            )
         init_window_ens = self.perturber(
             init_window, self.local_ensemble_size, generator=gen
         )
@@ -938,12 +1027,18 @@ class DiffusionRolloutValidator:
             - 1
             + int(bool(getattr(self.scheduler, "nocean", 0)))
         )
-        traj_frames = [
-            self._to_device(
-                self._stack([t + i * self.step_size for t in batch_ics])
-            )
-            for i in range(traj_len)
-        ]
+        # Only four keys are consumed below. Prune BEFORE moving to device:
+        # a full sample dict at 180x360 is ~40 MB, and holding the whole
+        # trajectory of them on GPU is ~73 GB at a 5-year horizon (measured
+        # OOM headroom analysis, 2026-08-25) — the pruned set is ~5 GB.
+        _traj_keys = ("surface_in", "varying_boundary", "calendar",
+                      "constant_boundary")
+        traj_frames = []
+        for i in range(traj_len):
+            full = self._stack([t + i * self.step_size for t in batch_ics])
+            traj_frames.append(self._to_device(
+                {k: v for k, v in full.items() if k in _traj_keys}
+            ))
 
         def _stack_traj(key):
             xs = [f[key] for f in traj_frames]
@@ -958,6 +1053,7 @@ class DiffusionRolloutValidator:
             }
         )
         c_scalar_traj = _stack_traj("calendar")
+        del traj_frames
         if self.local_ensemble_size > 1:
             c_grid_traj = c_grid_traj.repeat_interleave(
                 self.local_ensemble_size, dim=0
@@ -984,7 +1080,12 @@ class DiffusionRolloutValidator:
                 continue
             m_idx = log_step_to_idx[k]
             x_k = traj[:, k - 1]
-            unpacked = wrapper.unpack_state(x_k)
+            if self.frame_transform is not None:
+                # e.g. strip the ocean tail and downscale to the scoring
+                # grid; the transformed frame is unpacked by unpack_wrapper.
+                x_k = self.frame_transform(x_k)
+            _unpack = self.unpack_wrapper if self.unpack_wrapper is not None else wrapper
+            unpacked = _unpack.unpack_state(x_k)
             target = self._to_device(
                 self._stack([t + k * self.step_size for t in batch_ics])
             )

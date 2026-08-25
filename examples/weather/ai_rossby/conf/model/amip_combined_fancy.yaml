@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The amip_v2 Combined cascade — ERDM_fancy forecaster + x_DDC-DiT downscaler.
+# This is the pairing upstream's bias.py evaluates (its ONLY supported mode:
+# the forecaster-alone path was removed upstream), and therefore the
+# configuration behind the reference headline-bias numbers. Consumed by
+# rollout.py and by climate_eval_suite's combined path — NOT by build_model()
+# (two models + two samplers cannot be expressed by Hydra's one-choice-per-
+# group composition; the drivers read the four YAMLs directly).
+#
+# Checkpoints are the TRANSLATED .mdlus artifacts (Module.from_checkpoint
+# format) — the raw Lightning last.ckpt files do NOT load here. Provenance:
+# hpc/scripts/translate_v2_checkpoints_polaris.pbs; verified max|diff| = 0
+# against upstream's own forward for both stages.
+timedelta_hours: 24
+forecaster:
+  model: amip_erdm_fancy          # 154 ch (151 + 3 ocean), 45x90, c_grid 1-deg
+  sampler: erdm_v2                # conf/sampler/erdm_v2.yaml (v2 parameters!)
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/translated/erdm_fancy.mdlus
+downscaler:
+  model: amip_x_ddc_dit           # 302 -> 151 @ 180x360, DiT decoder
+  sampler: x_ddc                  # DataDependentInterpolant, num_steps 5
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/translated/x_ddc_dit.mdlus

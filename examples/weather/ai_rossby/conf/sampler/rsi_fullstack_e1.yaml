@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Inference sampler for the RSI fullstack-e1 checkpoint (Midway3 run
+# rsi_fancy_a2_fullstack, epoch-1 harvest of the decay-and-harvest recipe).
+# BYTE-MIRRORS the run's resolved training loss config — a scheduler built
+# with different gamma/beta/precond than the checkpoint trained with samples
+# silently wrong. noise_scale_path is the per-channel increment-scale
+# artifact (sigma_c_fancy154.pt) staged next to the stores.
+_target_: physicsnemo.experimental.diffusion.RSIScheduler
+window_size: 6
+num_steps: 2
+solver: heun
+integrator: coeff
+final_denoise: false
+parameterization: state
+h1_precond: edm
+beta: linear
+beta_floor: 1.0e-3
+gamma_0: 1.0
+gamma_1: 0.04
+gamma_profile: geometric
+delta_std: 1.0
+time_eps: 1.0e-3
+label_mode: tau
+anchor_noise: 0.0
+weighting: snr_bump
+P_mean: 2.0
+P_std: 1.2
+w_1: 1.0
+w_z: 1.0
+eps_scale: 0.0
+eps_tmin: 0.0
+eps_tmax: 1.0
+noise: gaussian
+l_max: 90
+noise_scale_path: ${oc.env:AI_ROSSBY_DATA,/scratch/09979/awikner/physicsnemo-zarr}/norm_stats/sigma_c_fancy154.pt
+spectrum_path: null
+ocean_loss_weight: 1.0

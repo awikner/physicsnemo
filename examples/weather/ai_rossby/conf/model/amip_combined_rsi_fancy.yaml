@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI-through-the-Combined-cascade — the RSI fullstack-e1 forecaster paired
+# with the SAME x_DDC-DiT downscaler as amip_combined_fancy.yaml, so RSI can
+# be scored under upstream's exact bias protocol (downscaled to 180x360,
+# full-res truth). The downscaler is forecaster-agnostic: its conditioning is
+# the bilinear-upsampled coarse frame, whoever produced it.
+#
+# The forecaster sampler MUST mirror the checkpoint's training scheduler —
+# sampler/rsi_fullstack_e1.yaml is a byte-mirror of the run's resolved Hydra
+# loss config (outputs/rsi_fancy_a2_fullstack/.hydra/config.yaml on Midway3).
+timedelta_hours: 24
+forecaster:
+  model: amip_rsi_fancy           # 154 ch, 45x90, W=6, ocean tail
+  sampler: rsi_fullstack_e1
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/fullstack/RollingDiTWrapper.0.1.mdlus
+downscaler:
+  model: amip_x_ddc_dit
+  sampler: x_ddc
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/translated/x_ddc_dit.mdlus

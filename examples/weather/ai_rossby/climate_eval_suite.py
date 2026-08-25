@@ -586,6 +586,99 @@ def derive_spread_skill(rmse_acc: dict, log_steps: Sequence[int]) -> dict[str, f
 # ---------------------------------------------------------------------------
 
 
+def _is_combined_model_cfg(model_cfg) -> bool:
+    """True when cfg.model is a two-block cascade config (amip_combined*.yaml):
+    ``forecaster:`` and ``downscaler:`` each carrying {model, sampler,
+    checkpoint}. Such a config cannot go through build_model()."""
+    try:
+        return (
+            model_cfg is not None
+            and "forecaster" in model_cfg
+            and "downscaler" in model_cfg
+        )
+    except TypeError:
+        return False
+
+
+#: Upstream amip_v2's headline fields (bias.py HEADLINE_LEVELS + HEADLINE_2D):
+#: [label, variable name, pressure level (hPa) or None].
+DEFAULT_HEADLINE_VARIABLES = (
+    ("z500", "geopotential", 500),
+    ("u250", "u_component_of_wind", 250),
+    ("t850", "temperature", 850),
+    ("q850", "specific_humidity", 850),
+    ("t2m", "2m_temperature", None),
+    ("prate", "PRATEsfc_24h", None),
+    ("q2m", "2m_specific_humidity", None),
+    ("u10m", "10m_u_component_of_wind", None),
+    ("v10m", "10m_v_component_of_wind", None),
+)
+
+
+def compute_headline_bias(clim_maps: dict, catalog: VariableCatalog,
+                          spec) -> dict:
+    """Upstream bias.py's headline statistics from the finalized bias maps.
+
+    For each ``(label, name, level)``: lat-weighted MEAN and lat-weighted RMSE
+    of the time-mean bias map — cos-lat weights normalized to mean 1, the same
+    convention as upstream's ``headline_bias`` (and as
+    ``lat_weighted_global_scalars``, which is reused for both reductions:
+    ``rmse = sqrt(weighted_mean(bias**2))``). Levels are resolved BY VALUE
+    against the catalog (never by hard index — the level axis is the model
+    config's list); names fall back surface -> diagnostic, and an unknown
+    name or level raises rather than silently skipping.
+    """
+    out: dict = {}
+    levels = [float(lv) for lv in catalog.levels]
+    for entry in spec:
+        label, name = str(entry[0]), str(entry[1])
+        level = entry[2] if len(entry) > 2 else None
+        if level is not None:
+            if name not in catalog.upper_air:
+                raise ValueError(
+                    f"headline {label}: {name!r} not in upper_air variables "
+                    f"{catalog.upper_air}"
+                )
+            if float(level) not in levels:
+                raise ValueError(
+                    f"headline {label}: level {level} hPa not in the model's "
+                    f"levels {levels}"
+                )
+            bias = clim_maps["upper_air_bias"][
+                catalog.upper_air.index(name), levels.index(float(level))
+            ]
+        elif name in catalog.surface:
+            bias = clim_maps["surface_bias"][catalog.surface.index(name)]
+        elif name in catalog.diagnostic:
+            if "diagnostic_bias" not in clim_maps:
+                raise ValueError(
+                    f"headline {label}: {name!r} is a diagnostic but the "
+                    f"climatology maps carry no diagnostic_bias block"
+                )
+            bias = clim_maps["diagnostic_bias"][catalog.diagnostic.index(name)]
+        else:
+            raise ValueError(
+                f"headline {label}: {name!r} not in surface "
+                f"{catalog.surface} or diagnostic {catalog.diagnostic}"
+            )
+        b = bias.unsqueeze(0).double()
+        mean = float(lat_weighted_global_scalars(b)[0])
+        rmse = float(lat_weighted_global_scalars(b ** 2)[0].sqrt())
+        out[label] = {"mean_bias": mean, "rmse_bias": rmse}
+    return out
+
+
+def format_headline_table(headline: dict) -> list[str]:
+    """Fixed-width lines mirroring upstream bias.py's print_headline."""
+    rows = ["Headline climatological bias (lat-weighted, predicted - truth):"]
+    for label, s in headline.items():
+        rows.append(
+            f"  {label:<6} mean {s['mean_bias']:+12.5g}   "
+            f"rmse {s['rmse_bias']:12.5g}"
+        )
+    return rows
+
+
 class EvalSuiteRunner:
     """One rollout, every scorer, save-as-you-go, schema-v2 results.
 
@@ -604,13 +697,16 @@ class EvalSuiteRunner:
 
     def __init__(self, drive: DiffusionRolloutValidator, scorers: Sequence, *,
                  output_path: str, partial_save_every_frames: int = 0,
-                 rank: int = 0, config_echo: Optional[dict] = None, log=None):
+                 rank: int = 0, config_echo: Optional[dict] = None, log=None,
+                 headline_spec=None, catalog: Optional[VariableCatalog] = None):
         self.drive = drive
         self.scorers = list(scorers)
         self.output_path = str(output_path)
         self.partial_every = int(partial_save_every_frames)
         self.rank = int(rank)
         self.config_echo = dict(config_echo or {})
+        self.headline_spec = list(headline_spec) if headline_spec else None
+        self.catalog = catalog
         self.log = log or logger
         self._frames_scored = 0
         if self.partial_every > 0:
@@ -638,6 +734,14 @@ class EvalSuiteRunner:
         }
         for scorer in self.scorers:
             results.update(scorer.finalize(local_only=local_only))
+        if (
+            self.headline_spec
+            and self.catalog is not None
+            and "climatology" in results
+        ):
+            results["headline"] = compute_headline_bias(
+                results["climatology"], self.catalog, self.headline_spec
+            )
         if self.drive.ensemble_size > 1:
             results["spread_skill"] = derive_spread_skill(
                 rmse_acc, self.drive.log_steps
@@ -670,6 +774,9 @@ class EvalSuiteRunner:
                         f"stability: {group} RMSE jump at step {step} — "
                         f"{val:.4g} vs trailing median {med:.4g}"
                     )
+            if "headline" in results:
+                for line in format_headline_table(results["headline"]):
+                    self.log.info(line)
             torch.save(_to_cpu(results), self.output_path)
             self.log.info(f"wrote eval suite results to {self.output_path}")
         return results
@@ -754,19 +861,6 @@ def main(cfg) -> None:
             "directive is still line 1 of conf/validation/eval_suite.yaml.)"
         )
 
-    raw_ds, ds_cfg = _build_eval_dataset(cfg, log)
-    wrapper = build_model(cfg.model).to(dist.device)
-    ckpt_dir = _resolve_path(str(eval_cfg.checkpoint_dir))
-    assert_checkpoint_dir_contract(wrapper, ckpt_dir, log=log)
-    loaded_epoch = load_checkpoint(ckpt_dir, models=wrapper, device=dist.device)
-    log.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
-    wrapper.eval()
-    if getattr(raw_ds, "forcing_pipeline", None) is not None:
-        # No-op for models without a c_grid contract (deterministic families).
-        raw_ds.forcing_pipeline.assert_matches(wrapper, name="cfg.model")
-
-    catalog = VariableCatalog.from_cfg_model(cfg.model)
-    has_diagnostic = len(catalog.diagnostic) > 0
     horizon = int(eval_cfg.horizon)
     ensemble_size = int(eval_cfg.get("ensemble_size", 1))
     perturber = (
@@ -778,44 +872,135 @@ def main(cfg) -> None:
         else None
     )
 
-    # ── family dispatch ────────────────────────────────────────────────────
-    # Diffusion wrappers expose a pack surface: pack_state (single-step
-    # AmipDiTWrapper) OR pack_window_state (the rolling _RollingPackUnpackMixin
-    # family — RollingDiTWrapper/ERDMWrapper have NO pack_state, which is why
-    # inference.py's pack_state-only signal is insufficient here; caught by
-    # the fused-suite regression on the RSI fancy checkpoint, Midway job
-    # 54834641). Deterministic families (SFNO/Pangu/ArchesWeather) expose
-    # neither.
-    _inner = _inner_wrapper(wrapper)
-    is_diffusion = hasattr(_inner, "pack_state") or hasattr(_inner, "pack_window_state")
-    if is_diffusion:
-        import hydra as _hydra
+    # Upstream-parity cascade hooks — populated only on the combined path.
+    frame_transform = None
+    unpack_wrapper = None
+    init_downsample_factor = None
 
-        scheduler = _hydra.utils.instantiate(cfg.loss).to(dist.device)
-        adopt_ocean_contract(scheduler, wrapper)
-        drive_model = wrapper
+    combined_spec = cfg.model if _is_combined_model_cfg(cfg.model) else None
+    if combined_spec is not None:
+        # ── Combined (forecaster + downscaler) cascade ──────────────────────
+        # Upstream amip_v2's bias protocol: the coarse forecaster streams, each
+        # emitted frame is downscaled to the full grid, and the climatology is
+        # scored there. cfg.model is the two-block {forecaster, downscaler}
+        # config (amip_combined*.yaml); the DATASET, catalog and step
+        # resolution all key off the FORECASTER's model config, loaded the
+        # same way rollout.py's cascade does. No import cycle: rollout.py
+        # never imports this module.
+        from omegaconf import open_dict
+
+        from rollout import _build_stage, _load_group  # noqa: E402
+        from physicsnemo.experimental.models.amip_si import CombinedModule
+
+        f_model_cfg = _load_group("model", str(combined_spec.forecaster.model))
+        cfg_eff = cfg.copy()
+        with open_dict(cfg_eff):
+            cfg_eff.model = f_model_cfg
+        raw_ds, ds_cfg = _build_eval_dataset(cfg_eff, log)
+        forecaster, f_sched = _build_stage(
+            combined_spec.forecaster, device=dist.device, log=log
+        )
+        downscaler, d_sched = _build_stage(
+            combined_spec.downscaler, device=dist.device, log=log
+        )
+        adopt_ocean_contract(f_sched, forecaster)
+        combined = CombinedModule(
+            forecaster=forecaster,
+            forecaster_scheduler=f_sched,
+            downscaler=downscaler,
+            downscaler_scheduler=d_sched,
+        ).to(dist.device)
+        combined.eval()
+        wrapper = forecaster
+        model_cfg_for_catalog = f_model_cfg
+        scheduler = f_sched
+        drive_model = forecaster
+        is_diffusion = True
         sampler_num_steps = _resolve_eval_sampler_num_steps(
             eval_cfg.get("sampler_num_steps", None)
         )
-    else:
-        # cfg.loss is never instantiated here — deterministic loss configs
-        # (mse.yaml etc.) carry no _target_ and would break instantiate.
-        probe = raw_ds[0]
-        shim = DeterministicPackShim(
-            wrapper,
-            catalog=catalog,
-            n_constant=int(probe["constant_boundary"].shape[0]),
-            n_varying=int(probe["varying_boundary"].shape[0]),
-            has_diagnostic=has_diagnostic and "diagnostic" in probe,
-        ).to(dist.device)
-        scheduler = DeterministicStepAdapter(
-            shim, optional_kwargs=_model_optional_kwarg_names(wrapper)
+        _d_steps = eval_cfg.get("downscaler_num_steps", None)
+        _d_steps = int(_d_steps) if _d_steps is not None else None
+
+        def frame_transform(x, _c=combined, _s=f_sched, _n=_d_steps):
+            # Strip the predicted ocean tail, then downscale to the scoring
+            # grid — parity with CombinedModule.windowed_step (the tail is a
+            # diagnostic block the downscaler was never trained on).
+            return _c._downscale(_s.strip_ocean(x), num_steps=_n)
+
+        unpack_wrapper = downscaler
+        # The forecaster runs at the coarse grid but the drive's dataset is
+        # the full-res store: downsample the oracle init window's STATE by
+        # the downscaler's own factor (the coarse store's build operator).
+        init_downsample_factor = int(
+            eval_cfg.get("init_downsample_factor", None)
+            or getattr(downscaler, "downsample_factor", 4)
         )
-        drive_model = shim
-        sampler_num_steps = None
-        if eval_cfg.get("sampler_num_steps", None) is not None:
-            log.info("sampler_num_steps ignored for a deterministic checkpoint")
-        check_deterministic_ensemble(perturber, ensemble_size)
+        if getattr(raw_ds, "forcing_pipeline", None) is not None:
+            raw_ds.forcing_pipeline.assert_matches(
+                forecaster, name="model.forecaster"
+            )
+        ckpt_dir = (
+            f"{combined_spec.forecaster.checkpoint} + "
+            f"{combined_spec.downscaler.checkpoint}"
+        )
+        catalog = VariableCatalog.from_cfg_model(model_cfg_for_catalog)
+        has_diagnostic = len(catalog.diagnostic) > 0
+    else:
+        raw_ds, ds_cfg = _build_eval_dataset(cfg, log)
+        wrapper = build_model(cfg.model).to(dist.device)
+        ckpt_dir = _resolve_path(str(eval_cfg.checkpoint_dir))
+        assert_checkpoint_dir_contract(wrapper, ckpt_dir, log=log)
+        loaded_epoch = load_checkpoint(ckpt_dir, models=wrapper, device=dist.device)
+        log.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
+        wrapper.eval()
+        if getattr(raw_ds, "forcing_pipeline", None) is not None:
+            # No-op for models without a c_grid contract (deterministic families).
+            raw_ds.forcing_pipeline.assert_matches(wrapper, name="cfg.model")
+
+        catalog = VariableCatalog.from_cfg_model(cfg.model)
+        has_diagnostic = len(catalog.diagnostic) > 0
+
+        # ── family dispatch ──────────────────────────────────────────────
+        # Diffusion wrappers expose a pack surface: pack_state (single-step
+        # AmipDiTWrapper) OR pack_window_state (the rolling
+        # _RollingPackUnpackMixin family — RollingDiTWrapper/ERDMWrapper have
+        # NO pack_state, which is why inference.py's pack_state-only signal
+        # is insufficient here; caught by the fused-suite regression on the
+        # RSI fancy checkpoint, Midway job 54834641). Deterministic families
+        # (SFNO/Pangu/ArchesWeather) expose neither.
+        _inner = _inner_wrapper(wrapper)
+        is_diffusion = hasattr(_inner, "pack_state") or hasattr(
+            _inner, "pack_window_state"
+        )
+        if is_diffusion:
+            import hydra as _hydra
+
+            scheduler = _hydra.utils.instantiate(cfg.loss).to(dist.device)
+            adopt_ocean_contract(scheduler, wrapper)
+            drive_model = wrapper
+            sampler_num_steps = _resolve_eval_sampler_num_steps(
+                eval_cfg.get("sampler_num_steps", None)
+            )
+        else:
+            # cfg.loss is never instantiated here — deterministic loss configs
+            # (mse.yaml etc.) carry no _target_ and would break instantiate.
+            probe = raw_ds[0]
+            shim = DeterministicPackShim(
+                wrapper,
+                catalog=catalog,
+                n_constant=int(probe["constant_boundary"].shape[0]),
+                n_varying=int(probe["varying_boundary"].shape[0]),
+                has_diagnostic=has_diagnostic and "diagnostic" in probe,
+            ).to(dist.device)
+            scheduler = DeterministicStepAdapter(
+                shim, optional_kwargs=_model_optional_kwarg_names(wrapper)
+            )
+            drive_model = shim
+            sampler_num_steps = None
+            if eval_cfg.get("sampler_num_steps", None) is not None:
+                log.info("sampler_num_steps ignored for a deterministic checkpoint")
+            check_deterministic_ensemble(perturber, ensemble_size)
 
     # The scoring-side denormalizer must live on the MODEL's level set: when
     # the pressure-level subset fired in _build_dataset (17-level model on the
@@ -913,6 +1098,49 @@ def main(cfg) -> None:
             "IGNORED — set the top-level eval_suite.ensemble_size instead."
         )
 
+    # ── calendar-pinned initial condition ──────────────────────────────────
+    ic_indices = None
+    ic_date = eval_cfg.get("ic_date", None)
+    ic_resolved_time = None
+    if ic_date:
+        # Reuse inference.py's date->global-index machinery (cftime- and
+        # datetime64-aware; multi-year stores concatenated chronologically).
+        from inference import _full_time_coord, resolve_init_schedule
+
+        y, m, d = (int(x) for x in str(ic_date).split("-"))
+        times = _full_time_coord(raw_ds)
+        matches = resolve_init_schedule(
+            times, months=[m], days=[d], hours=[0], years=[y]
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                f"eval_suite.ic_date={ic_date} resolved to {len(matches)} "
+                f"row(s) in the store — expected exactly one 00Z frame."
+            )
+        ic_indices = matches
+        ic_resolved_time = str(times[matches[0]])
+        log.info(
+            f"ic_date {ic_date} -> global row {matches[0]} ({ic_resolved_time})"
+        )
+
+    # ── headline (upstream bias.py's scalar table) ──────────────────────────
+    headline_cfg = eval_cfg.get("headline", None)
+    headline_spec = None
+    if headline_cfg is not None and bool(headline_cfg.get("enabled", False)):
+        raw_spec = headline_cfg.get("variables", None)
+        headline_spec = (
+            [list(e) for e in raw_spec]
+            if raw_spec is not None
+            else [list(e) for e in DEFAULT_HEADLINE_VARIABLES]
+        )
+        if not any(
+            isinstance(s, ClimatologyScorer) for s in scorers
+        ):
+            raise ValueError(
+                "eval_suite.headline needs the climatology (or bias) scorer "
+                "enabled — the headline reduces its finalized bias maps."
+            )
+
     # ── drive + runner ─────────────────────────────────────────────────────
     drive = DiffusionRolloutValidator(
         raw_ds,
@@ -933,6 +1161,10 @@ def main(cfg) -> None:
         perturber=perturber,
         split_ensemble_across_ranks=(dist.world_size > 1 and ensemble_size > 1),
         scorers=scorers,
+        ic_indices=ic_indices,
+        frame_transform=frame_transform,
+        unpack_wrapper=unpack_wrapper,
+        init_downsample_factor=init_downsample_factor,
     )
     runner = EvalSuiteRunner(
         drive,
@@ -953,11 +1185,35 @@ def main(cfg) -> None:
             "ic_stride": int(eval_cfg.get("ic_stride", 1)),
             "step_size": model_step_rows(ds_cfg, raw_ds),
             "sampler_num_steps": sampler_num_steps,
-            "model_family": "diffusion" if is_diffusion else "deterministic",
+            "model_family": (
+                "combined" if combined_spec is not None
+                else "diffusion" if is_diffusion else "deterministic"
+            ),
             "checkpoint_dir": str(ckpt_dir),
             "zarr_path": str(ds_cfg.dataset.zarr_path),
+            "ic_date": str(ic_date) if ic_date else None,
+            "ic_index": ic_indices[0] if ic_indices else None,
+            "ic_resolved_time": ic_resolved_time,
+            "downscaler_num_steps": (
+                int(eval_cfg.downscaler_num_steps)
+                if eval_cfg.get("downscaler_num_steps", None) is not None
+                else None
+            ),
+            "init_downsample_factor": init_downsample_factor,
+            "scoring_grid": (
+                "x".join(str(int(v)) for v in raw_ds[0]["surface_in"].shape[-2:])
+            ),
+            # The 1996-2001 parity span lies INSIDE both checkpoints'
+            # 1979-2015 training window — same as upstream's own protocol;
+            # recorded so a saved .pt is honest about in-sample scoring.
+            "in_sample_note": (
+                "IC+horizon lie inside the checkpoints' training span"
+                if ic_date else None
+            ),
         },
         log=log,
+        headline_spec=headline_spec,
+        catalog=catalog,
     )
     runner.run(drive_model)
 
