@@ -59,7 +59,13 @@ max_initial_conditions: 1
 ic_stride: 9999
 batch_size: 1
 # ``null`` (uniform, scheduler default) | int | list[int] of length `horizon`.
-sampler_num_steps: 4
+sampler_num_steps: 4     # ignored (with an info log) for deterministic checkpoints
+# Rank-0 partial progress snapshots, every N scored frames (0 disables).
+# LOCAL-ONLY finalize — zero collectives, so it cannot desync ranks: exact
+# under member-split ensembles (each rank's accumulators are already
+# cross-rank complete), rank-0's ICs only under IC-split (flagged in the
+# saved "_progress" block).
+partial_save_every_frames: 365
 
 climatology:
   enabled: True
@@ -67,11 +73,14 @@ climatology:
   months_per_bin: 1.0
   steps_per_bin: null   # derived; set an int to override (see the header)
 
+# Legacy alias: global_bias is ALWAYS emitted with the climatology scorer
+# (it costs milliseconds; the old BiasValidator re-ran the whole rollout for
+# it). This toggle only matters when climatology.enabled is False — it then
+# runs the scorer with track_bins=false (means/bias/global_bias, no per-bin
+# maps). bias.n_bins / months_per_bin / steps_per_bin are DEPRECATED (the
+# climatology block's values are used; a disagreeing bias.n_bins warns).
 bias:
   enabled: True
-  n_bins: 12
-  months_per_bin: 1.0
-  steps_per_bin: null
 
 qbo:
   enabled: True
@@ -92,11 +101,11 @@ global_mean:
   # is a *varying boundary* in the v1 configs and so was never eligible.
   flux_variables: [USWRFtoa_24h, ULWRFtoa_24h]
 
-ensemble_envelope:
-  enabled: False   # off by default — needs ensemble_size>1 (E× cost)
-  ensemble_size: 4
-  perturber: replicate_only   # replicate_only | gaussian_ic
-  perturber_scales: {}
+# ensemble_envelope: REMOVED. Spread and spread_skill are emitted
+# automatically whenever the top-level ensemble_size below is > 1 — one
+# shared rollout, one ensemble for the whole suite. A leftover
+# ensemble_envelope block in a user config is tolerated with a loud
+# deprecation warning; its ensemble_size/perturber keys are IGNORED.
 
 # ── ensemble over GPUs ────────────────────────────────────────────────────
 # TOTAL ensemble size shared by every validator above. Under torchrun with
@@ -107,5 +116,8 @@ ensemble_envelope:
 # ensemble_envelope block's own ensemble_size/perturber keys override these
 # for that validator only.
 ensemble_size: 1
-perturber: null          # null = validator default | replicate_only | gaussian_ic
+# null = validator default | replicate_only | gaussian_ic. NOTE: an ensemble
+# on a DETERMINISTIC checkpoint requires gaussian_ic — replicate_only would
+# produce E identical members and exactly zero spread (the driver raises).
+perturber: null
 perturber_scales: {}

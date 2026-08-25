@@ -434,7 +434,9 @@ def test_the_shipped_eval_suite_no_longer_hard_codes_a_cadence():
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.load(_AI_ROSSBY_DIR / "conf" / "validation" / "eval_suite.yaml")
-    for block in ("climatology", "bias", "qbo"):
+    # "bias" dropped: its bin keys are deprecated in the fused suite (the
+    # climatology block's values apply; the bias block is an enable alias).
+    for block in ("climatology", "qbo"):
         assert cfg[block].steps_per_bin is None, (
             f"{block}.steps_per_bin is pinned to {cfg[block].steps_per_bin}; the "
             f"width should be derived from months_per_bin + the model step"

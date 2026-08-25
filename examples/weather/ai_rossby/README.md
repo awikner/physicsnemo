@@ -775,23 +775,45 @@ frames 1…`max_step` are the forecast. Score the result with `validate_cli.py`
 
 ### 6.10 Long-horizon eval suite
 
-`eval_diffusion.py` reuses the same rollout mechanics but scores **every**
-emitted frame of a long (e.g. one-year) rollout into streaming aggregators:
+`climate_eval_suite.py` (alias: `eval_diffusion.py`) performs **one** rollout
+and scores every emitted frame into pluggable scorers — the predecessor ran a
+separate full rollout per metric family (measured: 4 × 2.77 h of identical
+4-year rollouts where one serves). It is **generation-agnostic**: diffusion
+checkpoints sample through the scheduler from `cfg.loss`; deterministic
+train.py checkpoints (SFNO / Pangu / ArchesWeather) step through
+`deterministic_adapter.py` (`cfg.loss` is never instantiated for them, and
+QBO/flux variable names resolve from `cfg.model`, which the Pangu classes —
+exposing only channel counts — require).
 
 ```bash
-python eval_diffusion.py model=amip_erdm_v2 loss=erdm_v2 \
+# diffusion
+python climate_eval_suite.py model=amip_erdm_v2 loss=erdm_v2 \
     dataset=amip_dailyavg_coarse validation=eval_suite \
     +eval_suite.checkpoint_dir=./outputs/erdm_v2_run0/checkpoints \
     +eval_suite.output_path=./outputs/erdm_v2_run0/eval_suite.pt \
     eval_suite.horizon=365 eval_suite.sampler_num_steps=4
+# deterministic (same suite, same config surface; loss= stays whatever the
+# checkpoint trained with — it is not instantiated)
+python climate_eval_suite.py model=sfno_era5 loss=mse \
+    dataset=era5_multiyear validation=eval_suite \
+    +eval_suite.checkpoint_dir=<ckpt_dir> +eval_suite.output_path=<out.pt> \
+    eval_suite.horizon=365
 ```
 
-Five independently-toggled validators: `climatology` (per-variable time mean +
-per-bin, e.g. monthly, climatology), `bias` (signed lat-weighted global-mean per
-group), `qbo` (30°S–30°N zonal-mean U at stratospheric levels, binned, with a
-zero-crossing period estimate), `global_mean` (lat-weighted global-mean flux
-timeseries), and `ensemble_envelope` (spread/skill; off by default — it costs E×
-a rollout). Results are a `torch.save` dict at `output_path`.
+Scorers, each config-toggled: `climatology` (time-mean + per-bin maps, bias
+maps AND the lat-weighted global-bias scalars — the old separate `bias`
+validator is absorbed; its block remains as an enable alias), `qbo`,
+`global_mean` (flux series as `(horizon,)` tensors, correctly reduced across
+ranks). Spread + spread/skill are emitted automatically whenever the single
+top-level `eval_suite.ensemble_size` > 1 (the old `ensemble_envelope` block
+is removed; the whole suite shares one rollout at one E — all metrics then
+describe the E-member ensemble mean, echoed in `results["config"]`; never
+compare results across differing E). Under a multi-rank launch, ensemble
+members split evenly across GPUs. The eval rolls on `dataset.val_zarr_path`
+when set (falling back to `zarr_path`). Results are a `torch.save` dict at
+`output_path` (`schema_version: 2`; rank-0 partial snapshots carry
+`"_partial": true` and are written every `partial_save_every_frames`
+frames with zero collectives).
 
 `validation=eval_suite` selects from the `validation` group but the suite is read
 from `cfg.eval_suite`; the routing is a `# @package eval_suite` directive on the

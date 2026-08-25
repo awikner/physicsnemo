@@ -37,7 +37,10 @@ _AI_ROSSBY_DIR = (
 )
 sys.path.insert(0, str(_AI_ROSSBY_DIR))
 
-from eval_diffusion import BiasValidator, EnsembleEnvelopeValidator  # noqa: E402
+from climate_eval_suite import (  # noqa: E402
+    ClimatologyScorer,
+    derive_spread_skill,
+)
 from validate import Deterministic, ReplicateOnly  # noqa: E402
 from validate_diffusion import DiffusionRolloutValidator  # noqa: E402
 
@@ -98,19 +101,41 @@ def _bias_kwargs(scheduler, ensemble_size, split, horizon=6):
 
 
 def _run_bias(rank: int, local_e: int, ensemble_size: int, split: bool):
+    """Fused-suite equivalent of the old BiasValidator run."""
     sched = _MemberOffsetScheduler(rank, local_e, _MEMBER_TABLE)
-    v = BiasValidator(
-        _StubDataset(), n_bins=3, steps_per_bin=2,
-        **_bias_kwargs(sched, ensemble_size, split),
+    kwargs = _bias_kwargs(sched, ensemble_size, split)
+    scorer = ClimatologyScorer(n_bins=3, steps_per_bin=2)
+    drive = DiffusionRolloutValidator(
+        _StubDataset(),
+        log_steps=list(range(1, kwargs["horizon"] + 1)),
+        scorers=[scorer],
+        **kwargs,
     )
-    return v.run(nn.Identity(), epoch=0)
+    # Finalize-idempotence guard: a rank-0-style LOCAL partial snapshot
+    # mid-machinery must not perturb the eventual collective finalize (the
+    # in-place all_reduce in the old finalizes double-counted — fixed with
+    # clone-based reductions).
+    drive._finalize(local_only=True)
+    rmse_acc = drive.run(nn.Identity(), epoch=0)
+    scorer.finalize(local_only=True)
+    result = {"rmse_acc": rmse_acc}
+    result.update(scorer.finalize())
+    return result
 
 
 def _run_envelope(rank: int, local_e: int, ensemble_size: int, split: bool):
+    """Fused-suite equivalent of the old EnsembleEnvelopeValidator run:
+    the drive's own spread metrics + derive_spread_skill post-processing."""
     sched = _MemberOffsetScheduler(rank, local_e, _MEMBER_TABLE)
     kwargs = _bias_kwargs(sched, ensemble_size, split, horizon=4)
-    v = EnsembleEnvelopeValidator(_StubDataset(), **kwargs)
-    return v.run(nn.Identity(), epoch=0)
+    drive = DiffusionRolloutValidator(
+        _StubDataset(),
+        log_steps=list(range(1, kwargs["horizon"] + 1)),
+        **kwargs,
+    )
+    metrics = drive.run(nn.Identity(), epoch=0)
+    metrics.update(derive_spread_skill(metrics, drive.log_steps))
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +175,14 @@ def _worker_divisibility(rank: int, pg_file: str, out_dir: str):
     _init_pg(rank, pg_file)
     try:
         with pytest.raises(ValueError, match="evenly"):
-            _run_bias(rank, 1, ensemble_size=3, split=True)
+            kwargs = _bias_kwargs(
+                _MemberOffsetScheduler(rank, 1, _MEMBER_TABLE), 3, True
+            )
+            DiffusionRolloutValidator(
+                _StubDataset(),
+                log_steps=list(range(1, kwargs["horizon"] + 1)),
+                **kwargs,
+            )
         (Path(out_dir) / f"div_rank{rank}.ok").touch()
     finally:
         dist.destroy_process_group()
@@ -191,18 +223,22 @@ def test_deterministic_perturber_with_real_ensemble_raises_at_ctor():
     """Silent zero-spread trap: under member-split with E == world_size each
     rank replicates by local_E == 1, so Deterministic's call-time guard would
     never fire and every 'member' would be identical."""
+    kwargs = {**_bias_kwargs(_MemberOffsetScheduler(0, 2, _MEMBER_TABLE), 2, False),
+              "perturber": Deterministic()}
     with pytest.raises(ValueError, match="Deterministic"):
-        BiasValidator(
-            _StubDataset(), n_bins=3, steps_per_bin=2,
-            **{**_bias_kwargs(_MemberOffsetScheduler(0, 2, _MEMBER_TABLE), 2, False),
-               "perturber": Deterministic()},
+        DiffusionRolloutValidator(
+            _StubDataset(),
+            log_steps=list(range(1, kwargs["horizon"] + 1)),
+            **kwargs,
         )
 
 
 def test_ic_selection_not_rank_split_in_member_mode():
-    v = BiasValidator(
-        _StubDataset(), n_bins=3, steps_per_bin=2,
-        **_bias_kwargs(_MemberOffsetScheduler(0, 2, _MEMBER_TABLE), 4, False),
+    kwargs = _bias_kwargs(_MemberOffsetScheduler(0, 2, _MEMBER_TABLE), 4, False)
+    v = DiffusionRolloutValidator(
+        _StubDataset(),
+        log_steps=list(range(1, kwargs["horizon"] + 1)),
+        **kwargs,
     )
     # Simulate member-split bookkeeping without a process group.
     v.member_split = True
@@ -214,9 +250,11 @@ def test_ic_selection_not_rank_split_in_member_mode():
 
 
 def test_generator_seed_rank_offset_only_when_member_split():
-    v = BiasValidator(
-        _StubDataset(), n_bins=3, steps_per_bin=2,
-        **_bias_kwargs(_MemberOffsetScheduler(0, 2, _MEMBER_TABLE), 4, False),
+    kwargs = _bias_kwargs(_MemberOffsetScheduler(0, 2, _MEMBER_TABLE), 4, False)
+    v = DiffusionRolloutValidator(
+        _StubDataset(),
+        log_steps=list(range(1, kwargs["horizon"] + 1)),
+        **kwargs,
     )
     v.member_split = False
     v._rank = 1

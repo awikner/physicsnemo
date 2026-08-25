@@ -37,7 +37,8 @@ config.
 from __future__ import annotations
 
 import math
-from typing import Optional, Sequence
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -148,12 +149,14 @@ class StreamingLatWeightedSpread:
             w.expand_as(var).sum(dim=reduce_dims).detach()
         )
 
-    def finalize(self) -> torch.Tensor:
-        _all_reduce_sum(self.sum_var_w)
-        _all_reduce_sum(self.weight_total)
-        return torch.sqrt(
-            self.sum_var_w / self.weight_total.clamp(min=1e-12)
-        )
+    def finalize(self, *, local_only: bool = False) -> torch.Tensor:
+        # Clones, not in-place: see StreamingLatWeightedRMSE.finalize.
+        s = self.sum_var_w.clone()
+        w = self.weight_total.clone()
+        if not local_only:
+            _all_reduce_sum(s)
+            _all_reduce_sum(w)
+        return torch.sqrt(s / w.clamp(min=1e-12))
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +175,28 @@ def _interleave_ensemble(sample, ensemble_size):
         else:
             out[k] = v
     return out
+
+
+@dataclass
+class StepContext:
+    """Everything a scorer may need for one (frame, channel-group) — computed
+    ONCE per (step, kind) by the drive, so N scorers cost zero extra
+    collectives, denormalizations or ensemble reductions. ``pred_mean`` is the
+    cross-rank ensemble mean; ``pred_var`` is the member-UNION per-pixel
+    variance and is None iff ensemble_size == 1."""
+
+    step: int                     # k, 1-indexed emitted-frame number
+    m_idx: int                    # index into the validator's log_steps
+    kind: str                     # "surface" | "upper_air" | "diagnostic"
+    pred_ensemble: torch.Tensor   # (B*local_E, C, [L,] H, W), normalized
+    pred_mean: torch.Tensor       # (B, ...), normalized
+    pred_var: Optional[torch.Tensor]
+    pred_phys: torch.Tensor       # denormalized pred_mean
+    truth: torch.Tensor           # (B, ...), normalized
+    truth_phys: torch.Tensor
+    lat_weights: torch.Tensor
+    ensemble_size: int
+    local_ensemble_size: int
 
 
 class DiffusionRolloutValidator:
@@ -266,6 +291,8 @@ class DiffusionRolloutValidator:
         sampler_num_steps: "Optional[int | Sequence[int]]" = None,
         seed: int = 0,
         split_ensemble_across_ranks: bool = False,
+        scorers: Sequence = (),
+        on_frame_scored: Optional[Callable[[int], None]] = None,
     ):
         if ensemble_size < 1:
             raise ValueError("ensemble_size must be ≥ 1")
@@ -333,6 +360,13 @@ class DiffusionRolloutValidator:
         self.normalizer = normalizer
         self.sampler_num_steps = sampler_num_steps
         self.seed = int(seed)
+        # Scorer plug-ins (the fused eval suite): each receives the shared
+        # StepContext per (frame, kind) — the drive performs the rollout, the
+        # ensemble reductions and the denormalization exactly once regardless
+        # of how many scorers ride it. Empty by default: the mid-training
+        # validation path is unchanged.
+        self.scorers = list(scorers)
+        self.on_frame_scored = on_frame_scored
 
         # Dispatch on scheduler: rolling = has sample_rollout.
         self.window_mode = hasattr(self.scheduler, "sample_rollout")
@@ -445,6 +479,11 @@ class DiffusionRolloutValidator:
                 climatology=climatology_diagnostic,
                 device=device,
             )
+
+        for scorer in self.scorers:
+            bind = getattr(scorer, "bind", None)
+            if bind is not None:
+                bind(self)
 
     # ------------------------------------------------------------------ #
     # IC selection — identical contract to deterministic RolloutValidator.
@@ -640,6 +679,60 @@ class DiffusionRolloutValidator:
             dist.all_reduce(sq, op=dist.ReduceOp.SUM)
         return sq / float(self.ensemble_size)
 
+    def _build_ctx(
+        self,
+        m_idx: int,
+        pred_ensemble: torch.Tensor,
+        truth: torch.Tensor,
+        kind: str,
+    ) -> StepContext:
+        """Assemble the shared per-(step, kind) context — reductions ONCE.
+
+        The cross-rank ensemble mean (a collective under member-split), the
+        member-union variance and the denormalization each happen exactly one
+        time here, however many scorers consume the result. Collective
+        symmetry across ranks follows from every rank building the same
+        contexts in the same order.
+        """
+        pred_mean = self._cross_rank_ensemble_mean(pred_ensemble)
+        # Union variance: exact in BOTH split modes (sq-dev sum / total E ==
+        # var(unbiased=False) when world_size == 1 too). Only computed when an
+        # ensemble exists — it is what the spread metrics consume.
+        pred_var = (
+            self._cross_rank_ensemble_var(pred_ensemble, pred_mean)
+            if self.ensemble_size > 1
+            else None
+        )
+        pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
+        return StepContext(
+            step=self.log_steps[m_idx],
+            m_idx=m_idx,
+            kind=kind,
+            pred_ensemble=pred_ensemble,
+            pred_mean=pred_mean,
+            pred_var=pred_var,
+            pred_phys=pred_phys,
+            truth=truth,
+            truth_phys=truth_phys,
+            lat_weights=self.register_lat,
+            ensemble_size=self.ensemble_size,
+            local_ensemble_size=self.local_ensemble_size,
+        )
+
+    def _update_base_metrics(self, ctx: StepContext) -> None:
+        """RMSE / ACC / spread from the shared context."""
+        rmse = getattr(self, f"rmse_{ctx.kind}", None)
+        if rmse is not None:
+            rmse.update(ctx.m_idx, ctx.pred_phys, ctx.truth_phys, ctx.lat_weights)
+        acc = getattr(self, f"acc_{ctx.kind}", None)
+        if acc is not None:
+            acc.update(ctx.m_idx, ctx.pred_mean, ctx.truth, ctx.lat_weights)
+        spread = getattr(self, f"spread_{ctx.kind}", None)
+        if spread is not None and ctx.pred_var is not None:
+            # Member-UNION variance in both split modes — a rank-local var
+            # over a subset would be biased low and average wrongly.
+            spread.update_from_var(ctx.m_idx, ctx.pred_var, ctx.lat_weights)
+
     def _score_step(
         self,
         m_idx: int,
@@ -647,32 +740,11 @@ class DiffusionRolloutValidator:
         truth: torch.Tensor,
         kind: str,
     ) -> None:
-        """Update RMSE / ACC / spread for one (log_step, channel group)."""
-        pred_mean = self._cross_rank_ensemble_mean(pred_ensemble)
-
-        # RMSE in physical units.
-        pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
-        rmse = getattr(self, f"rmse_{kind}", None)
-        if rmse is not None:
-            rmse.update(m_idx, pred_phys, truth_phys, self.register_lat)
-        acc = getattr(self, f"acc_{kind}", None)
-        if acc is not None:
-            acc.update(m_idx, pred_mean, truth, self.register_lat)
-        spread = getattr(self, f"spread_{kind}", None)
-        if spread is not None:
-            if self.member_split:
-                # Spread over the member UNION (normalized units, like the
-                # local path): local var over a rank's subset would be biased
-                # low and average wrongly across ranks.
-                spread.update_from_var(
-                    m_idx,
-                    self._cross_rank_ensemble_var(pred_ensemble, pred_mean),
-                    self.register_lat,
-                )
-            else:
-                spread.update(
-                    m_idx, pred_ensemble, self.register_lat, self.ensemble_size
-                )
+        """One (log_step, channel group): base metrics + every scorer."""
+        ctx = self._build_ctx(m_idx, pred_ensemble, truth, kind)
+        self._update_base_metrics(ctx)
+        for scorer in self.scorers:
+            scorer.score_step(ctx)
 
     def _rollout_single_step(
         self,
@@ -686,6 +758,10 @@ class DiffusionRolloutValidator:
         state = self.perturber(init, self.local_ensemble_size, generator=gen)
         n_ic = len(batch_ics)
         const_boundary = state.get("constant_boundary")
+        # Stateful steppers (the deterministic adapter's prev-frame memory)
+        # reset per IC batch; schedulers without the hook are untouched.
+        if hasattr(self.scheduler, "on_rollout_start"):
+            self.scheduler.on_rollout_start(state)
 
         wrapper = self.wrapper.module if hasattr(self.wrapper, "module") else self.wrapper
 
@@ -708,11 +784,17 @@ class DiffusionRolloutValidator:
             if isinstance(x_next, tuple):
                 x_next = x_next[0]
 
+            # ONE dataset fetch of the t+k frames serves both scoring and the
+            # boundary/calendar advance (they used to be fetched twice).
+            frame_k = None
+            if k in log_step_to_idx or k < self.horizon:
+                frame_times = [t + k * self.step_size for t in batch_ics]
+                frame_k = self._to_device(self._stack(frame_times))
+
             # Score this step (if requested) against the dataset's frame at t+k.
             if k in log_step_to_idx:
                 m_idx = log_step_to_idx[k]
-                target_times = [t + k * self.step_size for t in batch_ics]
-                target = self._to_device(self._stack(target_times))
+                target = frame_k
                 unpacked = wrapper.unpack_state(x_next)
                 self._score_step(m_idx, unpacked["surface_in"], target["surface_in"], "surface")
                 if self.has_upper_air and "upper_air_in" in unpacked:
@@ -726,13 +808,14 @@ class DiffusionRolloutValidator:
                     self._score_step(
                         m_idx, unpacked["diagnostic"], target["diagnostic"], "diagnostic"
                     )
+                if self.on_frame_scored is not None:
+                    self.on_frame_scored(k)
 
             # Advance: next state's surface/upper_air/diag come from the
             # diffusion sample. Boundary + calendar march to the next step
             # using the dataset sample at t+k.
             if k < self.horizon:
-                next_times = [t + k * self.step_size for t in batch_ics]
-                next_step = self._to_device(self._stack(next_times))
+                next_step = frame_k
                 next_var_boundary = next_step["varying_boundary"]
                 next_calendar = next_step["calendar"]
                 if self.local_ensemble_size > 1:
@@ -866,6 +949,8 @@ class DiffusionRolloutValidator:
                 self.local_ensemble_size, dim=0
             )
 
+        if hasattr(self.scheduler, "on_rollout_start"):
+            self.scheduler.on_rollout_start(init_window_ens)
         traj = self.scheduler.sample_rollout(
             model,
             init_y,
@@ -895,18 +980,24 @@ class DiffusionRolloutValidator:
                 self._score_step(
                     m_idx, unpacked["diagnostic"], target["diagnostic"], "diagnostic"
                 )
+            if self.on_frame_scored is not None:
+                self.on_frame_scored(k)
 
     # ------------------------------------------------------------------ #
     # Finalize.
     # ------------------------------------------------------------------ #
 
-    def _finalize(self) -> dict[str, float]:
+    def _finalize(self, *, local_only: bool = False) -> dict[str, float]:
+        """Flat metric dict. ``local_only=True`` skips the cross-rank
+        collectives (rank-local partial view for progress snapshots — the
+        metric finalizes are clone-based and repeatable, so the eventual
+        collective finalize is unaffected)."""
         results: dict[str, float] = {}
 
         def _emit(prefix: str, metric, group: str):
             if metric is None:
                 return
-            vals = metric.finalize()  # (n_steps, n_channels)
+            vals = metric.finalize(local_only=local_only)  # (n_steps, n_channels)
             per_step = vals.mean(dim=1)
             for i, step in enumerate(self.log_steps):
                 results[f"{prefix}_step{step}_{group}"] = float(per_step[i].item())

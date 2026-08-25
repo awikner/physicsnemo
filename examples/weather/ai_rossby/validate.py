@@ -242,14 +242,23 @@ class StreamingLatWeightedRMSE:
             w.expand_as(diff_sq).sum(dim=reduce_dims).detach()
         )
 
-    def finalize(self) -> torch.Tensor:
-        """All-reduce + return ``(n_steps, n_channels)`` RMSE tensor."""
-        _all_reduce_sum(self.sum_sq_w)
-        _all_reduce_sum(self.weight_total)
-        rmse = torch.sqrt(
-            self.sum_sq_w / self.weight_total.clamp(min=1e-12)
-        )
-        return rmse
+    def finalize(self, *, local_only: bool = False) -> torch.Tensor:
+        """All-reduce + return ``(n_steps, n_channels)`` RMSE tensor.
+
+        Reduces CLONES: the buffers themselves must survive finalize, or a
+        second call double-counts under world_size > 1 (the in-place reduce
+        was a latent bug — silent everywhere the no-op single-process tests
+        run). ``local_only=True`` skips the collectives entirely: the rank's
+        own partial view, used by the eval suite's rank-0 progress snapshots
+        (exact under member-split, where every scored quantity is already
+        cross-rank complete per step).
+        """
+        s = self.sum_sq_w.clone()
+        w = self.weight_total.clone()
+        if not local_only:
+            _all_reduce_sum(s)
+            _all_reduce_sum(w)
+        return torch.sqrt(s / w.clamp(min=1e-12))
 
 
 class StreamingLatWeightedACC:
@@ -301,12 +310,15 @@ class StreamingLatWeightedACC:
         self.s_pp[step_index] += (w * p_anom.pow(2)).sum(dim=reduce_dims).detach()
         self.s_tt[step_index] += (w * t_anom.pow(2)).sum(dim=reduce_dims).detach()
 
-    def finalize(self) -> torch.Tensor:
-        _all_reduce_sum(self.s_pt)
-        _all_reduce_sum(self.s_pp)
-        _all_reduce_sum(self.s_tt)
-        denom = torch.sqrt(self.s_pp.clamp(min=1e-12) * self.s_tt.clamp(min=1e-12))
-        return self.s_pt / denom
+    def finalize(self, *, local_only: bool = False) -> torch.Tensor:
+        # Clones, not in-place: see StreamingLatWeightedRMSE.finalize.
+        pt, pp, tt = self.s_pt.clone(), self.s_pp.clone(), self.s_tt.clone()
+        if not local_only:
+            _all_reduce_sum(pt)
+            _all_reduce_sum(pp)
+            _all_reduce_sum(tt)
+        denom = torch.sqrt(pp.clamp(min=1e-12) * tt.clamp(min=1e-12))
+        return pt / denom
 
 
 # ---------------------------------------------------------------------------

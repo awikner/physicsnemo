@@ -120,6 +120,11 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
             data.get("non_leap_boundary_zarr_path")
         ),
         emit_calendar=True,
+        # ArchesWeather's conditioning embedder expects (month, hour); the
+        # dataset default is second_doy. Forwarded so the shared eval driver
+        # serves that family too — diffusion configs never set it, so their
+        # behavior is unchanged.
+        calendar_encoding=str(data.get("calendar_encoding", "second_doy")),
     )
     # A DIRECTORY of per-year sub-stores is a multi-year archive; a single
     # ``.zarr`` is one year. Same routing ``train.py`` (line ~594) and
@@ -150,8 +155,30 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
         str(v)
         for v in getattr(getattr(ds, "layout", None), "varying_boundary_variables", [])
     ]
+    # Pressure-level subset (mirrors train.py:608-627): fires ONLY when the
+    # model's levels are a strict subset of the store's pressure levels — the
+    # deterministic S2S checkpoints are 17-level models on the 18-level ERA5
+    # archive, and without the trim the eval would feed 18-level tensors into
+    # a 17-level model. Diffusion configs match their stores exactly, so this
+    # is inert for them.
+    pressure_level_indices = None
+    model_levels = list(cfg.model.get("levels", []) or [])
+    data_pressure_levels = list(getattr(ds, "pressure_levels", []) or [])
+    if model_levels and data_pressure_levels:
+        model_set = set(map(float, model_levels))
+        data_set = set(map(float, data_pressure_levels))
+        if model_set != data_set and model_set.issubset(data_set):
+            level_to_idx = {float(lv): i for i, lv in enumerate(data_pressure_levels)}
+            pressure_level_indices = [level_to_idx[float(lv)] for lv in model_levels]
+            _logging.getLogger(__name__).info(
+                "pressure-level subset: model uses %d of the store's %d levels",
+                len(model_levels), len(data_pressure_levels),
+            )
+
     subset = resolve_varying_subset(cfg, store_varying)
     normalizer_kwargs = {}
+    if pressure_level_indices is not None:
+        normalizer_kwargs["pressure_levels"] = [float(lv) for lv in model_levels]
     if subset is not None:
         # PRE-rescaler, like the slice above: the normalizer sits between the
         # subset and the assembler, so it never sees the derived SST-anomaly
@@ -172,8 +199,16 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
     # routing. NOTE this replaces a ``nan_fill(normalizer(sample))`` compose,
     # which substituted PHYSICAL-unit fill values (SST 270 K) into an
     # already-z-scored tensor; dataset_setup pins the documented order.
+    extra_transforms = ()
+    if pressure_level_indices is not None:
+        from train import _PressureLevelSubsetTransform
+
+        extra_transforms = (_PressureLevelSubsetTransform(pressure_level_indices),)
     pipeline = build_forcing_pipeline(
-        cfg, normalizer=normalizer, store_varying_variables=store_varying
+        cfg,
+        normalizer=normalizer,
+        store_varying_variables=store_varying,
+        extra_transforms=extra_transforms,
     )
     ds.transform = pipeline.dataset_transform
     ds.forcing_pipeline = pipeline

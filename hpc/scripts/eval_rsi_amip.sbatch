@@ -125,7 +125,6 @@ case "${MODE}" in
         validation=eval_suite \
         "++eval_suite.horizon=${HORIZON}" \
         "++eval_suite.climatology.n_bins=${NBINS}" \
-        "++eval_suite.bias.n_bins=${NBINS}" \
         "+eval_suite.checkpoint_dir=${RSI_CKPT}" \
         "+eval_suite.output_path=${OUTDIR}/rollout40.pt" \
         "run_name=rsi_${RUNG}_rollout40"

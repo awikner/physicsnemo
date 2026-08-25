@@ -5,6 +5,13 @@
 
 r"""Climatological validation CLI for ai_rossby rollouts (Phase 4c).
 
+.. deprecated::
+   For model-vs-truth climatology/bias/QBO/flux evaluation of a TRAINED
+   checkpoint (either family — deterministic or diffusion), prefer
+   ``climate_eval_suite.py``: one rollout, all metrics, DDP + ensemble
+   support. This CLI remains for its NetCDF export and raw forecast-chunk
+   dumping, which the suite does not do.
+
 For a multi-year autoregressive rollout starting at a single (or small
 set of) initial condition(s), this script accumulates:
 

@@ -120,12 +120,20 @@ class StreamingTimeMean:
         self.sum += x.detach().to(self.dtype).sum(dim=0)
         self.n += int(x.shape[0])
 
-    def finalize(self, *, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
-        """All-reduce + return the field-mean as ``(*shape,)``."""
+    def finalize(
+        self, *, out_dtype: torch.dtype = torch.float32, local_only: bool = False
+    ) -> torch.Tensor:
+        """All-reduce + return the field-mean as ``(*shape,)``.
+
+        ``local_only=True`` skips the collectives — the rank's own partial
+        view, used by the eval suite's rank-0 progress snapshots. Safe to
+        call any number of times: the reduction operates on clones.
+        """
         s = self.sum.clone()
         n_t = torch.tensor(self.n, device=s.device, dtype=self.dtype)
-        _all_reduce_sum(s)
-        _all_reduce_sum(n_t)
+        if not local_only:
+            _all_reduce_sum(s)
+            _all_reduce_sum(n_t)
         n_eff = float(n_t.item())
         if n_eff == 0:
             return s.to(out_dtype)
@@ -199,9 +207,11 @@ class StreamingTimeVariance:
 
     @torch.no_grad()
     def finalize(
-        self, *, out_dtype: torch.dtype = torch.float32
+        self, *, out_dtype: torch.dtype = torch.float32, local_only: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """All-reduce + return ``(mean, var)``.
+        """All-reduce + return ``(mean, var)``. ``local_only=True`` skips the
+        cross-rank merge (rank-local partial view; reduction is clone-based
+        and repeatable).
 
         DDP merge uses the same Chan parallel formula across ranks (each
         rank contributes a *group* with its current ``(n, mean, M2)``).
@@ -211,7 +221,8 @@ class StreamingTimeVariance:
         mean = self.mean.clone()
         M2 = self.M2.clone()
         n_t = torch.tensor(self.n, device=mean.device, dtype=self.dtype)
-        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        if (not local_only and dist.is_available() and dist.is_initialized()
+                and dist.get_world_size() > 1):
             # Compute n_total first, then weighted-mean, then sum of
             # M2 + bridging terms. The bridging needs pairwise (μ_a -
             # μ_b) which we don't have, but Chan's two-pass equivalence
@@ -296,17 +307,21 @@ class StreamingBinnedMean:
         self.counts.index_add_(0, bin_idx.to(self.counts.device).to(torch.long), ones)
 
     @torch.no_grad()
-    def finalize(self, *, out_dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def finalize(
+        self, *, out_dtype: torch.dtype = torch.float32, local_only: bool = False
+    ) -> torch.Tensor:
         """All-reduce + return per-bin mean ``(n_bins, *shape)``.
 
         Bins with zero observed samples are returned as zero rather
         than NaN — this is the climatology convention for un-sampled
-        days in a partial-year rollout.
+        days in a partial-year rollout. ``local_only=True`` skips the
+        collectives (rank-local partial view; clone-based, repeatable).
         """
         s = self.sum.clone()
         c = self.counts.clone().to(self.dtype)
-        _all_reduce_sum(s)
-        _all_reduce_sum(c)
+        if not local_only:
+            _all_reduce_sum(s)
+            _all_reduce_sum(c)
         c_safe = c.clamp(min=1.0)
         means = s / c_safe.view(-1, *([1] * len(self.shape)))
         # Zero out un-sampled bins.
@@ -388,7 +403,7 @@ class StreamingBinnedVariance:
 
     @torch.no_grad()
     def finalize(
-        self, *, out_dtype: torch.dtype = torch.float32
+        self, *, out_dtype: torch.dtype = torch.float32, local_only: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """All-reduce + return ``(per_bin_mean, per_bin_var)``.
 
@@ -399,7 +414,8 @@ class StreamingBinnedVariance:
         mean = self.mean.clone()
         M2 = self.M2.clone()
         counts = self.counts.clone().to(self.dtype)
-        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        if (not local_only and dist.is_available() and dist.is_initialized()
+                and dist.get_world_size() > 1):
             n_local = self.counts.clone().to(self.dtype)
             n_total = n_local.clone()
             _all_reduce_sum(n_total)
