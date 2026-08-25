@@ -1084,23 +1084,30 @@ def _build_inference_scheduler(
 
 
 def _stack_window_initial(
-    dataset, ic: int, W: int, device: torch.device, step_size: int = 1
+    dataset, ic: int, W: int, device: torch.device, step_size: int = 1,
+    *, end_offset: int
 ) -> dict:
-    """Stack ``W`` frames ending at ``ic`` into ``(1, W, …)``.
+    """Stack ``W`` frames ending at ``ic + end_offset`` steps into ``(1, W, …)``.
 
     Pairs with the rolling wrappers' ``pack_window_state`` —
     ``surface_in`` ends up shaped ``(1, W, C_s, H, W)`` and
     ``upper_air_in`` ends up shaped ``(1, W, C_u, L, H, W)``.
 
-    Frames are ``step_size`` store rows apart, so the oracle window spans W
-    *model* steps back from the IC (24 h apart on the 6-hourly AMIP archives),
-    matching what the rolling window means during training.
+    ``end_offset`` and the intra-window spacing are both in MODEL steps
+    (``step_size`` store rows, 24 h apart on the 6-hourly AMIP archives).
+    The rolling schedulers want the FUTURE oracle window ending at
+    ``ic + window_size`` (ERDM: y_{1:W}; RSI passes W+1 frames whose extra
+    leading frame is the anchor y_0 = the IC itself) — callers pass
+    ``end_offset=scheduler.window_size``, never 0: a window ending at the
+    IC replays the past and every emit lands W steps behind its scored
+    time (the 2026-08 emit-time bug).
     """
     if W <= 0:
         raise ValueError(f"window size must be > 0, got {W}")
     step_size = max(1, int(step_size))
     frames = [
-        dataset[(int(ic + (i - W + 1) * step_size), 1)] for i in range(W)
+        dataset[(int(ic + (end_offset - W + 1 + i) * step_size), 1)]
+        for i in range(W)
     ]
     out: dict[str, torch.Tensor] = {}
     for k, v0 in frames[0].items():
@@ -1244,8 +1251,9 @@ def run_diffusion_inference_streaming_per_ic(
         )
 
         # Frame 0 = IC observation (physical units). For single-step
-        # rollouts the IC is at time ``ic``; for window rollouts the IC
-        # frame on disk is the *last* of the W oracle frames (Q3 = a).
+        # rollouts the IC is at time ``ic``; for window rollouts the IC is
+        # the frame BEFORE the oracle window (the window is the future
+        # y_{1:W}; under RSI the IC doubles as the anchor y_0).
         ic_phys_state = _maybe_normalize(
             normalizer, _stack_initial(dataset, [ic], device)
         )
@@ -1281,18 +1289,26 @@ def run_diffusion_inference_streaming_per_ic(
 
         # --- Rollout ---------------------------------------------------- #
         if window_mode:
-            # Build the oracle initial window [ic - init_frames + 1 .. ic],
-            # normalize, replicate across the ensemble, pack. The window always
-            # ENDS at the IC, so a scheduler asking for an extra anchor frame
-            # reaches further back rather than moving the IC.
+            # Build the oracle initial window ending at ic + W (the future
+            # window y_{1:W} the schedulers document), normalize, replicate
+            # across the ensemble, pack. A scheduler asking for an extra
+            # anchor frame (RSI, init_frames = W + 1) reaches back to the IC
+            # itself rather than moving the window.
             init_window = _maybe_normalize(
                 normalizer,
-                _stack_window_initial(dataset, ic, init_frames, device, step_size),
+                _stack_window_initial(
+                    dataset, ic, init_frames, device, step_size,
+                    end_offset=window_size,
+                ),
             )
             init_window = perturber(init_window, ensemble_size, generator=rng)
             init_y = inner_model.pack_window_state(init_window)
 
-            # Build c_grid_traj + c_scalar_traj over [ic - W + 1 .. ic + max_step - 1].
+            # Build c_grid_traj + c_scalar_traj: slot j is the forcing at
+            # absolute step j (store row ic + j * step_size), so roll k's
+            # window slot w — holding state y_{k+w+1} — is conditioned on
+            # traj[k+w], its LAG-1 forcing (the forcing_lag=1 training
+            # alignment). Slots span [ic, ic + (W + max_step - 2) * step].
             # +1 with predicted ocean channels: they are imposed from the
             # boundary at each slot's own time, one step past the last forcing
             # the model is conditioned on (Phase 12f). Omitting it would clamp
@@ -1302,18 +1318,22 @@ def run_diffusion_inference_streaming_per_ic(
             ocean_lookahead = int(bool(getattr(scheduler, "nocean", 0)))
             n_archive = int(getattr(dataset, "n_time", 0) or 0)
             if ocean_lookahead and n_archive and (
-                ic + (max_step + 1) * step_size >= n_archive
+                ic + (window_size + max_step - 1) * step_size >= n_archive
             ):
                 ocean_lookahead = 0
             traj_len = window_size + max_step - 1 + ocean_lookahead
+            last_row = ic + (traj_len - 1) * step_size
+            if n_archive and last_row >= n_archive:
+                raise ValueError(
+                    f"window rollout from ic={ic} needs store row {last_row} "
+                    f"(forcing trajectory of W={window_size} + "
+                    f"horizon={max_step}) but the archive has {n_archive} "
+                    f"rows; use an earlier IC or a shorter horizon."
+                )
             traj_frames = [
                 _maybe_normalize(
                     normalizer,
-                    _stack_at_step(
-                        dataset,
-                        [ic + (j - window_size + 1) * step_size],
-                        device,
-                    ),
+                    _stack_at_step(dataset, [ic + j * step_size], device),
                 )
                 for j in range(traj_len)
             ]

@@ -351,19 +351,16 @@ def _validator_all_ics(scheduler, *, horizon):
     )
 
 
-def test_extra_anchor_frame_reserves_ic_headroom():
-    """The window still ENDS at the IC, so the extra frame comes from the past.
-
-    Only the FIRST admissible IC moves (one more past frame is needed); the
-    last one is set by the horizon and must not move.
-    """
+def test_extra_anchor_frame_costs_no_ic_headroom():
+    """The oracle window is the FUTURE y_{1:W}; RSI's extra anchor frame is
+    the IC itself, so asking for it must not change which ICs are admissible
+    (nothing before the IC is ever read)."""
     a = _validator_all_ics(_RecordingRollingScheduler(window_size=3),
                            horizon=3)._select_ic_indices(rank=0, world_size=1)
     b = _validator_all_ics(_RecordingInitFrames(window_size=3, init_frames=4),
                            horizon=3)._select_ic_indices(rank=0, world_size=1)
-    assert min(b) == min(a) + 1                  # one more past frame reserved
-    assert max(b) == max(a)                      # the last usable IC is unmoved
-    assert len(b) == len(a) - 1
+    assert b == a
+    assert min(a) == 0                            # no past rows reserved
 
 
 def test_window_rollout_with_a_multi_ic_batch():
@@ -391,3 +388,114 @@ def test_window_rollout_with_a_multi_ic_batch():
     out = v.run(nn.Identity(), epoch=0)
     assert scheduler.calls, "the rolling sampler was never reached"
     assert out is None or isinstance(out, dict)
+
+
+# ---------------------------------------------------------------------------
+# Emit-time alignment regression (2026-08). The driver used to hand the
+# schedulers a PAST window ending at the IC where their contract is the
+# FUTURE oracle window y_{1:W} — every emit then trailed its scored truth by
+# W steps and the forcings ran one step off the lag-1 training alignment.
+# ---------------------------------------------------------------------------
+
+
+class _OracleEchoScheduler(nn.Module):
+    """Records its inputs and echoes the oracle window back as the forecast.
+
+    When the driver honors the contract, emit k IS the truth at t + k, so the
+    validator's RMSE must be exactly zero at every step.
+    """
+
+    def __init__(self, window_size=3, init_frames=None, nocean=0):
+        super().__init__()
+        self.window_size = window_size
+        if init_frames is not None:
+            self.init_frames = init_frames
+        self.nocean = nocean
+        self.num_steps = 2
+        self.seen: dict = {}
+
+    def sample_rollout(self, model, init_window, c_grid_traj, c_scalar_traj,
+                       horizon, num_steps=None):
+        self.seen = {
+            "init": init_window.detach().clone(),
+            "c_grid": c_grid_traj.detach().clone(),
+            "c_scalar": c_scalar_traj.detach().clone(),
+        }
+        n_anchor = init_window.shape[1] - self.window_size
+        return init_window[:, n_anchor:n_anchor + horizon]
+
+
+def _emit_time_validator(scheduler, *, horizon):
+    return DiffusionRolloutValidator(
+        _StubDataset(),
+        wrapper=_StubWrapper(),
+        inference_scheduler=scheduler,
+        log_steps=list(range(1, horizon + 1)),
+        device=torch.device("cpu"),
+        horizon=horizon,
+        max_initial_conditions=1,
+        batch_size=1,
+        ic_stride=1,
+        sampler_num_steps=2,
+    )
+
+
+def test_window_rollout_oracle_echo_scores_zero_rmse():
+    s = _OracleEchoScheduler(window_size=3)
+    v = _emit_time_validator(s, horizon=3)
+    results = v.run(nn.Identity(), epoch=0)
+    for step in (1, 2, 3):
+        assert results[f"rmse_step{step}_surface"] == 0.0
+
+
+def test_window_rollout_hands_future_oracle_and_lag1_forcings():
+    s = _OracleEchoScheduler(window_size=3)
+    v = _emit_time_validator(s, horizon=3)
+    v.run(nn.Identity(), epoch=0)
+    ds = v.dataset
+    t0 = v._select_ic_indices(rank=0, world_size=1)[0]
+
+    # Oracle init window = y_{1:W} — the FUTURE frames t+1 .. t+W.
+    init = s.seen["init"]
+    assert init.shape[1] == 3
+    for j in range(3):
+        assert torch.equal(init[0, j], ds._surface[t0 + j + 1])
+
+    # Forcing slot i is the LAG-1 conditioning at absolute step i (row
+    # t + i), spanning [t, t + W + horizon - 2]; the varying-boundary
+    # channel is the last one of the packed c_grid.
+    c_grid = s.seen["c_grid"]
+    assert c_grid.shape[1] == 3 + 3 - 1
+    for i in range(c_grid.shape[1]):
+        assert torch.equal(c_grid[0, i, -1:], ds._varying[t0 + i])
+        assert torch.equal(s.seen["c_scalar"][0, i], ds._calendar[t0 + i])
+
+
+def test_window_rollout_anchor_is_the_ic_frame():
+    """RSI-style init_frames = W + 1: the extra leading frame is y_0 = the
+    IC itself, and the window above it is still the future y_{1:W}."""
+    s = _OracleEchoScheduler(window_size=3, init_frames=4)
+    v = _emit_time_validator(s, horizon=3)
+    results = v.run(nn.Identity(), epoch=0)
+    ds = v.dataset
+    t0 = v._select_ic_indices(rank=0, world_size=1)[0]
+    init = s.seen["init"]
+    assert init.shape[1] == 4
+    for j in range(4):
+        assert torch.equal(init[0, j], ds._surface[t0 + j])
+    for step in (1, 2, 3):
+        assert results[f"rmse_step{step}_surface"] == 0.0
+
+
+def test_window_rollout_nocean_lookahead_frame_is_own_time():
+    """With predicted ocean channels the trajectory carries ONE extra frame
+    so the final roll's imposition (forcing window shifted +1) reaches the
+    last state's own time, t + W + horizon - 1."""
+    s = _OracleEchoScheduler(window_size=3, nocean=1)
+    v = _emit_time_validator(s, horizon=3)
+    v.run(nn.Identity(), epoch=0)
+    ds = v.dataset
+    t0 = v._select_ic_indices(rank=0, world_size=1)[0]
+    c_grid = s.seen["c_grid"]
+    assert c_grid.shape[1] == 3 + 3 - 1 + 1
+    assert torch.equal(c_grid[0, -1, -1:], ds._varying[t0 + 3 + 3 - 1])

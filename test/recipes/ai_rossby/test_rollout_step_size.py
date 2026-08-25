@@ -142,14 +142,19 @@ def test_diffusion_single_step_ic_bound_scales_with_the_step():
     assert max(v4._select_ic_indices(0, 1)) + 4 * 4 <= _N_TIME - 1
 
 
-def test_diffusion_window_ic_bound_reserves_past_and_future_in_steps():
-    # Window mode needs (W-1) past frames AND horizon future frames, both in
-    # model steps — at stride 4 that is 8 rows back and 16 rows forward.
-    v = _diff_validator(_WindowScheduler(), step_size=4)
+def test_diffusion_window_ic_bound_is_all_future_no_past():
+    # Window mode reads NOTHING before the IC (the oracle window is the
+    # future y_{1:W}) but the forcing trajectory reaches
+    # (W + horizon - 2) model steps forward — at W=3, horizon=4, stride 4
+    # that is 20 rows, dominating the horizon's 16.
+    v = _diff_validator(
+        _WindowScheduler(), step_size=4, max_initial_conditions=1000
+    )
     ics = v._select_ic_indices(0, 1)
     assert ics
-    assert min(ics) >= (3 - 1) * 4
-    assert max(ics) + 4 * 4 <= _N_TIME - 1
+    assert min(ics) == 0
+    assert max(ics) + (3 + 4 - 2) * 4 <= _N_TIME - 1
+    assert max(ics) == _N_TIME - 1 - (3 + 4 - 2) * 4
 
 
 def test_oracle_window_frames_are_a_model_step_apart():
@@ -183,11 +188,15 @@ def test_inference_window_initial_stack_strides():
     from inference import _stack_window_initial
 
     ds = _RecordingDataset()
-    out = _stack_window_initial(ds, ic=20, W=3, device=torch.device("cpu"), step_size=4)
-    assert sorted(set(ds.reads)) == [12, 16, 20]
+    out = _stack_window_initial(
+        ds, ic=20, W=3, device=torch.device("cpu"), step_size=4, end_offset=3
+    )
+    # Future oracle window y_{1:W} ending at ic + W model steps: at stride 4
+    # that is rows 24, 28, 32 — never a row at or before the IC.
+    assert sorted(set(ds.reads)) == [24, 28, 32]
     assert out["surface_in"].shape[:2] == (1, 3)
     assert [float(out["surface_in"][0, i].flatten()[0]) for i in range(3)] == [
-        12.0, 16.0, 20.0
+        24.0, 28.0, 32.0
     ]
 
 
@@ -195,8 +204,8 @@ def test_inference_window_initial_stack_defaults_to_consecutive_rows():
     from inference import _stack_window_initial
 
     ds = _RecordingDataset()
-    _stack_window_initial(ds, ic=20, W=3, device=torch.device("cpu"))
-    assert sorted(set(ds.reads)) == [18, 19, 20]
+    _stack_window_initial(ds, ic=20, W=3, device=torch.device("cpu"), end_offset=3)
+    assert sorted(set(ds.reads)) == [21, 22, 23]
 
 
 def test_inference_driver_exposes_step_size():

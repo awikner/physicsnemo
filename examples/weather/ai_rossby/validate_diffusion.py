@@ -490,12 +490,24 @@ class DiffusionRolloutValidator:
     # ------------------------------------------------------------------ #
 
     def _select_ic_indices(self, rank: int, world_size: int) -> list[int]:
-        # The maximum admissible IC index depends on the dispatch path:
-        # single-step needs ``horizon`` future frames after the IC;
-        # window mode needs ``W - 1`` past frames before *and* ``horizon``
-        # future frames after.
-        last_future = self.horizon * self.step_size
-        first_past = (self.init_frames - 1) * self.step_size if self.window_mode else 0
+        # The maximum admissible IC index depends on the dispatch path.
+        # Single-step needs ``horizon`` future frames after the IC. Window
+        # mode reads NOTHING before the IC (the oracle window is the FUTURE
+        # window y_{1:W}; RSI's extra anchor frame is the IC itself) but
+        # reaches further forward: the init window ends at t + W, the forcing
+        # trajectory at t + (W + horizon - 2 + nocean), the scored truth at
+        # t + horizon.
+        if self.window_mode:
+            nocean = int(bool(getattr(self.scheduler, "nocean", 0)))
+            last_future = self.step_size * max(
+                self.horizon,
+                self.window_size,
+                self.window_size + self.horizon - 2 + nocean,
+            )
+            first_past = 0
+        else:
+            last_future = self.horizon * self.step_size
+            first_past = 0
         max_idx = self.dataset.n_time - last_future - 1
         candidates = list(range(first_past, max_idx + 1, self.ic_stride))
         if not candidates:
@@ -504,15 +516,15 @@ class DiffusionRolloutValidator:
             # perfect model because it never evaluated one. The shipped
             # eval_suite horizon (1460, a 6-hourly year) does exactly this on a
             # one-year store at the AMIP 24-hour step.
-            max_horizon = (self.dataset.n_time - first_past - 1) // max(
-                1, self.step_size
-            )
+            reach_past_horizon = last_future // max(1, self.step_size) - self.horizon
+            max_horizon = (
+                self.dataset.n_time - 1
+            ) // max(1, self.step_size) - reach_past_horizon
             raise ValueError(
                 f"no admissible initial condition: horizon={self.horizon} x "
                 f"step_size={self.step_size} needs {last_future} future rows "
-                f"(plus {first_past} past) but the store has "
-                f"{self.dataset.n_time}. Largest horizon this store supports is "
-                f"{max(0, max_horizon)}."
+                f"but the store has {self.dataset.n_time}. Largest horizon "
+                f"this store supports is {max(0, max_horizon)}."
             )
         candidates = candidates[: self.max_initial_conditions]
         if self.member_split:
@@ -848,12 +860,12 @@ class DiffusionRolloutValidator:
         """Stack an (B, n, ...) window batch ending at ``t + w_offset`` steps.
 
         ``w_offset`` and the intra-window spacing are both in MODEL steps, so
-        the frames land ``step_size`` store rows apart — the oracle window spans
-        n model steps back from the IC, matching the training window.
-        ``n_frames`` defaults to the scheduler's ``init_frames`` (= W for
-        ERDM/RFM, W+1 for RSI, whose leading frame is slot 1's anchor); it is
-        always the LAST frame that lands on ``t + w_offset``, so the extra
-        frame is taken further into the past and the IC is unmoved.
+        the frames land ``step_size`` store rows apart, the last one on
+        ``t + w_offset``. ``n_frames`` defaults to the scheduler's
+        ``init_frames`` (= W for ERDM/RFM, W+1 for RSI, whose leading frame
+        is slot 1's anchor): at ``w_offset = W`` the ERDM window is the
+        future oracle y_{1:W} and RSI's extra frame is the anchor y_0 = the
+        IC itself.
         """
         n_frames = int(n_frames if n_frames is not None else self.init_frames)
         per_batch_windows = []
@@ -893,18 +905,28 @@ class DiffusionRolloutValidator:
     ) -> None:
         wrapper = self.wrapper.module if hasattr(self.wrapper, "module") else self.wrapper
 
-        # Initial oracle window ending at t (so frames span t - W + 1 .. t).
-        init_window = self._to_device(self._stack_window(batch_ics, w_offset=0))
+        # Oracle init window: the schedulers' contract is the FUTURE window
+        # y_{1:W} (erdm.py sample_rollout: "oracle true first window
+        # y_{1:W}"; emit k is scored against t + k below, which only lines
+        # up when the first window really holds t+1 .. t+W). RSI
+        # (init_frames = W + 1) additionally wants the anchor y_0 — the IC
+        # frame itself — so the stack ends at t + W and reaches back
+        # init_frames, leaving the anchor at t unmoved.
+        init_window = self._to_device(
+            self._stack_window(batch_ics, w_offset=self.window_size)
+        )
         init_window_ens = self.perturber(
             init_window, self.local_ensemble_size, generator=gen
         )
         init_y = wrapper.pack_window_state(init_window_ens)  # (B*E, W, C, H, W)
 
-        # Build the trajectory of forcings + scalars over the horizon
-        # (the rolling sampler advances one frame at a time; it needs
-        # forcings at each emitted frame's input slot, i.e. across
-        # [t - W + 1, t + horizon - 1] inclusive — same W-frame window
-        # shifted right by k for the k-th emit).
+        # Build the trajectory of forcings + scalars over the horizon.
+        # Trajectory slot i is the forcing at absolute step i (store row
+        # t + i * step_size): the scheduler's roll k conditions window slot
+        # w (holding state y_{k+w+1}) on traj[k+w], giving every state its
+        # LAG-1 forcing — the training alignment (sequence.py forcing_lag=1,
+        # forcing frame j conditions state frame j+1). Slots therefore span
+        # [t, t + (W + horizon - 2) * step_size].
         # Phase 12f: predicted ocean channels are imposed from the boundary at
         # each window slot's OWN time, which reaches one step past the last
         # forcing the model is conditioned on. Without this extra frame
@@ -918,12 +940,7 @@ class DiffusionRolloutValidator:
         )
         traj_frames = [
             self._to_device(
-                self._stack(
-                    [
-                        t + (i - self.window_size + 1) * self.step_size
-                        for t in batch_ics
-                    ]
-                )
+                self._stack([t + i * self.step_size for t in batch_ics])
             )
             for i in range(traj_len)
         ]

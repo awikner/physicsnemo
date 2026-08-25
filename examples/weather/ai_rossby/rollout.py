@@ -262,14 +262,26 @@ def _traj_windows(cfg, dataset, forecaster, scheduler, *, ic, horizon, step_size
     W = int(scheduler.window_size)
     ocean_lookahead = int(bool(getattr(scheduler, "nocean", 0)))
     n_archive = int(getattr(dataset, "n_time", 0) or 0)
-    if ocean_lookahead and n_archive and ic + (horizon + 1) * step_size >= n_archive:
+    if ocean_lookahead and n_archive and (
+        ic + (W + horizon - 1) * step_size >= n_archive
+    ):
         ocean_lookahead = 0
         log.warning("ocean lookahead disabled: the last roll runs past the archive")
+    # Slot j = forcing at absolute step j (row ic + j * step_size): roll k's
+    # window slot w holds state y_{k+w+1} and is conditioned on traj[k+w],
+    # its lag-1 forcing — the forcing_lag=1 training alignment.
     traj_len = W + horizon - 1 + ocean_lookahead
+    last_row = ic + (traj_len - 1) * step_size
+    if n_archive and last_row >= n_archive:
+        raise ValueError(
+            f"rollout from ic={ic} needs store row {last_row} (forcing "
+            f"trajectory of W={W} + horizon={horizon}) but the archive has "
+            f"{n_archive} rows; use an earlier IC or a shorter horizon."
+        )
     frames = [
         _maybe_normalize(
             normalizer,
-            _stack_at_step(dataset, [ic + (j - W + 1) * step_size], device),
+            _stack_at_step(dataset, [ic + j * step_size], device),
         )
         for j in range(traj_len)
     ]
@@ -366,11 +378,13 @@ def main(cfg: DictConfig) -> None:
     else:
         from inference import _stack_window_initial
 
-        # The oracle stack always ENDS at the IC; a data-coupled scheduler
-        # (RSI) asks for one more frame and reaches further back for it.
+        # The oracle stack is the FUTURE window ending at ic + W (ERDM:
+        # y_{1:W}); a data-coupled scheduler (RSI) asks for one more frame
+        # and reaches back to the IC itself for its anchor y_0.
         n_init = int(getattr(f_sched, "init_frames", f_sched.window_size))
         init = _stack_window_initial(
-            dataset, ic, n_init, dist.device, step_size=step_size)
+            dataset, ic, n_init, dist.device, step_size=step_size,
+            end_offset=int(f_sched.window_size))
         x_bar, eps_prev = combined.windowed_init(forecaster.pack_window_state(init))
         start_step = 0
 
