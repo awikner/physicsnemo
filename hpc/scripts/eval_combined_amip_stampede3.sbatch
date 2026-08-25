@@ -29,12 +29,12 @@
 #   EVAL_MODEL=amip_combined_rsi_fancy sbatch hpc/scripts/eval_combined_amip_stampede3.sbatch
 #   EVAL_HORIZON=5 sbatch -t 0:30:00 hpc/scripts/eval_combined_amip_stampede3.sbatch   # smoke
 
+# Stampede3's slurm rejects --gpus-per-node ("Invalid generic resource"):
+# h100 nodes are allocated whole via -N/-n, no gres request.
 #SBATCH -p h100
 #SBATCH -A TG-ATM170020
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=16
+#SBATCH -N 1
+#SBATCH -n 1
 #SBATCH -t 12:00:00
 #SBATCH --job-name=eval-combined-amip
 #SBATCH --output=hpc/scripts/logs/eval-combined-amip-%j.out
@@ -44,8 +44,14 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p hpc/scripts/logs
 
+# The deployed trees on Stampede3 carry no venv of their own: source the main
+# checkout's venv, then pin PYTHONPATH to THIS tree so `physicsnemo` resolves
+# here and not from the venv's editable install of the other checkout (that
+# silent mis-resolution has bitten before — GroupNotFoundError on configs the
+# other tree predates).
 # shellcheck disable=SC1091
-source "${AI_ROSSBY_VENV:-.venv}/bin/activate"
+source "${AI_ROSSBY_VENV:-/work2/09979/awikner/stampede3/physicsnemo/.venv}/bin/activate"
+export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 
 export AI_ROSSBY_DATA="${AI_ROSSBY_DATA:-${SCRATCH}/physicsnemo-zarr}"
 export AI_ROSSBY_AMIP_CKPT="${AI_ROSSBY_AMIP_CKPT:-/work2/09979/awikner/stampede3/amip-checkpoints}"
