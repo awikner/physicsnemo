@@ -59,8 +59,17 @@ export AI_ROSSBY_AMIP_CKPT="${AI_ROSSBY_AMIP_CKPT:-/work2/09979/awikner/stampede
 MODEL="${EVAL_MODEL:-amip_combined_fancy}"
 HORIZON="${EVAL_HORIZON:-1827}"
 IC_DATE="${EVAL_IC_DATE:-1996-01-01}"
-OUTDIR="./outputs/eval_combined_${MODEL#amip_combined_}"
+# Optional forecaster-checkpoint override (e.g. a newer epoch of the same
+# architecture); EVAL_TAG names the output dir so arms don't overwrite.
+FC_CKPT="${EVAL_FORECASTER_CKPT:-}"
+TAG="${EVAL_TAG:-${MODEL#amip_combined_}}"
+OUTDIR="./outputs/eval_combined_${TAG}"
 mkdir -p "${OUTDIR}"
+EXTRA=()
+if [ -n "${FC_CKPT}" ]; then
+  EXTRA+=("++model.forecaster.checkpoint=${FC_CKPT}")
+  echo "forecaster checkpoint override: ${FC_CKPT}"
+fi
 
 nvidia-smi || true
 echo "== ${MODEL}: IC ${IC_DATE}, horizon ${HORIZON}, forecaster num_steps=2 =="
@@ -84,6 +93,7 @@ python -m torch.distributed.run --standalone --nproc-per-node=1 \
     ++eval_suite.headline.enabled=True \
     ++eval_suite.partial_save_every_frames=365 \
     "+eval_suite.output_path=${OUTDIR}/eval_suite.pt" \
-    "run_name=eval_combined_${MODEL#amip_combined_}"
+    "run_name=eval_combined_${TAG}" \
+    ${EXTRA[@]+"${EXTRA[@]}"}
 
 echo "done -> ${OUTDIR}/eval_suite.pt"
