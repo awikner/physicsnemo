@@ -269,6 +269,114 @@ To convert a checkpoint for a **new model family**, follow the same pattern:
 copy one of these scripts and adjust `translate_state_dict()` for that
 wrapper's submodule prefix.
 
+### 3.1 ThorCast SFNO checkpoints (a channel-order, not a key-name, problem)
+
+ThorCast (`/eagle/MDClimSim/troyarcomano/ThorCast`, ANL Polaris) is a *third*
+source of PLASIM SFNO weights, and it needs its own first stage. Despite the
+`.pth` suffix it is **not** Lightning — `trainer_PLASIM_v4.py` does a plain
+`torch.save({epoch, step, model_state_dict, optimizer_state_dict,
+scheduler_state_dict})` under ezpz + DDP — and it trains the *same* vendored
+Modulus SFNO, so every `state_dict` key already matches. What differs is how the
+flat input vector is assembled:
+
+```
+ThorCast   [ surface | upper_air×levels | constant_boundary | varying_boundary ]
+PanguWeather v2 / ai-rossby
+           [ surface | constant_boundary | varying_boundary | upper_air×levels ]
+```
+
+plus `constant_boundary` being `lsm, z0, sg` upstream against `lsm, sg, z0`
+here. A key-name check cannot see either difference: loading ThorCast weights
+directly **runs fine and returns nonsense**. So conversion is two stages —
+`thorcast_sfno.py` does the semantic work, then the existing translator is a
+pure key re-prefix:
+
+```bash
+# A: ThorCast .pth -> PanguWeather-layout .tar (weights-only, ema_state=None)
+python tools/checkpoint_translation/thorcast_sfno.py \
+    --source /path/to/..._no_soil_ff_best_val.pth \
+    --model-config examples/weather/ai_rossby/conf/model/sfno_plasim_5412.yaml \
+    --output /path/to/sfno_plasim_thorcast_no_soil_ff.tar
+
+# B: .tar -> .mdlus
+python tools/checkpoint_translation/sfno_plasim.py \
+    --source /path/to/sfno_plasim_thorcast_no_soil_ff.tar \
+    --model-config examples/weather/ai_rossby/conf/model/sfno_plasim_5412.yaml \
+    --output /path/to/sfno_plasim_thorcast_no_soil_ff.mdlus --strict
+```
+
+Notes that cost real debugging time:
+
+- **Pair with `model=sfno_plasim_5412`, not `sfno_plasim`.** ThorCast's `Params`
+  object carries only `data_grid`, so every other hyperparameter is a class
+  *default*: `pos_embed=True`, `num_blocks=16`,
+  `hard_thresholding_fraction=1.0`. The `5412` config matches all three; the
+  lighter `sfno_plasim.yaml` disagrees on all three. (The
+  `hard_thresholding_fraction = 0.9` in `inference_PLASIM_v4.py` is a dead local
+  — it is never passed to the constructor.)
+- **`big_skip` doubles the permutation.** Both implementations do
+  `torch.cat((x, residual), dim=1)`, so the trailing `in_chans` columns of
+  `decoder.0.weight` are raw input and take the *same* gather as
+  `encoder.0.weight`. Permuting only the encoder is the classic silent failure.
+- **Use `*_best_val.pth`.** Many ThorCast `*_latest_epoch.pth` files carry a
+  stale CRC on the zip's `data.pkl` record (tensor storages are intact;
+  `torch.load` copes, strict zip readers do not). Where both exist for a
+  finished run they are usually the same weights — for `_no_soil_ff` all 606
+  tensor storages are byte-identical.
+- **Normalization must come from ThorCast's own statistics**, which are split
+  across five NetCDF pairs plus one group computed at load time. Merge them with
+  `tools/data/plasim/build_thorcast_stats.py` and compose
+  `dataset=plasim_thorcast_12-111`; see §2.1.
+
+**Validation status (2026-08-25, `_no_soil_ff`, epoch 50).** End-to-end checked
+by running ThorCast's *own* vendored SFNO with its *original* (unpermuted)
+weights on a Polaris debug node, against the translated `.mdlus` driven by this
+recipe's datapipe, on the same year-12 sample:
+
+| check | result |
+|---|---|
+| strict `.mdlus` load | 0 missing / 0 unexpected, 106.90 M params |
+| ThorCast impl vs `.mdlus` output (53 ch) | rel **1.2e-06**, corr **1.0000000000** |
+| same test with weights left unpermuted | rel **1.48** — the permutation is load-bearing |
+| merged stats vs ThorCast's own `torch.mean/std` | rel **6.8e-08** |
+| data path: `pl/tas/sst/rsdt/sic/ta/ua/va/hus`, constant boundary | **exact** (0.0; const 1.2e-08) |
+| data path: `zg` | **~1 m RMS, ~12 m peak** — see below |
+
+> **The one known divergence is `zg`.** The PLASIM Zarr's `zg` and ThorCast's
+> `.nc` `plev` `zg` are different sigma→pressure derivations (the Zarr's
+> `source_config` attr names the PanguWeather H5 archive), so they differ by
+> ~1 m RMS / ~10.5–12.3 m peak geopotential height at every level — up to 0.03σ
+> normalized, correlation ≥ 0.99995. Every other channel is bit-identical. This
+> is a data-provenance difference, **not** a translation error: don't chase it as
+> a checkpoint bug. It does mean a translated ThorCast checkpoint will not
+> reproduce ThorCast's own rollout bit-for-bit.
+
+### 2.1 ThorCast normalization (and the NaN fills that go with it)
+
+`build_thorcast_stats.py` merges ThorCast's five stats pairs into the single
+mean/std store `ClimateNormalizer` expects, and handles the two places the
+arithmetic is easy to get subtly wrong:
+
+- **Constant boundary has no stats file.** ThorCast z-scores `lsm`/`z0`/`sg` by
+  each map's own *spatial* mean/std at load time. The tool recomputes those and
+  writes them as ordinary entries, so `normalize_constant_boundary: True`
+  reproduces ThorCast with no library change. The NaN fill happens *before* the
+  reduction, and the std is the **unbiased (N−1)** estimator `torch.std` uses —
+  not numpy's population default.
+- **`zg` is subset.** Its stats live on a 13-level `Z` coord but the model
+  consumes `Z[3:13]` (20000–100000 Pa), which is exactly the `pressure_level`
+  coord the PLASIM Zarr advertises.
+
+> **The PLASIM Zarr is genuinely masked, so `nan_fill_values` is not optional.**
+> At year 12, `sst` is 32.5% NaN (land), `sic` 88.4% and `lsm` 67.5% (ocean).
+> ThorCast's `mask_fill` uses **`sst: 270.0`**, `sic: 0.0`, `lsm: 0.0`. Leaving
+> `sst` on the `nan_fill_default: 0.0` feeds 0 K over every land point, which
+> z-scores to roughly **−14.8σ** against sst's own mean/std (282.96 / 19.15)
+> instead of the −0.68σ the model was trained on. `conf/dataset/plasim_thorcast_12-111.yaml`
+> spells all three out. Note that `conf/dataset/plasim_sim52_train_val.yaml`
+> still carries `nan_fill_values: {}` — worth a look before trusting SFNO-PLASIM
+> numbers produced against it.
+
 ### Resuming training vs. converting for inference
 
 The translators produce a weights-only `.mdlus` for inference or as a warm

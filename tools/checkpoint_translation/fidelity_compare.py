@@ -90,7 +90,10 @@ def _build_model(model_yaml: Path, target_class: str):
         )
     with open(model_yaml) as fh:
         cfg = yaml.safe_load(fh)
-    for k in ("name", "module", "target", "model_type"):
+    # Mirror train.py's _MODEL_CONFIG_ONLY_KEYS: identity fields plus
+    # `timedelta_hours`, which is recipe metadata (the model family's timestep,
+    # read by train_loop.model_step_rows) and not a constructor argument.
+    for k in ("name", "module", "target", "model_type", "timedelta_hours"):
         cfg.pop(k, None)
     return classes[target_class](**cfg)
 

@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PLASIM sim52 data paired with ThorCast's *training-time* normalization.
+#
+# Use this (not `plasim_sim52_train_val`) when running a checkpoint translated
+# off ThorCast by `tools/checkpoint_translation/thorcast_sfno.py`. Compose with
+# `model=sfno_plasim_5412`, whose architecture matches ThorCast's SFNO exactly.
+#
+# Why a separate config: ThorCast trained against the years-12-111 statistics on
+# ANL Eagle, while `plasim_sim52_train_val` points at the years-12-132 pair. The
+# Zarr stores are the same sim52 data either way — the PLASIM Zarr's own attrs
+# name `SFNO_PLASIM_H5_DERECHO_5412.yaml` as its source config, and its
+# `pressure_level` coord (20000..100000 Pa) is exactly the `plev[3:13]` subset
+# ThorCast selects — but feeding a model statistics it wasn't trained on shifts
+# every channel. The merged 12-111 store is built by
+# `tools/data/plasim/build_thorcast_stats.py`.
+#
+# That store also carries `lsm` / `z0` / `sg` entries equal to each static map's
+# own SPATIAL mean/std. ThorCast computes those at load time rather than reading
+# a stats file (`_load_constant_boundary_data`), so writing them out is what lets
+# `normalize_constant_boundary: True` reproduce ThorCast's scaling exactly.
+
+zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/plasim/12.zarr
+val_zarr_path: ${oc.env:AI_ROSSBY_DATA,/work/hdd/bdiu/awikner/physicsnemo-zarr}/plasim/13.zarr
+
+# Single Zarr carrying both sides under a `stat` coord, so mean_path == std_path
+# (the packed layout ClimateNormalizer already handles for the S2S stores).
+mean_path: ${oc.env:AI_ROSSBY_THORCAST_STATS,/work/nvme/bdiu/awikner/thorcast-migration}/normalization_12-111.zarr
+std_path: ${oc.env:AI_ROSSBY_THORCAST_STATS,/work/nvme/bdiu/awikner/thorcast-migration}/normalization_12-111.zarr
+
+# ThorCast's PANGU_NEW_0171_no_soil.yaml sets `predict_delta: False`, so the
+# tendency-std store is not needed and must stay null.
+delta_std_path: null
+
+boundary_zarr_path: null
+yearly_repeating_boundary: False
+leap_boundary_zarr_path: null
+non_leap_boundary_zarr_path: null
+
+# Left null on purpose: the step belongs to the model family, not the store.
+# `train_loop.model_step_rows` reads `model.timedelta_hours` (6 h for
+# sfno_plasim*) and divides by this store's `data_timedelta_hours` (also 6).
+forecast_lead_times: null
+
+num_samples_per_epoch: null
+batch_size: 8
+num_workers: 8
+prefetch_factor: 2
+persistent_workers: True
+pin_memory: True
+nan_fill_default: 0.0
+
+# MUST mirror ThorCast's `mask_fill` dict (data_loader_multifiles_v4.py:111).
+# The PLASIM Zarr is genuinely masked: at year 12, `sst` is 32.5% NaN (land),
+# `sic` 88.4% NaN and `lsm` 67.5% NaN (ocean). Leaving `sst` on the 0.0 default
+# would feed 0 K over every land point, which z-scores to about -14.8 sigma
+# against sst's own mean/std (282.96 / 19.15) instead of the -0.68 sigma
+# ThorCast trained on. `sic`/`lsm` coincide with the default but are spelled out
+# so the contract is reviewable rather than inherited.
+nan_fill_values:
+  sst: 270.0
+  sic: 0.0
+  lsm: 0.0
+
+shuffle: True
+
+# Both True to match ThorCast: it z-scores the constant-boundary maps
+# (see header) and normalizes the pr_6h diagnostic via `diagnostic_mean/std`.
+normalize_constant_boundary: True
+normalize_diagnostic: True

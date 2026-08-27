@@ -160,7 +160,10 @@ def build_target_model_from_yaml(model_yaml: Path):
 
     # Strip Hydra-only metadata keys (Phase C added `module:` for
     # Module.instantiate; it's not a SfnoPlasim constructor arg).
-    for k in ("name", "module", "target", "model_type"):
+    # Mirror train.py's _MODEL_CONFIG_ONLY_KEYS: identity fields plus
+    # `timedelta_hours`, which is recipe metadata (the model family's timestep,
+    # read by train_loop.model_step_rows) and not a constructor argument.
+    for k in ("name", "module", "target", "model_type", "timedelta_hours"):
         cfg.pop(k, None)
     return SfnoPlasim(**cfg)
 
