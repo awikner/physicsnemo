@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Combined cascade with the ERDM_sst_pred forecaster (ep-23, Derecho mirror of
+# azhou4's 08-14 continuation) — the prime candidate for the model behind the
+# reference headline table (combined_rusty_sst.yaml). Downscaler identical to
+# amip_combined_fancy.yaml.
+timedelta_hours: 24
+forecaster:
+  model: amip_erdm_sst_pred       # 153 ch (151 + 2 ocean), c_grid 5, scalar 2
+  sampler: erdm_v2
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/sstpred_ep23/erdm_sstpred_ep23.mdlus
+downscaler:
+  model: amip_x_ddc_dit
+  sampler: x_ddc
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/translated/x_ddc_dit.mdlus

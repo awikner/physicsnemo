@@ -70,6 +70,13 @@ if [ -n "${FC_CKPT}" ]; then
   EXTRA+=("++model.forecaster.checkpoint=${FC_CKPT}")
   echo "forecaster checkpoint override: ${FC_CKPT}"
 fi
+# Free-form extra hydra overrides (word-split), e.g. dataset knobs a model
+# variant needs: EVAL_EXTRA_ARGS="dataset.sst_anomaly_channel=none ..."
+if [ -n "${EVAL_EXTRA_ARGS:-}" ]; then
+  read -r -a _extra_args <<< "${EVAL_EXTRA_ARGS}"
+  EXTRA+=("${_extra_args[@]}")
+  echo "extra overrides: ${EVAL_EXTRA_ARGS}"
+fi
 
 nvidia-smi || true
 echo "== ${MODEL}: IC ${IC_DATE}, horizon ${HORIZON}, forecaster num_steps=2 =="
