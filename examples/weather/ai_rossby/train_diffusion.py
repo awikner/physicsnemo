@@ -192,6 +192,7 @@ def _build_dataset(cfg: DictConfig) -> ClimateZarrDataset:
         normalize_constant_boundary=bool(
             data.get("normalize_constant_boundary", False)
         ),
+        constant_stats=str(data.get("constant_boundary_stats", "file")),
         normalize_diagnostic=bool(data.get("normalize_diagnostic", False)),
         **normalizer_kwargs,
     )
@@ -427,6 +428,7 @@ def _build_validator(
         normalize_constant_boundary=bool(
             cfg.dataset.get("normalize_constant_boundary", False)
         ),
+        constant_stats=str(cfg.dataset.get("constant_boundary_stats", "file")),
         normalize_diagnostic=bool(cfg.dataset.get("normalize_diagnostic", False)),
     ).to(device)
 

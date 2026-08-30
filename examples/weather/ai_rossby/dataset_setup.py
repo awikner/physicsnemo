@@ -201,6 +201,9 @@ def build_nan_fill(cfg: DictConfig, *, strict: bool = False):
         smooth_sigma=float(data.get("smooth_sigma", 1.5)),
         smooth_kernel_size=int(data.get("smooth_kernel_size", 5)),
         smooth_n_iters=int(data.get("smooth_n_iters", 10)),
+        # upstream-parity coast fade of the constant land-sea mask itself
+        # (kernel 3 hardcoded in the transform, matching upstream)
+        smooth_constant_lsm=bool(data.get("smooth_constant_lsm", False)),
     )
 
 

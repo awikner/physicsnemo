@@ -56,6 +56,11 @@ shuffle: True
 # override with ++dataset.normalize_constant_boundary=true for upstream
 # checkpoints rather than flipping this default under in-fork ones.
 normalize_constant_boundary: False
+# With normalize_constant_boundary=True, "spatial" reproduces upstream's
+# per-field call-time stats (computed AFTER fill + lsm smoothing); "file"
+# keeps the .nc-entry z-score. For full upstream parity ALSO set
+# smooth_constant_lsm: True below.
+constant_boundary_stats: file
 normalize_diagnostic: True
 # Runtime coast fade — live here (the full-res boundaries carry NaN),
 # matching upstream's smooth_nan_boundaries training-time fill exactly.
@@ -63,6 +68,10 @@ smooth_nan_boundaries: True
 smooth_sigma: 1.5
 smooth_kernel_size: 5
 smooth_n_iters: 10
+# Upstream also coast-fades the constant land-sea mask itself (kernel 3,
+# hardcoded to match their _load_constant_boundary_data). Off by default:
+# in-fork-trained checkpoints learned on the hard 0/1 mask.
+smooth_constant_lsm: False
 # SST suite ON: the fancy contracts derive the anomaly channel + the
 # global-mean trend scalar from the boundary stream at load time.
 sst_anomaly_channel: append

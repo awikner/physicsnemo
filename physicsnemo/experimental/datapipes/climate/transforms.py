@@ -113,11 +113,25 @@ class ClimateNormalizer:
         diagnostic_variables: Sequence[str] = (),
         normalize_constant_boundary: bool = False,
         normalize_diagnostic: bool = False,
+        constant_stats: str = "file",
         predict_delta: bool = False,
         delta_std_path: Optional[str | Path] = None,
     ) -> None:
         self._normalize_constant_boundary = normalize_constant_boundary
         self._normalize_diagnostic = normalize_diagnostic
+        # "file": z-score constants with the stats-file entries (this class's
+        # historical behavior). "spatial": per-field spatial mean / unbiased
+        # std computed from the constant tensor itself at call time — upstream
+        # amip_v2's convention (data/amip.py _load_constant_boundary_data
+        # z-scores AFTER fill + land-sea-mask smoothing, so only call-time
+        # stats can see the smoothed field). Root-caused 2026-08-29: feeding
+        # raw constants to an upstream-trained checkpoint destroys its whole
+        # varying-forcing pathway via the model's source_norm.
+        if constant_stats not in ("file", "spatial"):
+            raise ValueError(
+                f"constant_stats must be 'file' or 'spatial', got {constant_stats!r}"
+            )
+        self._constant_stats = constant_stats
         self._predict_delta = bool(predict_delta)
         if self._predict_delta and delta_std_path is None:
             raise ValueError(
@@ -155,7 +169,7 @@ class ClimateNormalizer:
         # Skip constant-boundary stats lookup unless we'll actually normalize
         # them — the SFNO_S2S stats zarr doesn't ship stats for land_sea_mask
         # / geopotential_at_surface (they're truly constant).
-        if normalize_constant_boundary:
+        if normalize_constant_boundary and constant_stats == "file":
             self.constant_mean, self.constant_std = self._stack_scalars(
                 mean, std, constant_boundary_variables
             )
@@ -369,14 +383,18 @@ class ClimateNormalizer:
             out["varying_boundary"] = (
                 out["varying_boundary"] - self.varying_mean
             ) / self.varying_std
-        if (
-            self._normalize_constant_boundary
-            and "constant_boundary" in out
-            and self.constant_mean is not None
-        ):
-            out["constant_boundary"] = (
-                out["constant_boundary"] - self.constant_mean
-            ) / self.constant_std
+        if self._normalize_constant_boundary and "constant_boundary" in out:
+            cb = out["constant_boundary"]
+            if self._constant_stats == "spatial":
+                # upstream amip_v2 semantics: per-field spatial mean / unbiased
+                # std of the (filled, lsm-smoothed) constant field itself.
+                c_mean = cb.mean(dim=(-2, -1), keepdim=True)
+                c_std = cb.std(dim=(-2, -1), keepdim=True)
+                out["constant_boundary"] = (cb - c_mean) / c_std
+            elif self.constant_mean is not None:
+                out["constant_boundary"] = (
+                    cb - self.constant_mean
+                ) / self.constant_std
         if (
             self._normalize_diagnostic
             and "diagnostic" in out
@@ -575,6 +593,7 @@ class NanFillTransform:
         smooth_sigma: float = 1.5,
         smooth_kernel_size: int = 5,
         smooth_n_iters: int = 10,
+        smooth_constant_lsm: bool = False,
     ) -> None:
         self._scan_constant = scan_constant
         self._scan_varying = scan_varying
@@ -587,6 +606,20 @@ class NanFillTransform:
         self._smooth_sigma = float(smooth_sigma)
         self._smooth_kernel_size = int(smooth_kernel_size)
         self._smooth_n_iters = int(smooth_n_iters)
+        # Upstream amip_v2 additionally coast-fades the constant land-sea mask
+        # itself (data/amip.py _load_constant_boundary_data): the binary edge
+        # is softened with the SAME masked-Gaussian diffusion, kernel_size=3
+        # HARDCODED upstream (independent of the boundary-fill kernel). The
+        # boundary encoder of upstream-trained checkpoints learned coastal
+        # features on that softened mask, so evaluating them against a hard
+        # 0/1 mask leaves a systematic coastal forcing bias (~2x on the z500
+        # climatological headline, measured 2026-08-29).
+        self._smooth_constant_lsm = bool(smooth_constant_lsm)
+        self._lsm_index = (
+            list(constant_boundary_variables).index("land_sea_mask")
+            if "land_sea_mask" in list(constant_boundary_variables)
+            else None
+        )
         fill_values = fill_values or {}
         self._const_fill = self._build_fill_tensor(
             constant_boundary_variables, fill_values
@@ -645,6 +678,18 @@ class NanFillTransform:
             out["constant_boundary"] = self._fill_boundary(
                 out["constant_boundary"], self._const_fill
             )
+            if self._smooth_constant_lsm and self._lsm_index is not None:
+                cb = out["constant_boundary"].clone()
+                lsm = cb[..., self._lsm_index, :, :]
+                cb[..., self._lsm_index, :, :] = smooth_masked_boundary(
+                    lsm,
+                    (lsm > 0.5).to(lsm.dtype),
+                    sigma=self._smooth_sigma,
+                    kernel_size=3,  # upstream hardcodes 3 for the lsm fade
+                    n_iters=self._smooth_n_iters,
+                    lon_circular=True,
+                )
+                out["constant_boundary"] = cb
             if self._strict:
                 _assert_finite(out["constant_boundary"], "constant_boundary")
         if self._scan_varying and "varying_boundary" in out and self._varying_fill is not None:

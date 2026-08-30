@@ -1022,6 +1022,7 @@ def main(cfg) -> None:
         normalize_constant_boundary=bool(
             ds_cfg.dataset.get("normalize_constant_boundary", False)
         ),
+        constant_stats=str(ds_cfg.dataset.get("constant_boundary_stats", "file")),
         normalize_diagnostic=bool(ds_cfg.dataset.get("normalize_diagnostic", False)),
         **norm_kwargs,
     ).to(dist.device)
