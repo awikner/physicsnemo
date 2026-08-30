@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The "nochurn" ERDM inference block from the collaborator's reference bias
+# run (bias_logs_nochurn/config.yml, 2026-08-28): stochastic churn fully off
+# (S_churn 0, S_noise 1.0, S_tmin=S_tmax=10 empty band). Everything else
+# matches sampler/erdm_v2.yaml.
+_target_: physicsnemo.experimental.diffusion.ERDMScheduler
+window_size: 6
+num_steps: 2
+sigma_min: 0.002
+sigma_max: 500.0
+rho: -10.0
+sigma_data: 1.0
+P_mean: 2.0
+P_std: 1.2
+solver: heun
+S_churn: 0.0
+S_tmin: 10.0
+S_tmax: 10.0
+S_noise: 1.0
+noise: gaussian
+l_max: 90
+noise_scale_path: null
+alpha: 0.0
+# Phase 12f: relative weight of the predicted-ocean channels in the loss.
+# ``nocean`` and ``ocean_grid_indices`` are NOT set here — the recipe injects
+# them from the model's ``ocean_state_variables``, so the tail width and the
+# c_grid indices it is read from can never disagree with the pack.
+# Inert unless the model config asks for ocean channels.
+ocean_loss_weight: 1.0

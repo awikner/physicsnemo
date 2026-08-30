@@ -43,6 +43,18 @@ nan_fill_values:
   sea_surface_temperature_monthly_interp: 270.0
   sea_ice_cover_monthly_interp: 0.0
 shuffle: True
+# PER-CHECKPOINT, load-bearing (root-caused 2026-08-29). Upstream amip_v2's
+# loader z-scores the constant boundary per field (the .nc entries ARE those
+# spatial stats: z_sfc 3709.2/8272.3, lsm 0.3357/0.4537), so every
+# upstream-TRAINED checkpoint (ERDM fancy / sst_pred, x_DDC) needs True here
+# — with False the raw geopotential_at_surface (up to 5.3e4) enters c_grid
+# and the model's input_embed.source_norm RMS-crushes the solar/SST/ice
+# forcings to ~1e-4: no seasonal signal, a −117 hPa pressure collapse within
+# days, intact day-1 skill (the failure mode that mimicked model drift for
+# the whole bias-gap investigation). Models TRAINED in this fork before
+# 2026-08-29 learned with False; keep train/eval matched per checkpoint —
+# override with ++dataset.normalize_constant_boundary=true for upstream
+# checkpoints rather than flipping this default under in-fork ones.
 normalize_constant_boundary: False
 normalize_diagnostic: True
 # Runtime coast fade — live here (the full-res boundaries carry NaN),
