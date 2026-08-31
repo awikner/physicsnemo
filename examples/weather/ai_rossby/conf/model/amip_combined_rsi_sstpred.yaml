@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI sst_pred (corrected-constants retrain, e1 harvest) through the Combined
+# cascade. Pair with dataset knobs: sst_anomaly_channel=none,
+# scalar_forcing=none, and the constant fixes ON (the retrain TRAINED with
+# them): normalize_constant_boundary=true constant_boundary_stats=spatial
+# smooth_constant_lsm=true.
+timedelta_hours: 24
+forecaster:
+  model: amip_rsi_sst_pred        # 153 ch, c_grid 5, scalar 2, 2 heads
+  sampler: rsi_sstpred_e1
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/rsi_sstpred/RollingDiTWrapper.0.1.mdlus
+downscaler:
+  model: amip_x_ddc_dit
+  sampler: x_ddc
+  checkpoint: ${oc.env:AI_ROSSBY_AMIP_CKPT,/work2/09979/awikner/stampede3/amip-checkpoints}/translated/x_ddc_dit.mdlus
