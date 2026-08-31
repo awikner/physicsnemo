@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AMIP RSI forecaster, sst_pred contract (upstream ERDM_ocean.yaml) — the fancy model's sibling
+# WITHOUT the SST-anomaly suite: no derived anomaly channel (c_grid 5, not 6),
+# no ocean-mean SST scalar (scalar_dim 2 = bare calendar), no CO2 embed slice,
+# and only two predicted ocean channels (in/out 153 = 151 + SST + sea-ice).
+# Mirrors azhou4's ERDM_ERDM_sst_pred_42 training configs field-for-field.
+# Pair with a dataset config carrying sst_anomaly_channel: none and
+# scalar_forcing: none.
+#
+name: RollingDiTWrapper
+module: physicsnemo.experimental.models.amip_si
+
+# Model timestep, in hours (2026-08-13 stride audit). The step belongs to the
+# MODEL family, not the store: the same 6-hourly archive can feed a 24-hour and
+# a 6-hour model. Source of truth for this one: amip_v2 ERDM_ocean.yaml
+# (every amip config, v1 and v2, steps 24 h).
+# `train_loop.model_step_rows` divides it by the store's own
+# `data_timedelta_hours` to get the row stride, and raises if the dataset
+# config's `forecast_lead_times` disagrees.
+timedelta_hours: 24
+
+surface_variables:
+  - skin_temperature
+  - surface_pressure
+  - 2m_temperature
+  - 2m_specific_humidity
+  - 10m_u_component_of_wind
+  - 10m_v_component_of_wind
+upper_air_variables:
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - geopotential
+  - specific_humidity
+diagnostic_variables:
+  - USWRFtoa_24h
+  - ULWRFtoa_24h
+  - USWRFsfc_24h
+  - ULWRFsfc_24h
+  - DSWRFsfc_24h
+  - DLWRFsfc_24h
+  - LHTFLsfc_24h
+  - SHTFLsfc_24h
+  - PRATEsfc_24h
+  - hcc_24h
+  - lcc_24h
+  - mcc_24h
+  - mn2t_24h
+  - mx2t_24h
+  - mxtpr_24h
+constant_boundary_variables:
+  - geopotential_at_surface
+  - land_sea_mask
+# Post-rescaler order: the anomaly is derived, not stored (see the header).
+varying_boundary_variables:
+  - DSWRFtoa_24h_lead
+  - sea_surface_temperature_monthly_interp
+  - sea_ice_cover_monthly_interp
+
+levels: [5, 7, 10, 20, 30, 50, 70, 100, 125, 150, 175, 200, 250, 300, 400,
+         500, 600, 700, 800, 850, 875, 900, 925, 950, 975, 1000]
+# The v2 forecaster's coarse grid (180x360 pre-coarsened x4, Phase 12c).
+horizontal_resolution: [45, 90]
+# Phase 12d: CO₂ is a spatially uniform map in the store, so the
+# ForcingAssembler pops it out of the gridded stream and appends it to the
+# calendar row — upstream's ``forcing_from_raw`` step 3. This gives exactly
+# upstream ERDM_co2.yaml's contract: c_grid_dim 5 (2 constant + 3 remaining
+# varying) and scalar_dim 3 (second_of_day, day_of_year, CO₂). The wrapper
+# derives c_grid_dim from these two lists and validates scalar_dim, so the
+# model and the data pipeline cannot be sized differently.
+# (second_of_day, day_of_year, global-mean SST anomaly). Nothing is routed out
+# of the grid: the third slot is filled by 12g's rescaler, not by a popped
+# channel — which is why scalar_routed_boundary_variables is empty here.
+scalar_dim: 2
+scalar_routed_boundary_variables: []
+# Phase 12b: amip_v2 packing — state [surface | diag | upper_air] with the
+# upper-air block level-major (1000 hPa first); c_grid [varying | constant].
+channel_layout: v2
+
+# Phase 12f: predicted ocean channels — a tail block of the state axis. Must
+# be gridded forcings that actually reach c_grid (so NOT global_mean_co2,
+# which is scalar-routed above). The wrapper derives both the tail width and
+# the c_grid indices their truth is read from, and hands them to the
+# scheduler; nothing here restates a channel number.
+#
+# ``channel_layout: v2`` is required: its c_grid is [varying | constant], so
+# a varying-stream index also addresses the assembled c_grid.
+ocean_state_variables:
+  - sea_surface_temperature_monthly_interp
+  - sea_ice_cover_monthly_interp
+
+rolling_dit_kwargs:
+  # RSI: two output-head instances (H1 state/residual + z-hat), the only
+  # model-config delta from the ERDM variant (see amip_rsi_fancy.yaml).
+  num_output_heads: 2
+  dim: 1024
+  num_heads: 16
+  temporal_num_heads: 8
+  num_blocks: 20
+  # W: sizes the forcing cross-attention's temporal tables. MUST equal
+  # loss.window_size (erdm_v2.yaml) — the scheduler and the model both need it.
+  window_size: 6
+  # Legacy-projection widths; unused under input_embed.mode=budget below, kept
+  # so switching back to legacy needs no other edit.
+  c_grid_embed_dim: 32
+  c_scalar_embed_dim: 16
+
+  # Phase 12e: temporal causal cross-attention from the hidden state to the
+  # in-window forcing stream, on the last N blocks. Upstream calls this the
+  # repo's actual attend-to-the-forcings mechanism (as opposed to the forcings
+  # merely contributing input channels). Zero-init gate => no-op at init.
+  c_grid_cross_layers: 4
+  c_grid_cross_heads: 8
+
+  # Phase 12e: budgeted input projection. Each source gets an explicitly
+  # sized, RMS-normalised, disjoint slice of dim, so "how loud are the
+  # forcings" is a number here rather than an accident of channel counts
+  # (d_state = dim - d_boundary - d_calendar = 640).
+  input_embed:
+    mode: budget
+    d_boundary: 256
+    d_calendar: 128
+    state_encoder: column   # contract-aware: level-shared upper-air encoder
+    d_level: 16
+    boundary_encoder: conv2      # strided conv -> GELU -> 3x3 spherical
+    boundary_pool_stats: True    # exact cell mean AND std of the raw forcings
+    boundary_static_bias: True   # learned geographic field (RoPE is relative)
+    source_norm: True
+
+  # Phase 12e: route day-of-year + the trend scalar into the AdaLN vector so
+  # they modulate every block, not just add input channels.
+  global_cond: True
+
+  # Phase 12e: sigma-conditioned mixture readout. The EDM target is a sigma-
+  # and channel-dependent blend of a signal and a noise readout, which one
+  # fixed Linear cannot represent; K=2 matches that two-regime structure.
+  # (Measured: benchmarks/.../amip_si/RESULTS_projections.md.)
+  output_head:
+    mode: mix
+    num_experts: 2
+    decoder: flat        # flat | column (column mirrors the input encoder)
+    d_level: 16
+  # Phase 12d option (b): forcings arrive at 1 degree (dataset
+  # boundary_zarr_path -> amip_dailyavg_boundary) and this strided conv
+  # reduces them to the 45x90 token grid — upstream ERDM_co2.yaml's layout.
+  c_grid_downsample: 4
+  dropout: 0.0
