@@ -94,9 +94,6 @@ ocean_state_variables:
   - sea_ice_cover_monthly_interp
 
 rolling_dit_kwargs:
-  # RSI: two output-head instances (H1 state/residual + z-hat), the only
-  # model-config delta from the ERDM variant (see amip_rsi_fancy.yaml).
-  num_output_heads: 2
   dim: 1024
   num_heads: 16
   temporal_num_heads: 8
@@ -140,6 +137,9 @@ rolling_dit_kwargs:
   # fixed Linear cannot represent; K=2 matches that two-regime structure.
   # (Measured: benchmarks/.../amip_si/RESULTS_projections.md.)
   output_head:
+    # RSI: two output-head instances (H1 state/residual + z-hat), the only
+    # model-config delta from the ERDM variant (see amip_rsi_fancy.yaml).
+    num_output_heads: 2
     mode: mix
     num_experts: 2
     decoder: flat        # flat | column (column mirrors the input encoder)
