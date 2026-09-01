@@ -29,13 +29,21 @@ cd ~/PhysMetrics.Weather
 The repo's `pyproject.toml` has the package/module names wrong everywhere
 (`physeval_weather`/`physeval-*` instead of the actual source directory
 `src/physmetrics_weather/` and the README's documented `physmetrics-run`/
-`physmetrics-plot` commands), and is missing `requires-python`. Fix both:
+`physmetrics-plot` commands). Fix that:
 
 ```bash
 sed -i.bak 's/physeval/physmetrics/g' pyproject.toml
-sed -i '/^readme = "README.md"$/a requires-python = ">=3.10"' pyproject.toml
 uv sync --reinstall
 ```
+
+**Superseded (2026-09-01):** this note also used to say `requires-python` was
+missing and to insert it with
+`sed -i '/^readme = "README.md"$/a requires-python = ">=3.10"'`. Upstream has
+since added `requires-python`, so that insertion now produces a **duplicate TOML
+key** and the install fails with
+`Failed to parse metadata from built wheel / TOML parse error ... duplicate key`.
+Only add it if it is genuinely absent — `hpc/containers/Dockerfile` guards the
+step with `grep -q '^requires-python'`.
 
 Verify:
 ```bash

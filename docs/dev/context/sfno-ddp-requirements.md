@@ -48,10 +48,19 @@ requirements:
    zarr/xarray/netCDF4/dask (`datapipes-extras`) — silently breaking SFNO after
    any sync. `hpc/scripts/sync-all-clusters.sh` adds
    `--extra sfno-extras --extra utils-extras --extra datapipes-extras`.
-   NOTE: DeltaAI (aarch64/GH200) has no torch-harmonics wheel — build from source
-   (`uv pip install --no-binary torch-harmonics torch-harmonics`), which pulls
-   torch as a dep, so `uv pip uninstall torch torchvision triton` afterward to
-   fall back to DeltaAI's module torch.
+   NOTE: DeltaAI (aarch64/GH200) has no torch-harmonics wheel. The `--no-binary`
+   recipe that used to be documented here **no longer works**: as of 0.9.x,
+   torch-harmonics publishes x86_64-only wheels and **no sdist at all** (verified
+   against PyPI 2026-09-01 for 0.9.0/0.9.1/0.9.2; the last version with an sdist
+   is 0.8.1, which is below the `>=0.9.0` pin in `sfno-extras`). On aarch64 there
+   is therefore nothing on PyPI to install *or* to build from. Install from the
+   upstream git tag instead:
+   `uv pip install --no-deps --no-build-isolation
+    "torch-harmonics @ git+https://github.com/NVIDIA/torch-harmonics.git@v0.9.1"`
+   — `--no-deps` avoids pulling a PyPI torch over DeltaAI's module torch, which
+   is what the old `uv pip uninstall torch torchvision triton` step was cleaning
+   up after. The container image does exactly this on arm64
+   (`hpc/containers/Dockerfile`).
 
 **Diagnosis tip:** on a hang, enable the NCCL flight recorder
 (`TORCH_NCCL_DUMP_ON_TIMEOUT=1`, `TORCH_FR_BUFFER_SIZE`, short
