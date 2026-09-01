@@ -102,12 +102,17 @@ RUN TH_VER="$(grep -E '^torch-harmonics==' /build/requirements.txt | cut -d'=' -
 #   cartopy      - examples/weather/ai_rossbypalooza/physmetrics/plot_tcwv_bias.py
 #   natsort      - tools/data/plasim/postprocessor/postprocess_data.py
 #   ruamel.yaml  - tools/data/plasim/postprocessor/src/utils.py
+#   pyshtools/seaborn/gcsfs - PhysMetrics.Weather runtime deps. It is installed
+#                  with --no-deps below (so its resolver cannot pull a PyPI torch
+#                  over NGC's), which means its own dependencies must be named
+#                  here. Without pyshtools, `import physmetrics_weather` fails.
 # Pinned even though they are outside uv.lock, so the image stays reproducible.
 # Folding them into a pyproject extra is the proper fix, but that regenerates the
 # lock and would perturb every cluster venv mid-migration.
 # Note cartopy publishes no linux-aarch64 wheel, so on arm64 it builds from the
 # sdist against the libgeos/libproj headers installed above.
-RUN uv pip install "cartopy==0.25.0" "natsort==8.4.0" "ruamel.yaml==0.19.1"
+RUN uv pip install "cartopy==0.25.0" "natsort==8.4.0" "ruamel.yaml==0.19.1" \
+                   "pyshtools==4.14.1" "seaborn==0.13.2" "gcsfs==2026.4.0"
 
 # PhysMetrics.Weather (ai-rossbypalooza physics diagnostics). Upstream's
 # pyproject.toml names the package `physeval*` while the source tree is
