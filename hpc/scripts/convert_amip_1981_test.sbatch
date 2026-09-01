@@ -33,7 +33,10 @@
 
 set -euo pipefail
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # Defaults (full year) when invoked without env-var overrides.
 SAMPLE_LO=${SAMPLE_LO:-0}
@@ -44,7 +47,7 @@ OUT_PATH=/work/hdd/bdiu/awikner/physicsnemo-zarr/amip/1981${OUT_SUFFIX}.zarr
 mkdir -p "$(dirname "$OUT_PATH")"
 
 echo "[$(date)] converting AMIP year 1981 files [${SAMPLE_LO}, ${SAMPLE_HI}) → $OUT_PATH"
-python tools/data/amip/amip_h5_to_zarr.py \
+"$CONTAINER_RUN" python tools/data/amip/amip_h5_to_zarr.py \
     --config tools/data/amip/configs/amip_default.yaml \
     --year 1981 \
     --sample-range "$SAMPLE_LO" "$SAMPLE_HI" \
@@ -57,7 +60,7 @@ echo "[$(date)] done. Output:"
 ls -la "$OUT_PATH" | head -5
 echo
 echo "[$(date)] Zarr schema sanity:"
-python -c "
+"$CONTAINER_RUN" python -c "
 import xarray as xr
 ds = xr.open_zarr('$OUT_PATH')
 print('  dims:', dict(ds.sizes))

@@ -29,7 +29,10 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm
 mkdir -p "$OUT_ROOT"
@@ -48,7 +51,7 @@ for YEAR in $(seq 2015 2049); do
         continue
     fi
     echo "[$(date)] converting E3SM year $YEAR ..."
-    python tools/data/e3sm/pangu_h5_to_zarr.py \
+    "$CONTAINER_RUN" python tools/data/e3sm/pangu_h5_to_zarr.py \
         --input-dir "$H5_DIR" \
         --year "$YEAR" \
         --output "$OUT_PATH"
@@ -56,14 +59,14 @@ done
 
 # 2. Normalization Zarr.
 echo "[$(date)] building E3SM normalization Zarr ..."
-python tools/data/e3sm/build_normalization_zarr.py \
+"$CONTAINER_RUN" python tools/data/e3sm/build_normalization_zarr.py \
     --source-dir "$STATS_DIR" \
     --output "$OUT_ROOT/normalization_2015-2050.zarr" \
     --overwrite
 
 # 3. Climatology + bias Zarr.
 echo "[$(date)] building E3SM climatology+bias Zarr ..."
-python tools/data/e3sm/build_climatology_zarr.py \
+"$CONTAINER_RUN" python tools/data/e3sm/build_climatology_zarr.py \
     --climatology "$CLIM_PATH" \
     --bias-dir    "$BIAS_DIR" \
     --output      "$OUT_ROOT/climatology_bias.zarr" \

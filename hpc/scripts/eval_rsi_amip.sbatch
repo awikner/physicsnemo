@@ -52,16 +52,11 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p hpc/scripts/logs
 
-CLUSTER="${AI_ROSSBY_CLUSTER:-}"
-case "${CLUSTER}" in
-  deltaai)
-    module load python/miniforge3_pytorch/2.10.0
-    VENV="${AI_ROSSBY_VENV:-.venv-deltaai}" ;;
-  *)
-    VENV="${AI_ROSSBY_VENV:-.venv}" ;;
-esac
-# shellcheck disable=SC1091
-source "${VENV}/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/). container_run.sh detects the
+# cluster, resolves the .sif and bind mounts, and scrubs the host toolchain env —
+# which is what retires the DeltaAI `module load python/miniforge3_pytorch` +
+# separate-venv special case that used to live here.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 : "${AI_ROSSBY_DATA:?set AI_ROSSBY_DATA to the physicsnemo-zarr root}"
 : "${RSI_CKPT:?set RSI_CKPT to the trained checkpoint directory}"
@@ -95,7 +90,7 @@ case "${MODE}" in
     # Gate 1. `sampler=from_loss` (the default) is deliberate: it reuses the
     # TRAINING scheduler, so the interpolant profiles cannot drift from the
     # ones the heads were regressed against.
-    python -m torch.distributed.run --standalone --nproc-per-node="${NGPUS}" \
+    "$CONTAINER_RUN" python -m torch.distributed.run --standalone --nproc-per-node="${NGPUS}" \
         examples/weather/ai_rossby/eval_diffusion.py \
         "${COMMON[@]}" \
         validation=eval_suite \
@@ -119,7 +114,7 @@ case "${MODE}" in
     YEARS="${RSI_ROLLOUT_YEARS:-40}"
     HORIZON=$(( YEARS * 365 ))
     NBINS=$(( YEARS * 12 ))
-    python -m torch.distributed.run --standalone --nproc-per-node="${NGPUS}" \
+    "$CONTAINER_RUN" python -m torch.distributed.run --standalone --nproc-per-node="${NGPUS}" \
         examples/weather/ai_rossby/eval_diffusion.py \
         "${COMMON[@]}" \
         validation=eval_suite \
@@ -136,7 +131,7 @@ case "${MODE}" in
     # the whole sweep runs against ONE trained checkpoint with no retraining.
     for e in ${RSI_EPS_LIST:-0.0 0.01 0.05 0.1 0.2}; do
       echo "=== eps_scale=${e} ==="
-      python examples/weather/ai_rossby/validate_diffusion.py \
+      "$CONTAINER_RUN" python examples/weather/ai_rossby/validate_diffusion.py \
           "${COMMON[@]}" \
           validation=rsi_calibration \
           sampler=rsi \

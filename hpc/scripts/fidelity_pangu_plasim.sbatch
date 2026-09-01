@@ -76,14 +76,17 @@ echo "OUT_DIR       = ${OUT_DIR}"
 # ---------------------------------------------------------------------- #
 # Step 1: translate                                                       #
 # ---------------------------------------------------------------------- #
-source .venv/bin/activate
+# Steps 1 and 3 run in the ai-rossby container; step 2 below deliberately stays
+# on PanguWeather's own conda env, since the point is to compare against the
+# reference implementation as it actually ships.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 echo
 echo "=== step 1/3: translate ${PW_CHECKPOINT} → ${MDLUS_PATH} ==="
 TRANSLATOR=tools/checkpoint_translation/pangu_plasim.py
 if [ "${TARGET_CLASS}" = "SfnoPlasim" ]; then
     TRANSLATOR=tools/checkpoint_translation/sfno_plasim.py
 fi
-python "${TRANSLATOR}" \
+"$CONTAINER_RUN" python "${TRANSLATOR}" \
     --source "${PW_CHECKPOINT}" \
     --model-config "${TARGET_YAML}" \
     --output "${MDLUS_PATH}" \
@@ -130,11 +133,10 @@ exit 2
 # Switch back to the ai-rossby venv for the comparison.
 conda deactivate || true
 set +u
-source .venv/bin/activate
 set -u
 echo
 echo "=== step 3/3: compare ${MDLUS_PATH} vs ${REF_PATH} ==="
-python tools/checkpoint_translation/fidelity_compare.py \
+"$CONTAINER_RUN" python tools/checkpoint_translation/fidelity_compare.py \
     --mdlus "${MDLUS_PATH}" \
     --model-config "${TARGET_YAML}" \
     --target-class "${TARGET_CLASS}" \

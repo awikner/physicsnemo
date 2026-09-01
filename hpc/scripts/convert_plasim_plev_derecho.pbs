@@ -21,7 +21,10 @@
 
 set -euo pipefail
 cd /glade/work/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # The per-file H5 reader sizes its pool from SLURM_CPUS_PER_TASK; on PBS give it
 # the whole node (ompthreads/OMP_NUM_THREADS is set to 128 by the select above).
@@ -41,7 +44,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
         echo "[$(date)] skip $YEAR (exists)"; n_skip=$((n_skip+1)); continue
     fi
     echo "[$(date)] converting plev year $YEAR ..."
-    if python tools/data/plasim/pangu_h5_to_zarr.py \
+    if "$CONTAINER_RUN" python tools/data/plasim/pangu_h5_to_zarr.py \
             --config tools/data/plasim/configs/sim52_plev_full.yaml \
             --config-key PLASIM \
             --input-dir "$H5_DIR" \

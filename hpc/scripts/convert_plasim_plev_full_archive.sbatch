@@ -40,7 +40,10 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/plasim_plev
 mkdir -p "$OUT_ROOT"
@@ -72,7 +75,7 @@ for YEAR in "${YEARS[@]}"; do
         continue
     fi
     echo "[$(date)] converting PLASIM plev year $YEAR ..."
-    if python tools/data/plasim/pangu_h5_to_zarr.py \
+    if "$CONTAINER_RUN" python tools/data/plasim/pangu_h5_to_zarr.py \
             --config tools/data/plasim/configs/sim52_plev_full.yaml \
             --config-key PLASIM \
             --input-dir "$H5_DIR" \

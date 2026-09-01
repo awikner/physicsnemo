@@ -53,7 +53,8 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 OUT_DIR=/work/hdd/bdiu/awikner/sfno_bench
 mkdir -p "${OUT_DIR}"
@@ -72,7 +73,7 @@ nvidia-smi
 # NOTE: the committed pangu_plasim_legacy.yaml lists 13 pressure levels, but the
 # year-12 zarr has only 10 (5000/10000/15000 Pa absent). Override model.levels
 # to the 10 present levels (same workaround as smoke_pangu_plasim_native_2xA40).
-torchrun \
+"$CONTAINER_RUN" torchrun \
     --nnodes=1 \
     --nproc-per-node=4 \
     --standalone \

@@ -37,19 +37,21 @@ set -euo pipefail
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo-amip-v2
 VENV_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source "$VENV_ROOT/.venv/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 module load aws-ofi-nccl/1.14.2
 mkdir -p hpc/scripts/logs
 
-python -c "import physicsnemo, pathlib; p = pathlib.Path(physicsnemo.__file__); \
+"$CONTAINER_RUN" python -c "import physicsnemo, pathlib; p = pathlib.Path(physicsnemo.__file__); \
 assert str(p).startswith('$REPO_ROOT'), f'wrong physicsnemo on path: {p}'; \
 print('physicsnemo from', p)"
 
 if [[ -z "${SKIP_STEP1:-}" ]]; then
     echo "=== Step 1/2: live translator sweep (v1 contract) ==="
-    python -m pytest test/tools/checkpoint_translation/test_amip_si.py \
+    "$CONTAINER_RUN" python -m pytest test/tools/checkpoint_translation/test_amip_si.py \
         -m slow -v --no-header -rA
 else
     echo "=== Step 1/2 skipped (SKIP_STEP1 set; passed in job 20916803) ==="
@@ -82,7 +84,7 @@ cd examples/weather/ai_rossby
 #   and validated wandb-on (jobs 20921753/20921857). Add
 #   wandb.allow_multigpu=false to re-arm the auto-disable guard.
 #   See docs/dev/wandb_ddp_hang_fix_plan.md.
-torchrun --standalone --nproc-per-node=2 train_diffusion.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_rfm \
     model.channel_layout=v2 \
     loss=erdm_v2 \

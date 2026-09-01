@@ -27,7 +27,9 @@
 set -euo pipefail
 REPO=${REPO:-/glade/work/awikner/physicsnemo-amip-v2}
 cd "$REPO"
-source /glade/work/awikner/physicsnemo/.venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 # The per-file H5 reader sizes its pool from SLURM_CPUS_PER_TASK; on PBS give
@@ -57,7 +59,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
     # mistakes for complete (bit job 7045083).
     OUT_TMP="$OUT_ROOT/${YEAR}.zarr.partial"
     rm -rf "$OUT_TMP"
-    if python tools/data/amip/amip_h5_to_zarr.py \
+    if "$CONTAINER_RUN" python tools/data/amip/amip_h5_to_zarr.py \
             --config tools/data/amip/configs/amip_dailyavg.yaml \
             --config-key AMIP \
             --input-dir "$H5_DIR" \

@@ -24,7 +24,9 @@ set -uo pipefail   # NOT -e: a failed year must not kill the loop
 
 REPO=${REPO:-/work2/09979/awikner/stampede3/physicsnemo-amip-v2}
 cd "$REPO"
-source /work2/09979/awikner/stampede3/physicsnemo/.venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 YEARS_LO=${YEARS_LO:-1978}
@@ -50,7 +52,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
     echo "[$(date)] extracting boundaries for $YEAR ..."
     TMP="$BND_ROOT/${YEAR}.zarr.partial"
     rm -rf "$TMP"
-    if python tools/data/amip/extract_boundary_store.py \
+    if "$CONTAINER_RUN" python tools/data/amip/extract_boundary_store.py \
             --input "$IN" --output "$TMP" --time-chunk 8; then
         mv "$TMP" "$OUT"; n_ok=$((n_ok+1))
     else

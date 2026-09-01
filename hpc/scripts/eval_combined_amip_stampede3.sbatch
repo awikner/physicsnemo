@@ -49,8 +49,9 @@ mkdir -p hpc/scripts/logs
 # here and not from the venv's editable install of the other checkout (that
 # silent mis-resolution has bitten before — GroupNotFoundError on configs the
 # other tree predates).
-# shellcheck disable=SC1091
-source "${AI_ROSSBY_VENV:-/work2/09979/awikner/stampede3/physicsnemo/.venv}/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}"
 
 export AI_ROSSBY_DATA="${AI_ROSSBY_DATA:-${SCRATCH}/physicsnemo-zarr}"
@@ -79,7 +80,7 @@ echo "== ${MODEL}: IC ${IC_DATE}, horizon ${HORIZON}, forecaster num_steps=2 =="
 # instantiates cfg.loss. sampler_num_steps default is 4: the =2 override is
 # REQUIRED for parity (the v2 checkpoints are trained/validated at 2).
 # torch.distributed.run --standalone avoids the bare-python MASTER_ADDR trap.
-python -m torch.distributed.run --standalone --nproc-per-node=1 \
+"$CONTAINER_RUN" python -m torch.distributed.run --standalone --nproc-per-node=1 \
     examples/weather/ai_rossby/eval_diffusion.py \
     --config-dir=examples/weather/ai_rossby/conf \
     --config-name=config \

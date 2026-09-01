@@ -40,7 +40,10 @@ set -euo pipefail
 
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # NCCL via AWS-OFI is multi-GPU-only.
 module load aws-ofi-nccl/1.14.2
@@ -67,7 +70,7 @@ mkdir -p hpc/scripts/logs
 cd examples/weather/ai_rossby
 
 # torchrun on the local node — `--standalone` skips the rendezvous server.
-torchrun --standalone --nproc-per-node=4 train.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=4 train.py \
     dataset.zarr_path="$ZARR_PATH" \
     dataset.mean_path="$MEAN_PATH" \
     dataset.std_path="$STD_PATH" \

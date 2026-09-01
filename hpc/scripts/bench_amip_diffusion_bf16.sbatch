@@ -41,7 +41,10 @@ set -euo pipefail
 
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 module load aws-ofi-nccl/1.14.2
 
@@ -87,7 +90,7 @@ COMMON_ARGS=(
 )
 
 echo "=== fp32 (training=amip_diffusion) ==="
-torchrun --standalone --nproc-per-node=2 train_diffusion.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     "${COMMON_ARGS[@]}" \
     training=amip_diffusion \
     run_name="bench-amip-diffusion-fp32-$SLURM_JOB_ID" \
@@ -96,7 +99,7 @@ torchrun --standalone --nproc-per-node=2 train_diffusion.py \
 
 echo
 echo "=== bf16 (training=amip_diffusion_bf16) ==="
-torchrun --standalone --nproc-per-node=2 train_diffusion.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     "${COMMON_ARGS[@]}" \
     training=amip_diffusion_bf16 \
     run_name="bench-amip-diffusion-bf16-$SLURM_JOB_ID" \

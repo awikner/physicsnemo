@@ -40,16 +40,11 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p hpc/scripts/logs
 
-CLUSTER="${AI_ROSSBY_CLUSTER:-}"
-case "${CLUSTER}" in
-  deltaai)
-    module load python/miniforge3_pytorch/2.10.0
-    VENV="${AI_ROSSBY_VENV:-.venv-deltaai}" ;;
-  *)
-    VENV="${AI_ROSSBY_VENV:-.venv}" ;;
-esac
-# shellcheck disable=SC1091
-source "${VENV}/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/). container_run.sh detects the
+# cluster, resolves the .sif and bind mounts, and scrubs the host toolchain env —
+# which is what retires the DeltaAI `module load python/miniforge3_pytorch` +
+# separate-venv special case that used to live here.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 : "${AI_ROSSBY_DATA:?set AI_ROSSBY_DATA to the physicsnemo-zarr root}"
 STORE="${RSI_STORE:-${AI_ROSSBY_DATA}/amip_dailyavg_coarse}"
@@ -62,7 +57,7 @@ Y1="${RSI_YEAR_END:-2015}"
 
 mkdir -p "$(dirname "${OUT}")"
 
-python tools/data/amip/make_rsi_spectrum.py \
+"$CONTAINER_RUN" python tools/data/amip/make_rsi_spectrum.py \
     --zarr "${STORE}" \
     --model-config examples/weather/ai_rossby/conf/model/amip_rsi_v2.yaml \
     --std "${STD}" \

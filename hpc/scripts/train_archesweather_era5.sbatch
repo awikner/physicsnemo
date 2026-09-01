@@ -45,16 +45,11 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p hpc/scripts/logs
 
-CLUSTER="${AI_ROSSBY_CLUSTER:-}"
-case "${CLUSTER}" in
-  deltaai)
-    module load python/miniforge3_pytorch/2.10.0
-    VENV="${AI_ROSSBY_VENV:-.venv-deltaai}" ;;
-  *)
-    VENV="${AI_ROSSBY_VENV:-.venv}" ;;
-esac
-# shellcheck disable=SC1091
-source "${VENV}/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/). container_run.sh detects the
+# cluster, resolves the .sif and bind mounts, and scrubs the host toolchain env —
+# which is what retires the DeltaAI `module load python/miniforge3_pytorch` +
+# separate-venv special case that used to live here.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 : "${AI_ROSSBY_DATA:?set AI_ROSSBY_DATA to the physicsnemo-zarr root}"
 export AI_ROSSBY_DATA
@@ -93,7 +88,7 @@ if [ "${NNODES}" -gt 1 ]; then
   exit 1
 fi
 
-python -m torch.distributed.run \
+"$CONTAINER_RUN" python -m torch.distributed.run \
     --nnodes=1 \
     --nproc-per-node="${NPROC}" \
     --standalone \

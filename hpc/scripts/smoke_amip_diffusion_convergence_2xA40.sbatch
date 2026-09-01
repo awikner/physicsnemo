@@ -44,7 +44,10 @@ set -euo pipefail
 
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 module load aws-ofi-nccl/1.14.2
 
@@ -74,7 +77,7 @@ cd examples/weather/ai_rossby
 #     45x90 state with 1-degree forcings and the backbone's stride-4 conv is
 #     what reconciles them. Forcing 1 builds a 1x1 conv and then fails the
 #     concat on a 180x360-vs-45x90 spatial mismatch.
-torchrun --standalone --nproc-per-node=2 train_diffusion.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_si \
     loss=si \
     dataset=amip_dailyavg_coarse \
@@ -98,7 +101,7 @@ torchrun --standalone --nproc-per-node=2 train_diffusion.py \
 echo
 echo "=== convergence TSV: ${OUT_DIR}/loss_${SLURM_JOB_ID}.tsv"
 
-python "${REPO_ROOT}/benchmarks/physicsnemo/experimental/models/amip_si/plot_convergence.py" \
+"$CONTAINER_RUN" python "${REPO_ROOT}/benchmarks/physicsnemo/experimental/models/amip_si/plot_convergence.py" \
     --tsv "${OUT_DIR}/loss_${SLURM_JOB_ID}.tsv" \
     --output "${OUT_DIR}/convergence_${SLURM_JOB_ID}.png"
 

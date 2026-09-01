@@ -21,7 +21,10 @@
 set -euo pipefail
 cd /work/nvme/bdiu/awikner/physicsnemo
 
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 MDLUS=/work/hdd/bdiu/awikner/translated_checkpoints/pangu_plasim_s2s_2000.mdlus
 MODEL_YAML=examples/weather/ai_rossby/conf/model/pangu_plasim_s2s.yaml
@@ -32,7 +35,7 @@ STD=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5/normalization_pangu_s2s_std.zar
 OUT=/work/hdd/bdiu/awikner/sfno_bench/async_writer_${SLURM_JOB_ID}
 REPORT=hpc/scripts/logs/bench-async-writer-${SLURM_JOB_ID}.json
 
-python benchmarks/physicsnemo/experimental/examples/ai_rossby/async_writer/run_bench.py \
+"$CONTAINER_RUN" python benchmarks/physicsnemo/experimental/examples/ai_rossby/async_writer/run_bench.py \
     --mdlus "${MDLUS}" \
     --model-yaml "${MODEL_YAML}" \
     --zarr  "${ZARR}" \

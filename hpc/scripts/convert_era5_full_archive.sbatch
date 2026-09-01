@@ -32,7 +32,10 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/era5
 mkdir -p "$OUT_ROOT"
@@ -47,7 +50,7 @@ for YEAR in $(seq 1979 2018); do
         continue
     fi
     echo "[$(date)] converting ERA5 year $YEAR ..."
-    python tools/data/era5/pangu_h5_to_zarr.py \
+    "$CONTAINER_RUN" python tools/data/era5/pangu_h5_to_zarr.py \
         --input-dir "$SOURCE_DIR" \
         --year "$YEAR" \
         --output "$OUT_PATH"
@@ -56,7 +59,7 @@ done
 # 2. Normalization Zarrs (one per variant).
 for VARIANT in pangu_s2s pangu_s2s_withnino pangu_s2s_log_precip pangu_s2s_withnino_log_precip pangu_s2s_Z200; do
     echo "[$(date)] building normalization variant $VARIANT ..."
-    python tools/data/era5/build_normalization_zarr.py \
+    "$CONTAINER_RUN" python tools/data/era5/build_normalization_zarr.py \
         --source-dir "$SOURCE_DIR" \
         --variant "$VARIANT" \
         --output  "$OUT_ROOT/normalization_${VARIANT}.zarr" \
@@ -65,7 +68,7 @@ done
 
 # 3. Climatology Zarr (mean + std, no bias).
 echo "[$(date)] building ERA5 climatology Zarr ..."
-python tools/data/era5/build_climatology_zarr.py \
+"$CONTAINER_RUN" python tools/data/era5/build_climatology_zarr.py \
     --source-dir "$SOURCE_DIR" \
     --output     "$OUT_ROOT/climatology_bias.zarr" \
     --overwrite

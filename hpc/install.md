@@ -10,6 +10,29 @@ template they follow.
 
 ---
 
+## Read this first: containers are the default
+
+**Delta, DeltaAI, Stampede3, Midway3, Polaris and Derecho no longer use a venv.**
+They run out of one multi-arch container image built on NVIDIA's NGC PyTorch
+container. That contract lives in **[containers.md](containers.md)**, and jobs
+launch through `hpc/scripts/container_run.sh`.
+
+Two reasons the venv path was abandoned rather than just tidied:
+
+* **It kept drifting off a load-bearing pin.** `pyproject.toml` pins
+  `torch>=2.10,<2.11` because 2.11 deadlocks SFNO DDP, yet the same
+  `uv sync --extra cu129` line resolved **2.12.1** on Derecho/Midway3/DSI and
+  **2.11.0** then **2.10.0** on Stampede3. The image fixes torch by construction.
+* **Most per-cluster landmines were environment artifacts, not hardware facts.**
+  The container removes three of DeltaAI's four documented workarounds outright
+  (`CXX=CC`, the import-broken conda `wandb`, and `AI_ROSSBY_NO_CUDNN_SDPA`) and
+  makes the fourth (torch shadowing) impossible.
+
+**The rest of this document is the fallback path.** It is still the only path for
+**DSI**, which has no container runtime and no module system, and it is what you
+want if a cluster's apptainer breaks. `hpc/scripts/sync-all-clusters.sh` now
+defaults to DSI alone.
+
 ## Strategy
 
 | Layer | Source | Why |
@@ -128,7 +151,9 @@ Option A keeps tight integration with the cluster's NCCL/MPI. Option B is portab
 clusters but slower and may miss optimizations.
 
 **Match the CUDA version to the system Nsight profiler.** If you profile with the cluster's
-Nsight Systems / Compute (`nsys` / `ncu`, see Step 7), the venv's torch CUDA build must be **≤**
+**(Fallback path only — superseded under the container, which carries its own
+matched nsys/ncu; see containers.md.)** Nsight Systems / Compute (`nsys` / `ncu`,
+see Step 7), the venv's torch CUDA build must be **≤**
 the system Nsight's CUDA version — Nsight is backward-compatible (a newer `ncu` profiles an app
 built with an equal-or-older CUDA, never a newer one). So: find the system Nsight/CUDA first, then
 pick the CUDA extra whose toolkit matches it. physicsnemo ships `cu12` (CUDA 12.8), `cu129`
@@ -168,6 +193,12 @@ Create `hpc/<cluster>.md` capturing:
 The Delta recipe at `hpc/delta.md` is a worked example.
 
 ## Step 7 — Profiling with Nsight (Systems & Compute)
+
+> **Under the container this step does not apply.** The image ships its own
+> `nsys`/`ncu` matched to its CUDA 13.1 toolkit, so profiling is cluster-independent
+> and the "venv CUDA must be ≤ system Nsight" constraint below — the sole reason the
+> `cu12`/`cu129`/`cu13` extras existed — no longer binds. Run the profilers inside
+> the container.
 
 ai-rossby performance work uses NVIDIA **Nsight Systems** (`nsys`, timeline / system profiling)
 and **Nsight Compute** (`ncu`, kernel profiling). These ship with the cluster's CUDA toolkit /

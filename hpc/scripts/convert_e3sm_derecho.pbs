@@ -21,7 +21,10 @@
 
 set -euo pipefail
 cd /glade/work/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-${OMP_NUM_THREADS:-128}}
 
 YEARS_LO=${YEARS_LO:-2015}
@@ -36,7 +39,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
     OUT_PATH="$OUT_ROOT/${YEAR}.zarr"
     if [ -d "$OUT_PATH" ]; then echo "[$(date)] skip $YEAR (exists)"; continue; fi
     echo "[$(date)] converting E3SM year $YEAR ..."
-    python tools/data/e3sm/pangu_h5_to_zarr.py \
+    "$CONTAINER_RUN" python tools/data/e3sm/pangu_h5_to_zarr.py \
         --input-dir "$H5_DIR" --year "$YEAR" --output "$OUT_PATH"
 done
 
@@ -44,13 +47,13 @@ done
 STATS_DIR="$H5_DIR"
 if ls "$STATS_DIR"/data_*_mean.nc >/dev/null 2>&1; then
     echo "[$(date)] building E3SM normalization Zarr ..."
-    python tools/data/e3sm/build_normalization_zarr.py \
+    "$CONTAINER_RUN" python tools/data/e3sm/build_normalization_zarr.py \
         --source-dir "$STATS_DIR" --output "$OUT_ROOT/normalization_2015-2050.zarr" --overwrite || true
 fi
 CLIM="$E/sigma_data/climatology.nc"
 if [ -f "$CLIM" ] && [ -d "$E/bias" ]; then
     echo "[$(date)] building E3SM climatology+bias Zarr ..."
-    python tools/data/e3sm/build_climatology_zarr.py \
+    "$CONTAINER_RUN" python tools/data/e3sm/build_climatology_zarr.py \
         --climatology "$CLIM" --bias-dir "$E/bias" \
         --output "$OUT_ROOT/climatology_bias.zarr" --overwrite || true
 fi

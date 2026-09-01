@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # hpc/scripts/sync-all-clusters.sh
-# Pull the ai-rossby branch and re-run `uv sync` on all configured clusters.
+# Pull the ai-rossby branch and re-run `uv sync` on the clusters that still need
+# a venv.
+#
+# ==> SUPERSEDED FOR MOST CLUSTERS BY THE CONTAINER. <==
+#
+# Delta, DeltaAI, Stampede3, Midway3, Polaris and Derecho now run out of the
+# ai-rossby container image (see hpc/containers.md). To update them, rebuild and
+# re-pull the image instead of syncing a venv:
+#     hpc/containers/pull_sif.sh <tag>          # on a DeltaAI login node
+#     hpc/containers/replicate_sif.sh <tag> stampede3
+#
+# DSI is the one remaining venv cluster: it has no container runtime and no
+# module system, so it stays on `uv sync`. Keeping the machinery here also keeps
+# the documented fallback in hpc/install.md executable if a cluster's apptainer
+# breaks.
+#
+# Pass cluster names explicitly to sync a non-default cluster anyway.
 # Requires active ControlMaster connections (run `morning-login` first) — each
 # `ssh <alias>` below reuses the socket opened in the morning, so no MFA here.
 #
@@ -23,7 +39,10 @@ set -uo pipefail   # not -e: one cluster failing must not abort the rest
 BRANCH="${1:-ai-rossby}"
 [ $# -gt 0 ] && shift
 
-ALL_CLUSTERS="delta deltaai stampede3 derecho midway3 dsi"
+# Default target is DSI only — everything else is containerized. The other
+# cluster configs below are retained for the fallback path and can still be
+# requested by name.
+ALL_CLUSTERS="dsi"
 targets="${*:-$ALL_CLUSTERS}"
 
 # Optional extras the ai-rossby recipe needs on top of the CUDA extra. Without

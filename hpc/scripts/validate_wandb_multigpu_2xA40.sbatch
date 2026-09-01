@@ -35,7 +35,9 @@ set -euo pipefail
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo-amip-v2
 VENV_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source "$VENV_ROOT/.venv/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 module load aws-ofi-nccl/1.14.2
@@ -55,7 +57,7 @@ cd examples/weather/ai_rossby
 
 # Same tiny v2-layout ERDM config as the W2 matrix, but a FULL epoch
 # (no max_iterations cap) with wandb ON.
-torchrun --standalone --nproc-per-node=2 train_diffusion.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_rfm \
     model.channel_layout=v2 \
     loss=erdm_v2 \

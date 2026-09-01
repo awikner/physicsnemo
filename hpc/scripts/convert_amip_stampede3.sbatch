@@ -24,7 +24,10 @@
 
 set -euo pipefail
 cd "$WORK/physicsnemo"
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # Size the per-file H5 reader pool to the whole node (TACC allocates
 # whole nodes; without this the pool can bind to a single core).
@@ -44,7 +47,7 @@ for YEAR in $(seq 1978 2022); do
         continue
     fi
     echo "[$(date)] converting AMIP year $YEAR ..."
-    python tools/data/amip/amip_h5_to_zarr.py \
+    "$CONTAINER_RUN" python tools/data/amip/amip_h5_to_zarr.py \
         --config tools/data/amip/configs/amip_default.yaml \
         --input-dir "$RAW" \
         --year "$YEAR" \

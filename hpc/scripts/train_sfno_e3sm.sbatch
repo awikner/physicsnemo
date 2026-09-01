@@ -65,7 +65,10 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # makani's documented allocator fix — reclaims reserved-but-unallocated
 # fragmentation so global batch 16 fits at checkpointing=2 (see header). MUST
@@ -94,7 +97,7 @@ NORM_ZARR=/work/hdd/bdiu/awikner/physicsnemo-zarr/e3sm/normalization_2015-2050.z
 
 nvidia-smi
 
-torchrun \
+"$CONTAINER_RUN" torchrun \
     --nnodes=1 \
     --nproc-per-node=4 \
     --standalone \

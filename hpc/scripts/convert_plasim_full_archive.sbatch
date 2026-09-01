@@ -32,7 +32,10 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 OUT_ROOT=/work/hdd/bdiu/awikner/physicsnemo-zarr/plasim
 mkdir -p "$OUT_ROOT"
@@ -51,7 +54,7 @@ for YEAR in $(seq 12 132); do
         continue
     fi
     echo "[$(date)] converting PLASIM year $YEAR ..."
-    python tools/data/plasim/pangu_h5_to_zarr.py \
+    "$CONTAINER_RUN" python tools/data/plasim/pangu_h5_to_zarr.py \
         --config tools/data/plasim/configs/sim52_full_coverage.yaml \
         --config-key PLASIM \
         --input-dir "$H5_DIR" \
@@ -62,7 +65,7 @@ done
 
 # 2. Normalization Zarr (per-variable mean+std for years 12–132).
 echo "[$(date)] building normalization Zarr ..."
-python tools/data/plasim/build_normalization_zarr.py \
+"$CONTAINER_RUN" python tools/data/plasim/build_normalization_zarr.py \
     --mean "$STATS_DIR/data_12-132_mean_sigma.nc" \
     --std  "$STATS_DIR/data_12-132_std_sigma.nc" \
     --output "$OUT_ROOT/normalization_12-132.zarr" \
@@ -70,7 +73,7 @@ python tools/data/plasim/build_normalization_zarr.py \
 
 # 3. Climatology + bias Zarr (no std climatology for PLASIM — NaN-filled).
 echo "[$(date)] building climatology+bias Zarr ..."
-python tools/data/plasim/build_climatology_zarr.py \
+"$CONTAINER_RUN" python tools/data/plasim/build_climatology_zarr.py \
     --climatology "$CLIM_DIR/climatology.nc" \
     --bias-dir    "$BIAS_DIR" \
     --output      "$OUT_ROOT/climatology_bias.zarr" \

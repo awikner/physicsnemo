@@ -51,15 +51,27 @@ Globus → untar; ~5× faster than per-file Globus for these tiny-chunk stores).
   scope, methods, and who owns what.
 
 ## Gotchas that will bite you (details in `docs/dev/context/`)
-- **Multi-GPU (DDP):** `torch < 2.11` (2.11/2.12 break DDP); init wandb on
-  *every* rank — **never inside `if rank == 0:`** (a rank-0-only init hangs
-  DDP's first NCCL collective; root-caused + fixed 2026-08-07, see
+- **Jobs run in a container, not a venv.** One multi-arch image on NGC PyTorch
+  serves Delta, DeltaAI, Stampede3, Midway3, Polaris and Derecho; launch through
+  `hpc/scripts/container_run.sh`. Contract: [`hpc/containers.md`](hpc/containers.md);
+  measured facts and traps:
+  [container-migration](docs/dev/context/container-migration.md). **DSI is the only
+  venv cluster** (no container runtime, no module system).
+  Image conversion happens on **DeltaAI**, not Delta — Delta's apptainer 1.5.1
+  bundles a mksquashfs that segfaults on this image.
+- **Multi-GPU (DDP):** `torch < 2.11` (2.11/2.12 break DDP) — now enforced by the
+  image's base tag rather than by `uv sync` luck; init wandb on *every* rank —
+  **never inside `if rank == 0:`** (a rank-0-only init hangs DDP's first NCCL
+  collective; root-caused + fixed 2026-08-07, see
   `docs/dev/wandb_ddp_hang_fix_plan.md`; `wandb.allow_multigpu=false` re-arms
-  an auto-disable guard if it resurfaces); `uv sync` must include
+  an auto-disable guard if it resurfaces). *Venv path only:* `uv sync` must include
   `--extra sfno-extras --extra utils-extras --extra datapipes-extras` or it
   silently prunes SFNO/zarr deps.
-- **DeltaAI (GH200):** the inherited conda `wandb` is broken — install wandb into
-  `.venv-deltaai`; `torchrun` isn't on the venv PATH.
+- **DeltaAI (GH200):** the container retires three documented workarounds here —
+  the Cray-PE `CXX=CC` that broke TorchInductor, the import-broken conda `wandb`,
+  and `AI_ROSSBY_NO_CUDNN_SDPA` (bf16 SDPA at the v2 geometry measured working on
+  GH200 in-container). *Venv path only:* install wandb into `.venv-deltaai`;
+  `torchrun` isn't on the venv PATH.
 - **Globus high-assurance sessions time out** — refresh with `globus session
   update <domain>` (Delta ↔ `access-ci.org`, TACC ↔ `uchicago.edu`).
 - **Don't `import physicsnemo` on a login node** for small scripts — CUDA/Warp

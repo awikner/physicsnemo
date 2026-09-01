@@ -24,7 +24,9 @@
 set -euo pipefail
 REPO=${REPO:-/glade/work/awikner/physicsnemo-amip-v2}
 cd "$REPO"
-source /glade/work/awikner/physicsnemo/.venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 YEARS_LO=${YEARS_LO:-1978}
@@ -53,7 +55,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
     # Atomic tmp -> rename (walltime-kill safety, see convert script).
     OUT_TMP="$OUT_ROOT/${YEAR}.zarr.partial"
     rm -rf "$OUT_TMP"
-    if python tools/data/amip/coarsen_zarr.py \
+    if "$CONTAINER_RUN" python tools/data/amip/coarsen_zarr.py \
             --input "$IN_PATH" \
             --output "$OUT_TMP" \
             --factor 4 \

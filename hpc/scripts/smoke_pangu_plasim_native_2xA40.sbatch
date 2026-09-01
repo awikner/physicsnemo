@@ -24,7 +24,10 @@ set -euo pipefail
 
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 module load aws-ofi-nccl/1.14.2
 
@@ -40,7 +43,7 @@ cd examples/weather/ai_rossby
 # - dataset.batch_size=4                → fits comfortably on A100 with checkpointing=0
 # - dataset.num_workers=4               → loader parallelism
 # - log_every_n_steps=5                 → keep stdout chatty enough to verify
-torchrun --standalone --nproc-per-node=2 train.py \
+"$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 train.py \
     model=pangu_plasim_legacy_native \
     training=pangu_plasim_legacy \
     dataset=plasim_sim52_year12 \

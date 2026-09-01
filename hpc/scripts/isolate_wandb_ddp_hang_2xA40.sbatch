@@ -44,7 +44,9 @@ set -uo pipefail   # NOT -e: failing cells must not kill the matrix
 REPO_ROOT=/work/nvme/bdiu/awikner/physicsnemo-amip-v2
 VENV_ROOT=/work/nvme/bdiu/awikner/physicsnemo
 cd "$REPO_ROOT"
-source "$VENV_ROOT/.venv/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# AI_ROSSBY_VENV is superseded by AI_ROSSBY_SIF / AI_ROSSBY_CONTAINER_TAG.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 module load aws-ofi-nccl/1.14.2
@@ -96,7 +98,7 @@ run_cell () {
     # 420 s cap: heartbeat 120 s + dump + teardown headroom; a clean cell
     # finishes in ~2-3 min.
     env "${envs[@]}" timeout --signal=KILL 420 \
-        torchrun --standalone --nproc-per-node=2 "$script" \
+        "$CONTAINER_RUN" torchrun --standalone --nproc-per-node=2 "$script" \
         "${overrides[@]}" \
         run_name="wdm-$name-$SLURM_JOB_ID" \
         +checkpoint_dir="./ckpt_wdm_${name}_$SLURM_JOB_ID"

@@ -23,7 +23,10 @@
 
 set -euo pipefail
 cd "$WORK/physicsnemo"
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # Size the per-file H5 reader pool to the whole node (TACC allocates
 # whole nodes; without this the pool can bind to a single core).
@@ -42,7 +45,7 @@ for YEAR in $(seq 1979 2024); do
         continue
     fi
     echo "[$(date)] converting ERA5 year $YEAR ..."
-    python tools/data/era5/pangu_h5_to_zarr.py \
+    "$CONTAINER_RUN" python tools/data/era5/pangu_h5_to_zarr.py \
         --input-dir "$RAW" \
         --year "$YEAR" \
         --output "$OUT_PATH"
@@ -54,7 +57,7 @@ done
 # SFNO_S2S_0003 17-level ablation and would make the by-value ClimateNormalizer
 # raise on the full 18-level data.
 echo "[$(date)] building ERA5 normalization Zarr (pangu_s2s, 18-level incl 200 hPa) ..."
-python tools/data/era5/build_normalization_zarr.py \
+"$CONTAINER_RUN" python tools/data/era5/build_normalization_zarr.py \
     --source-dir "$RAW" \
     --variant pangu_s2s_Z200 \
     --output "$OUT_ROOT/normalization_pangu_s2s.zarr" \

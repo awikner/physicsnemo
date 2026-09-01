@@ -17,7 +17,12 @@
 #PBS -o hpc/scripts/logs/
 
 set -euo pipefail
-module load ncarenv/24.12 cuda/12.9.0 python/3.12.5   # cuda 12.9 verified; ncarenv/python TBD
+# The container carries python/CUDA; only apptainer comes from the host, and
+# container_run.sh loads that module itself.
+module load ncarenv/24.12
 cd /glade/work/awikner/physicsnemo
-source .venv/bin/activate
-pytest -m "smoke and cuda" -x -q "${TARGET:-test/}"
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
+"$CONTAINER_RUN" pytest -m "smoke and cuda" -x -q "${TARGET:-test/}"

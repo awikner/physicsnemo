@@ -29,7 +29,10 @@
 set -euo pipefail
 
 cd /work/nvme/bdiu/awikner/physicsnemo
-source .venv/bin/activate
+# Runs in the ai-rossby container (hpc/containers/) instead of a per-cluster venv.
+# Absolute, captured here where cwd is the repo root — the same assumption the
+# replaced `source .venv/bin/activate` already made — so it survives later cd.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
 
 # Per-batch loss output dir on HDD scratch.
 OUT_DIR=/work/hdd/bdiu/awikner/sfno_bench
@@ -52,7 +55,7 @@ nvidia-smi
 # Matches SFNO_PLASIM_H5_DERECHO_5412_test.yaml SFNO block exactly via
 # conf/model/sfno_plasim_5412.yaml + conf/training/sfno_plasim.yaml.
 # dataset.* overrides point at the prebuilt year-12 zarr.
-torchrun \
+"$CONTAINER_RUN" torchrun \
     --nnodes=1 \
     --nproc-per-node=4 \
     --standalone \
