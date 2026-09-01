@@ -28,9 +28,13 @@ on:
     # reach it. Drop it from this list once the workflow lands on main.
     branches: [ai-rossby, ai-rossbypalooza, ai-rossby-containers]
     paths:
+      # Only the inputs that actually change image contents. The distribution
+      # helpers (pull_sif.sh, replicate_sif.sh, build_sif_polaris.pbs) live in
+      # hpc/containers/ too but must not cost a ~25 GB rebuild when edited.
       - 'pyproject.toml'
       - 'uv.lock'
-      - 'hpc/containers/**'
+      - 'hpc/containers/Dockerfile'
+      - 'hpc/containers/make_requirements.sh'
       - '.github/workflows/container-ai-rossby.yml'
 
 concurrency:
