@@ -87,22 +87,18 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p hpc/scripts/logs
 
-CLUSTER="${AI_ROSSBY_CLUSTER:-}"
-case "${CLUSTER}" in
-  deltaai)
-    module load python/miniforge3_pytorch/2.10.0
-    VENV="${AI_ROSSBY_VENV:-.venv-deltaai}"
-    # DeltaAI-specific, both measured (see hpc/deltaai.md):
-    #  * the Cray PE leaves CXX=CC / CC=cc, which TorchInductor cannot link through;
-    #  * cuDNN 9.20 has no attention plan at the v2 geometries under bf16, and
-    #    torch reaches for that backend before flash.
-    export CXX="${CXX_OVERRIDE:-g++}" CC="${CC_OVERRIDE:-gcc}"
-    export AI_ROSSBY_NO_CUDNN_SDPA="${AI_ROSSBY_NO_CUDNN_SDPA:-1}" ;;
-  *)
-    VENV="${AI_ROSSBY_VENV:-.venv}" ;;
-esac
-# shellcheck disable=SC1091
-source "${VENV}/bin/activate"
+# Runs in the ai-rossby container (hpc/containers/). container_run.sh detects the
+# cluster, resolves the .sif and bind mounts, and scrubs the host toolchain env.
+# The two DeltaAI workarounds that used to live here are handled differently now:
+#  * CXX=CC / CC=cc from the Cray PE: container_run.sh unsets CC/CXX outright, so
+#    TorchInductor uses the image's own toolchain on every cluster.
+#  * cuDNN bf16 attention: still exported below, but it is a cuDNN-version
+#    property (the failure was on 9.20; the image ships 9.17.1), so it is pending
+#    re-measurement — see the container migration notes.
+CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
+if [ "${AI_ROSSBY_CLUSTER:-}" = deltaai ]; then
+  export AI_ROSSBY_NO_CUDNN_SDPA="${AI_ROSSBY_NO_CUDNN_SDPA:-1}"
+fi
 
 : "${AI_ROSSBY_DATA:?set AI_ROSSBY_DATA to the physicsnemo-zarr root}"
 export AI_ROSSBY_DATA
@@ -136,16 +132,17 @@ fi
 # docs/dev/context/sfno-ddp-requirements.md: torch 2.11/2.12 regressed DDP for
 # these models, and pyproject pins torch>=2.10,<2.11. Refuse a multi-GPU run on
 # a non-compliant build rather than produce a quietly-wrong 48-hour result.
-TORCH_VER="$(python -c 'import torch; print(torch.__version__.split("+")[0])')"
+TORCH_VER="$("$CONTAINER_RUN" python -c 'import torch; print(torch.__version__.split("+")[0])')"
 if [ "${NPROC}" -gt 1 ]; then
-  python - "$TORCH_VER" <<'PY' || exit 1
+  "$CONTAINER_RUN" python - "$TORCH_VER" <<'PY' || exit 1
 import sys
 major, minor = (int(p) for p in sys.argv[1].split(".")[:2])
 if (major, minor) >= (2, 11):
     sys.stderr.write(
         f"ERROR: torch {sys.argv[1]} with >1 GPU. DDP is broken on 2.11/2.12 for\n"
         f"       these models (docs/dev/context/sfno-ddp-requirements.md) and\n"
-        f"       pyproject pins torch>=2.10,<2.11. Rebuild the venv at 2.10.x, or\n"
+        f"       pyproject pins torch>=2.10,<2.11. Rebuild/repull the container\n"
+        f"       image at a torch 2.10.x NGC base, or\n"
         f"       submit with --gpus-per-node=1 to run single-GPU.\n"
     )
     raise SystemExit(1)
@@ -191,9 +188,10 @@ if [ -n "${WANDB_ENTITY:-}" ]; then WANDB_ENTITY_ARG="wandb.entity=${WANDB_ENTIT
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 nvidia-smi || true
 
-# `python -m torch.distributed.run`, not the `torchrun` console script: on
-# DeltaAI torch comes from the conda module and torchrun isn't on the venv PATH.
-python -m torch.distributed.run \
+# `python -m torch.distributed.run`, not the `torchrun` console script — kept for
+# consistency with the rest of hpc/scripts, where it is required because DeltaAI's
+# module-provided torch does not put torchrun on PATH.
+"$CONTAINER_RUN" python -m torch.distributed.run \
     --nnodes=1 \
     --nproc-per-node="${NPROC}" \
     --standalone \

@@ -36,8 +36,15 @@ set -uo pipefail   # NOT -e: a failed year must not kill the loop
 
 REPO=${REPO:-/work2/09979/awikner/stampede3/physicsnemo-amip-v2}
 cd "$REPO"
-source /work2/09979/awikner/stampede3/physicsnemo/.venv/bin/activate
-export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+
+# Runs in the ai-rossby container instead of borrowing the sibling checkout's
+# venv (this used to activate physicsnemo/.venv while REPO pointed at
+# physicsnemo-amip-v2, so the code and the interpreter came from different
+# worktrees). AI_ROSSBY_PYTHONPATH keeps this tree's modules first.
+CONTAINER_RUN="$REPO/hpc/scripts/container_run.sh"
+export AI_ROSSBY_PYTHONPATH="$REPO"
+# CPU partition: no GPU to pass through, so skip apptainer's --nv.
+export AI_ROSSBY_NV=0
 
 export SLURM_CPUS_PER_TASK=$(nproc)
 echo "[$(date)] $(hostname): $(nproc) cores"
@@ -65,7 +72,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
         echo "[$(date)] converting year $YEAR ..."
         FULL_TMP="$FULL_ROOT/${YEAR}.zarr.partial"
         rm -rf "$FULL_TMP"
-        if python tools/data/amip/amip_h5_to_zarr.py \
+        if "$CONTAINER_RUN" python tools/data/amip/amip_h5_to_zarr.py \
                 --config tools/data/amip/configs/amip_dailyavg.yaml \
                 --config-key AMIP \
                 --input-dir "$RAW" \
@@ -87,7 +94,7 @@ for YEAR in $(seq "$YEARS_LO" "$YEARS_HI"); do
         echo "[$(date)] coarsening year $YEAR ..."
         COARSE_TMP="$COARSE_ROOT/${YEAR}.zarr.partial"
         rm -rf "$COARSE_TMP"
-        if python tools/data/amip/coarsen_zarr.py \
+        if "$CONTAINER_RUN" python tools/data/amip/coarsen_zarr.py \
                 --input "$FULL_PATH" \
                 --output "$COARSE_TMP" \
                 --factor 4 \

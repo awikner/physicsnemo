@@ -1,0 +1,70 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#PBS -N ai-rossby-sif-build
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -q debug
+#PBS -A lighthouse-uchicago
+#PBS -j oe
+#
+# Build the ai-rossby .sif on a Polaris compute node, straight from GHCR.
+#
+#   qsub -v TAG=latest hpc/containers/build_sif_polaris.pbs
+#
+# Polaris needs its own build rather than a Globus copy from Delta, because
+# apptainer here exists only on compute nodes (so the login node cannot pull)
+# while compute nodes DO have proxied internet. It is also the fleet's only
+# fakeroot-capable host, which makes this the fallback if the GitHub Actions
+# build ever runs out of runner disk.
+#
+# Deliberately NOT a .def file: building from the published docker:// image
+# keeps one source of truth (hpc/containers/Dockerfile) instead of a second
+# recipe that would silently drift.
+set -euo pipefail
+
+TAG="${TAG:-latest}"
+IMAGE="${AI_ROSSBY_IMAGE:-ghcr.io/awikner/physicsnemo-ai-rossby}"
+DEST="${AI_ROSSBY_CONTAINER_DIR:-/eagle/lighthouse-uchicago/members/awikner/containers}"
+
+module use /soft/modulefiles
+module load spack-pe-base
+module load apptainer
+
+# Compute nodes reach the internet only through the ALCF proxy.
+export http_proxy=http://proxy.alcf.anl.gov:3128
+export https_proxy=http://proxy.alcf.anl.gov:3128
+
+# Node-local scratch for the layer blobs and the squashfs staging area — /eagle
+# is shared and slow for this, and $HOME is quota-limited.
+for cand in /local/scratch "${TMPDIR:-}" /tmp; do
+    [ -n "$cand" ] && [ -d "$cand" ] && { SCRATCH_DIR="$cand"; break; }
+done
+export APPTAINER_CACHEDIR="${SCRATCH_DIR}/apptainer-cache-$$"
+export APPTAINER_TMPDIR="${SCRATCH_DIR}/apptainer-tmp-$$"
+mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$DEST"
+trap 'rm -rf "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"' EXIT
+
+OUT="${DEST}/ai-rossby-${TAG}-$(uname -m).sif"
+echo "host    : $(hostname)  arch $(uname -m)"
+echo "image   : ${IMAGE}:${TAG}"
+echo "out     : ${OUT}"
+echo "scratch : ${SCRATCH_DIR}"
+apptainer --version
+echo
+
+# --fakeroot is documented as the supported build mode on Polaris; it is not
+# available on any other cluster in this fleet (no /etc/subuid mappings).
+apptainer build --fakeroot --force "${OUT}.part" "docker://${IMAGE}:${TAG}"
+mv "${OUT}.part" "$OUT"
+
+echo
+echo "built: $(du -h "$OUT" | cut -f1)  $OUT"
+echo "--- smoke ---"
+apptainer exec --nv "$OUT" python -c \
+    "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"

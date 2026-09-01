@@ -64,6 +64,16 @@ cd examples/weather/ai_rossby
 # Same shrunk-backbone sizing as the wiring smoke + bf16 bench (fits
 # 2x A40 at batch=2); 10 epochs, no rollout validation (this job is
 # purely about the training-loss curve).
+# Two constraints the overrides below encode (these used to sit inline as
+# comments between continuation lines, which silently TERMINATED the command —
+# bash does not allow a comment inside a `\`-continuation, so torchrun ran
+# truncated and the remaining args executed as a bogus command):
+#   - num_ca_blocks must be <= num_blocks (AmipDiT asserts it) and the config
+#     ships 8 to match the real checkpoints, so it is shrunk alongside.
+#   - c_grid_downsample stays at the config's 4: amip_dailyavg_coarse pairs a
+#     45x90 state with 1-degree forcings and the backbone's stride-4 conv is
+#     what reconciles them. Forcing 1 builds a 1x1 conv and then fails the
+#     concat on a 180x360-vs-45x90 spatial mismatch.
 torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     model=amip_si \
     loss=si \
@@ -74,16 +84,10 @@ torchrun --standalone --nproc-per-node=2 train_diffusion.py \
     training.ema.warmup_epochs=0 \
     'model.dit_kwargs.dim=128' \
     'model.dit_kwargs.num_blocks=4' \
-    # num_ca_blocks must be <= num_blocks (AmipDiT asserts it), and the
-    # config ships 8 to match the real checkpoints, so shrink it too.
     'model.dit_kwargs.num_ca_blocks=2' \
     'model.dit_kwargs.num_output_blocks=1' \
     'model.dit_kwargs.num_heads=4' \
     'model.dit_kwargs.patch_size=4' \
-    # c_grid_downsample stays at the config's 4: amip_dailyavg_coarse pairs a
-    # 45x90 state with 1-degree forcings, and the backbone's stride-4 conv is
-    # what reconciles them. Forcing 1 here would build a 1x1 conv and then
-    # fail the concat on a 180x360-vs-45x90 spatial mismatch.
     dataset.batch_size=2 \
     dataset.num_workers=4 \
     log_every_n_steps=20 \

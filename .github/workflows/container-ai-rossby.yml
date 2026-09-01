@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Builds the ai-rossby HPC container image for both cluster architectures and
+# publishes a multi-arch manifest to GHCR. The clusters then `apptainer pull`
+# from there (see hpc/containers/pull_sif.sh).
+#
+# Runs on GitHub-hosted runners, not NVIDIA's self-hosted `linux-amd64-*` pool
+# that the other workflows use — those labels do not resolve for this fork.
+# arm64 builds natively on `ubuntu-24.04-arm` rather than under QEMU, which
+# matters because torch-harmonics has no aarch64 wheel and must compile.
+
+name: ai-rossby container
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push to GHCR (uncheck for a build-only smoke test)'
+        type: boolean
+        default: true
+  push:
+    # ai-rossby-containers is included because GitHub only registers a
+    # workflow_dispatch target from the DEFAULT branch (here: main), so while
+    # this work lives on a feature branch a push trigger is the only way to
+    # reach it. Drop it from this list once the workflow lands on main.
+    branches: [ai-rossby, ai-rossbypalooza, ai-rossby-containers]
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'hpc/containers/**'
+      - '.github/workflows/container-ai-rossby.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/physicsnemo-ai-rossby
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      # The NGC PyTorch base is ~25 GB unpacked and a stock runner has only
+      # ~14 GB free, so reclaim the preinstalled toolchains first.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/lib/node_modules \
+                      "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          docker system prune -af || true
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'workflow_dispatch' || inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: hpc/containers/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          build-args: |
+            PHYSICSNEMO_GIT_HASH=${{ github.sha }}
+          # Digest-only push; the manifest list is assembled in `merge`.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+      - name: Export digest
+        if: github.event_name != 'workflow_dispatch' || inputs.push
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+
+      - name: Upload digest
+        if: github.event_name != 'workflow_dispatch' || inputs.push
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          retention-days: 1
+
+  merge:
+    name: multi-arch manifest
+    if: github.event_name != 'workflow_dispatch' || inputs.push
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: false
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Jobs pin the immutable sha- tag; `latest` is a convenience pointer.
+      - name: Create and push manifest list
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-8)"
+          REFS=()
+          for f in /tmp/digests/digest-*/*; do
+            REFS+=( "${IMAGE}@$(cat "$f")" )
+          done
+          echo "component images: ${REFS[*]}"
+          for TAG in "sha-${SHORT_SHA}" latest; do
+            docker buildx imagetools create -t "${IMAGE}:${TAG}" "${REFS[@]}"
+          done
+          docker buildx imagetools inspect "${IMAGE}:sha-${SHORT_SHA}"
