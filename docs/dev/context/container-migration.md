@@ -61,6 +61,8 @@ Closure: 267 packages with `cu13` → **211** without.
 | Delta `gpuA40x4-interactive` | A40, sm_86, driver 595.71.05 | **GPU check passed**: bf16 matmul, NCCL 2.29.2, bf16 SDPA at the v2 geometry |
 | DeltaAI login | aarch64 | full import set OK |
 | DeltaAI `ghx4-interactive` | GH200 120GB, sm_90 | **GPU check passed**, incl. bf16 SDPA at the v2 geometry |
+| Delta `gpuA40x4-interactive` | 1x A40 | `pytest -m "smoke and cuda"`: **21 passed, 20 skipped, 1 pre-existing failure** |
+| Delta `gpuA40x4-interactive` | 2x A40 | **2-GPU DDP smoke passed** (`test_pangu_plasim_legacy_ddp_smoke`) — the gate for the torch<2.11 pin together with wandb-on-every-rank |
 
 A CUDA 13.1 container works under plain `apptainer exec --nv` on driver 595 with
 **no** NGC-entrypoint sourcing and no `LD_LIBRARY_PATH` fixup — worth knowing,
@@ -132,6 +134,36 @@ Three of the four documented in `hpc/deltaai.md` are gone:
   libgeos/libproj headers.
 - Of the 210 lock-pinned packages, an audit found **exactly one** with no
   aarch64-installable distribution (torch-harmonics). No other arm64 gaps.
+
+## Pre-existing bugs this work surfaced
+
+None were caused by the migration; they were found by actually running things.
+
+1. **Comments inside backslash-continuations** in
+   `smoke_amip_diffusion_2xA40.sbatch` and
+   `smoke_amip_diffusion_convergence_2xA40.sbatch`. Bash ends the command at the
+   comment, so `torchrun` received 15 of its 24 args and the remaining args ran as
+   a bogus command. Since the dropped `num_ca_blocks=2` left the config's 8 >
+   `num_blocks=4`, which `AmipDiT` asserts on, the 2xA40 smoke could not have
+   passed. Introduced 2026-08-17 in `84725058`. **Fixed.** A sweep of all 60+ job
+   scripts found only these two.
+2. **The DDP smoke test was unselectable.** `test_smoke_ddp.py` carried
+   `@pytest.mark.multigpu`, which `conftest.py` does not register (it registers
+   `multigpu_dynamic` / `multigpu_static`), so conftest skipped it under *either*
+   flag with "Unknown pytest.mark.multigpu". Present since `88e9ebad`
+   (2026-06-18). Its docstring names the intended invocation, so the fix was
+   unambiguous. **Fixed** — and the test passes.
+3. **Two context notes were factually wrong** — see the traps above:
+   `sfno-ddp-requirements.md`'s torch-harmonics `--no-binary` recipe and
+   `PhysMetrics.md`'s unconditional `requires-python` insertion. **Both
+   corrected.**
+4. **`test_plasim_datapipe_with_workers_drives_pangu_plasim` fails at HEAD** —
+   *left alone deliberately.* The test passes `forecast_lead_times=[1, 4]` and
+   `physicsnemo/experimental/datapipes/climate/dataset.py:155` rejects multiple
+   distinct leads ("Multi-lead training is single-step only"). That guard arrived
+   2026-08-13 in `a505b4c9` without updating the test, which was last touched
+   2026-06-23. Whether the guard is too strict or the test should move to a single
+   lead is a datapipe-semantics decision, not a container one.
 
 ## Open
 
