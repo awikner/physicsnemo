@@ -94,7 +94,7 @@ _BACKBONE_KWARGS = dict(
 
 @pytest.mark.smoke
 @pytest.mark.cuda
-@pytest.mark.multigpu
+@pytest.mark.multigpu_static
 @_skip_not_torchrun
 @_skip_no_fixture
 @_skip_no_stats
