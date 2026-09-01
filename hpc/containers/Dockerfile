@@ -44,23 +44,31 @@ RUN uv pip install "pip>=23.2.1" "setuptools>=77.0.3"
 RUN FILE="/etc/pip/constraint.txt"; \
     if [ -f "$FILE" ]; then sed -i '/packaging/d' "$FILE"; fi
 
-# System (non-Python) prerequisites:
-#   cdo                    - PLASIM extremes chain; see
-#                            tools/data/plasim/postprocessor/README.md
-#                            "System prerequisites". burn7/pumaburner is NOT
-#                            installed here: it is an out-of-tree compiled
-#                            binary whose path comes from the postprocessor
-#                            config's `pumaburner_script` key, so it is
-#                            bind-mounted from the host instead.
+# System (non-Python) prerequisites available on both arches:
 #   libgeos/libproj        - cartopy
 #   git-lfs, zip, rsync    - hpc/scripts data-movement helpers
 #   libgl1, graphviz       - vtk / pyvista
+# cdo is handled separately below (amd64 only). burn7/pumaburner is NOT
+# installed at all: it is an out-of-tree compiled binary whose path comes from
+# the postprocessor config's `pumaburner_script` key, so it is bind-mounted from
+# the host instead. See tools/data/plasim/postprocessor/README.md.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cdo \
         libgeos-dev libproj-dev proj-bin \
         git-lfs graphviz libgl1 zip unzip rsync && \
     git lfs install && \
     rm -rf /var/lib/apt/lists/*
+
+# cdo is amd64-only: the NGC arm64 image's apt sources have no installation
+# candidate for it. That is fine functionally — cdo is used only by the PLASIM
+# postprocessor chain (tools/data/plasim/postprocessor), which runs as a CPU job
+# on Stampede3/Delta and never on DeltaAI's GH200. The build fails loudly on
+# amd64 if it ever disappears there.
+RUN if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends cdo && \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "skipping cdo on $TARGETPLATFORM (no arm64 candidate; PLASIM chain is x86_64-only)"; \
+    fi
 
 # Dependency closure, rendered from uv.lock so the image matches what
 # `uv sync` resolves on the clusters today. See make_requirements.sh for why
@@ -70,31 +78,48 @@ COPY pyproject.toml uv.lock ./
 COPY hpc/containers/make_requirements.sh hpc/containers/
 RUN hpc/containers/make_requirements.sh /build/requirements.txt
 
-# --no-deps: the export is already a complete, fully-pinned closure, so resolution
-# is neither needed nor wanted — it would let torch back in via a transitive edge.
-RUN uv pip install --no-deps -r /build/requirements.txt
-
-# torch-harmonics has no aarch64 wheel (hpc/deltaai.md), so on arm64 the line
-# above builds it from an sdist under build isolation, where pip would pull a
-# PyPI torch and link the extension against the wrong ABI. Reinstall it against
-# the image's own torch. Mirrors the repo-root Dockerfile's handling.
-RUN TH_SPEC="$(grep -E '^torch-harmonics==' /build/requirements.txt)" && \
-    uv pip install --no-deps --no-build-isolation --reinstall "${TH_SPEC}"
+# torch-harmonics is handled separately: 0.9.x is published as x86_64-only
+# wheels with NO sdist, so on aarch64 there is nothing on PyPI to install and
+# nothing to build from either (which also means hpc/deltaai.md's
+# `uv pip install --no-binary torch-harmonics` recipe cannot work on 0.9.x).
+# Take it from the upstream git tag there instead, at the version the lock pins.
+#
+# --no-deps: the export is already a complete, fully-pinned closure, so
+# resolution is neither needed nor wanted — it would let torch back in via a
+# transitive edge.
+RUN TH_VER="$(grep -E '^torch-harmonics==' /build/requirements.txt | cut -d'=' -f3)" && \
+    echo "torch-harmonics pinned at ${TH_VER}" && \
+    grep -v -E '^torch-harmonics==' /build/requirements.txt > /build/req-main.txt && \
+    uv pip install --no-deps -r /build/req-main.txt && \
+    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        uv pip install --no-deps --no-build-isolation \
+            "torch-harmonics @ git+https://github.com/NVIDIA/torch-harmonics.git@v${TH_VER}"; \
+    else \
+        uv pip install --no-deps "torch-harmonics==${TH_VER}"; \
+    fi
 
 # Reachable from the recipes but present in no pyproject extra:
 #   cartopy      - examples/weather/ai_rossbypalooza/physmetrics/plot_tcwv_bias.py
 #   natsort      - tools/data/plasim/postprocessor/postprocess_data.py
 #   ruamel.yaml  - tools/data/plasim/postprocessor/src/utils.py
-RUN uv pip install cartopy natsort "ruamel.yaml"
+# Pinned even though they are outside uv.lock, so the image stays reproducible.
+# Folding them into a pyproject extra is the proper fix, but that regenerates the
+# lock and would perturb every cluster venv mid-migration.
+# Note cartopy publishes no linux-aarch64 wheel, so on arm64 it builds from the
+# sdist against the libgeos/libproj headers installed above.
+RUN uv pip install "cartopy==0.25.0" "natsort==8.4.0" "ruamel.yaml==0.19.1"
 
 # PhysMetrics.Weather (ai-rossbypalooza physics diagnostics). Upstream's
 # pyproject.toml names the package `physeval*` while the source tree is
-# src/physmetrics_weather/, and omits requires-python; both patches are the
-# documented fix in docs/dev/context/PhysMetrics.md.
+# src/physmetrics_weather/. docs/dev/context/PhysMetrics.md also has us add a
+# missing requires-python, but upstream has since added it, so inserting it
+# unconditionally now produces a duplicate TOML key — hence the grep guard.
 RUN git clone --depth 1 https://github.com/Emmakast/PhysMetrics.Weather.git /tmp/physmetrics && \
     cd /tmp/physmetrics && \
     sed -i 's/physeval/physmetrics/g' pyproject.toml && \
-    sed -i '/^readme = "README.md"$/a requires-python = ">=3.10"' pyproject.toml && \
+    if ! grep -q '^requires-python' pyproject.toml; then \
+        sed -i '/^readme = "README.md"$/a requires-python = ">=3.10"' pyproject.toml; \
+    fi && \
     uv pip install --no-deps . && \
     rm -rf /tmp/physmetrics
 
