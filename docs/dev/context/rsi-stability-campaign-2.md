@@ -83,6 +83,41 @@ eval vs the ERDM sst_pred baseline.
 Not retrying (campaign-1 dead ends): gradient clipping alone, GnormLrGovernor
 v1/v2, rewind-on-excursion, alpha/churn sampler dials (inference-side only).
 
+## Measured cost + hardware calibration (2026-09-01)
+
+All at global batch 4 (4 GPUs x batch 1, no accumulation) — the same global
+batch as upstream ERDM sst_pred and the rsi_sstpred_a2 baseline.
+
+| config | s/step | 30k steps | peak GPU mem |
+|---|---|---|---|
+| Midway 4xH100, bf16 | 0.826 | 6.9 h | 50.4 GB / 95.8 GB |
+| DeltaAI 4xGH200, bf16 | 0.62 | 5.2 h | 50.8 GB / 120 GB |
+| DeltaAI 4xGH200, fp32 (no TF32) | 2.53 | 21.1 h | 74.3 GB / 120 GB |
+
+Consequences: (a) fp32 costs **4.1x** bf16, not the ~1.5-2x assumed when the
+arm ladder was written — fp32 arms need >=24 h walltime, and a *failing* arm
+still costs only ~10 h since the excursion lands at ~15k steps; (b) fp32 peaks
+at 74 GB, so it fits on BOTH H100 (95 GB) and GH200 — the earlier OOM concern
+was wrong and no gradient checkpointing is needed for these arms;
+(c) GH200 bf16 is ~25% faster than H100 bf16.
+
+**TF32 is part of upstream parity, not just an optimization.** amip_v2's
+`train.py` sets `torch.set_float32_matmul_precision("high")`, so upstream's
+`precision: 32-true` run is fp32 *storage* with TF32 matmuls. Our
+train_diffusion has the same knob (`++training.matmul_precision=high`) but
+defaults it OFF, so an fp32 arm without it is both slower AND less faithful
+than the run it is supposed to match. Cross-check: upstream's own checkpoint
+timestamps give 5 h 40 m/epoch = **1.55 s/step**, between our bf16 (0.62) and
+our TF32-less fp32 (2.53) — consistent with TF32 on. All fp32 arms therefore
+carry `++training.matmul_precision=high`.
+
+**Interactive queues.** DeltaAI's `ghx4-interactive` is the same PriorityTier
+as `ghx4` but nearly empty (7 pending vs 672), at a 2 h / 4-node cap — too
+short for a 30k-step arm (~8.7k steps) but ideal for de-risking: the 300-step
+smokes above validated the whole aarch64 path (module load, Cray CXX/CC
+override, cuDNN-SDPA workaround, 4-way DDP) and produced this table before
+any 24 h job entered a 672-deep queue.
+
 ## Bookkeeping
 
 - All probes: run-scoped `++checkpoint_dir` (the shared-default resume trap),
