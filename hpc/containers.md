@@ -90,8 +90,8 @@ so the environment is inherited and only the actively harmful parts are removed:
 
 | Cluster | Arch | Runtime | Where | Notes |
 |---|---|---|---|---|
-| Delta | x86_64 | apptainer 1.5.1, native | login + compute | The pull/convert hub: native apptainer plus login-node internet |
-| DeltaAI | **aarch64** | apptainer 1.4.2, native | login + compute | Shares `/work/nvme` with Delta, so no transfer needed |
+| Delta | x86_64 | apptainer 1.5.1, native | login + compute | Runs images fine, but **cannot build them** — its bundled mksquashfs 4.7.5 dies on this image |
+| DeltaAI | **aarch64** | apptainer 1.4.2, native | login + compute | **The conversion hub** for both arches; shares `/work/nvme` with Delta so Delta needs no transfer |
 | Stampede3 | x86_64 | `module load tacc-apptainer` | **compute only** | Compute nodes have no internet, so the `.sif` must be shipped in |
 | Midway3 | x86_64 | `module load apptainer` | **compute only** | Every version fails to load on the login node (`Module ERROR: wrong # args`) |
 | Polaris | x86_64 | `ml use /soft/modulefiles; ml spack-pe-base; ml apptainer` | **compute only** | Only fakeroot-capable host → builds its own, see `build_sif_polaris.pbs` |
@@ -103,7 +103,7 @@ Polaris **580.65.06**. Stampede3 `h100` and Midway3 `pedramh-gpu` are pending.
 ## Distribution
 
 ```bash
-# On a Delta login node — the only place that can both run apptainer and reach GHCR:
+# On a DeltaAI login node — see "Why DeltaAI converts, not Delta" below:
 hpc/containers/pull_sif.sh latest              # writes both arches to /work/nvme/.../containers
 
 # Then fan out (needs a live Globus session; see Step 0 of the migration plan):
@@ -115,9 +115,38 @@ hpc/containers/replicate_sif.sh latest derecho
 qsub -v TAG=latest hpc/containers/build_sif_polaris.pbs
 ```
 
-`.sif` files are ~15-25 GB. Always redirect `APPTAINER_CACHEDIR` and
-`APPTAINER_TMPDIR` to scratch — the same small-`$HOME` trap that bit
-`UV_CACHE_DIR` on Midway3 and Stampede3.
+Measured image sizes: **8.8 GB** (x86_64), **9.1 GB** (aarch64).
+
+### Why DeltaAI converts, not Delta
+
+Delta looks like the obvious hub — it has the data, native apptainer on login
+nodes, and outbound internet. But its apptainer 1.5.1 bundles **mksquashfs 4.7.5
+(2026/03/01), which is broken for an image this size**: `FATAL ERROR: Bug in
+orderer` at the default 128 processors, and SIGSEGV (exit 139) at
+`-processors 8`. The OCI download and rootfs extraction both succeed; only the
+squashfs step dies. Delta *does* ship a working system mksquashfs 4.4 in
+`/usr/sbin`, but apptainer ignores `$PATH` for its bundled helpers, so it cannot
+be redirected there without root (tested). `pull_sif.sh` refuses to run on a host
+whose bundled mksquashfs is 4.7.x rather than waste the download.
+
+DeltaAI's apptainer 1.4.2 converts the same image cleanly, shares `/work/nvme`
+with Delta so the output needs no transfer, and — because `apptainer pull --arch`
+only downloads and squashes layers without ever executing them — produces the
+**x86_64** image from aarch64 hardware too.
+
+This is worth an NCSA ticket: a broken mksquashfs on Delta will bite anyone
+building containers there, not only this project.
+
+### Disk and quota
+
+`apptainer pull` needs roughly **3x** the final image on disk (layer cache plus a
+fully-expanded rootfs) before squashing. Running that under `/work` fails with
+`EDQUOT`, because the `bdiu` project quota is shared across `/work/nvme` and
+`/work/hdd` and `/work/hdd` is already over its own soft limit (20.79T of
+19.53T) — see `docs/dev/context/lat-orientation-audit.md`. `pull_sif.sh` stages
+everything on node-local `/tmp` (~1.6 TB on DeltaAI login nodes) and moves only
+the finished image onto Lustre. Never let apptainer cache into `$HOME` — the same
+small-quota trap that bit `UV_CACHE_DIR` on Midway3 and Stampede3.
 
 ## Rebuilding
 

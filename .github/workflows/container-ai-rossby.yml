@@ -35,6 +35,7 @@ on:
       - 'uv.lock'
       - 'hpc/containers/Dockerfile'
       - 'hpc/containers/make_requirements.sh'
+      - 'hpc/containers/strip_leaked_tools.py'
       - '.github/workflows/container-ai-rossby.yml'
 
 concurrency:

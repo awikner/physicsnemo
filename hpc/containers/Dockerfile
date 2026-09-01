@@ -128,6 +128,12 @@ RUN git clone --depth 1 https://github.com/Emmakast/PhysMetrics.Weather.git /tmp
     uv pip install --no-deps . && \
     rm -rf /tmp/physmetrics
 
+# nvfuser, bundled in the NGC base image, leaks a top-level `tools` package that
+# shadows this repo's own. See hpc/containers/strip_leaked_tools.py for the full
+# explanation and the build-time assertions.
+COPY hpc/containers/strip_leaked_tools.py /build/hpc/containers/
+RUN python /build/hpc/containers/strip_leaked_tools.py
+
 RUN uv cache clean && rm -rf /build
 
 # HDF5 file locking breaks on the parallel filesystems these jobs bind-mount;

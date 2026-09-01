@@ -92,13 +92,14 @@ mkdir -p hpc/scripts/logs
 # The two DeltaAI workarounds that used to live here are handled differently now:
 #  * CXX=CC / CC=cc from the Cray PE: container_run.sh unsets CC/CXX outright, so
 #    TorchInductor uses the image's own toolchain on every cluster.
-#  * cuDNN bf16 attention: still exported below, but it is a cuDNN-version
-#    property (the failure was on 9.20; the image ships 9.17.1), so it is pending
-#    re-measurement — see the container migration notes.
+#  * cuDNN bf16 attention: no longer forced off. The documented failure
+#    (hpc/deltaai.md: "no valid execution plans built" for bf16 SDPA at the v2
+#    geometry) is a cuDNN-version property of the host stack's 9.20. The image
+#    ships 9.17.1, and bf16 SDPA at exactly (B,H,S,D)=(6,16,4050,64) was measured
+#    working on a real GH200 inside this container (2026-09-01). Setting
+#    AI_ROSSBY_NO_CUDNN_SDPA=1 by hand still works if it ever regresses; carrying
+#    it unconditionally would disable the cuDNN attention backend for nothing.
 CONTAINER_RUN="$(pwd)/hpc/scripts/container_run.sh"
-if [ "${AI_ROSSBY_CLUSTER:-}" = deltaai ]; then
-  export AI_ROSSBY_NO_CUDNN_SDPA="${AI_ROSSBY_NO_CUDNN_SDPA:-1}"
-fi
 
 : "${AI_ROSSBY_DATA:?set AI_ROSSBY_DATA to the physicsnemo-zarr root}"
 export AI_ROSSBY_DATA
