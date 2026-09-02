@@ -746,6 +746,26 @@ def main(cfg: DictConfig) -> None:
 
     # --- Model + DDP + Loss + Optimizer ----------------------------------
     model = build_model(cfg.model).to(dist.device)
+    # Activation checkpointing is a TRAINING knob, not part of the channel
+    # contract, so it is set here rather than baked into the model config (that
+    # would put it in every checkpoint's args.json for no reason). It only
+    # changes when activations are recomputed, never the math or the weights —
+    # see test_grad_checkpoint_equivalence. Needed to fit fp32 on 40 GB cards,
+    # and fp32 is mandatory for RSI (campaign 2: bf16 is what destabilises it).
+    if bool(cfg_train.get("grad_checkpoint", False)):
+        bb = getattr(model, "backbone", None)
+        if bb is None or not hasattr(bb, "grad_checkpoint"):
+            raise ValueError(
+                "training.grad_checkpoint=True but this model's backbone has no "
+                "grad_checkpoint support (implemented for RollingDiT)"
+            )
+        bb.grad_checkpoint = True
+        # PhysicsNeMo's PythonLogger.info takes ONE pre-formatted string —
+        # printf-style args raise TypeError (cost a 38 s job to learn).
+        logger.info(
+            f"activation checkpointing ON for {getattr(bb, 'num_blocks', -1)} "
+            f"block levels (spatial + temporal + forcing)"
+        )
     # Anti-fork guard (Phase 12d.13): the model must be sized for exactly the
     # c_grid / c_scalar widths the data pipeline emits.
     if getattr(raw_ds, "forcing_pipeline", None) is not None:

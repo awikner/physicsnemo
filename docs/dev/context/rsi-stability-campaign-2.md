@@ -118,6 +118,40 @@ smokes above validated the whole aarch64 path (module load, Cray CXX/CC
 override, cuDNN-SDPA workaround, 4-way DDP) and produced this table before
 any 24 h job entered a 672-deep queue.
 
+## Gradient checkpointing (measured 2026-09-02, DeltaAI interactive queue)
+
+Implemented in `RollingDiT` (`grad_checkpoint`, wrapped over all 20 spatial +
+20 temporal + 4 forcing blocks with `use_reentrant=False` — required for DDP
+autograd hooks and for the non-tensor b/W/n/mask args). Switched on with
+`++training.grad_checkpoint=true`, which the trainer applies to the built
+backbone; deliberately NOT a model-config key, so it never lands in a
+checkpoint's args.json. Skipped whenever grad is off, so eval/samplers pay
+nothing. `_CONTRACT_KEYS` is unaffected, so old checkpoints still load.
+
+fp32, 150 steps, 4x GH200, global batch 4, identical seeds:
+
+| | peak GPU mem | s/step |
+|---|---|---|
+| checkpointing OFF | 74,327 MiB (72.6 GB) | 2.530 |
+| checkpointing ON | **16,631 MiB (16.2 GB)** | 3.320 |
+| | **4.47x less, 56.3 GB saved** | **+31%** |
+
+Loss at batches 0/100/149 is IDENTICAL between the two runs
+(7.0338e+03 / 5.6206e+03 / 4.4819e+03) — a full-scale empirical confirmation
+of the unit-test equivalence (test/models/amip_si/test_grad_checkpoint.py:
+bitwise-identical forward, <1e-4 relative gradient agreement).
+
+**What this unlocks.** fp32 now fits with room to spare on every 40 GB-class
+card: Polaris A100-40GB (16.2 of 40 GB), Delta gpuA100x4 (40 GB) and the
+~70-node gpuA40x4 pool (48 GB). That matters because campaign 2 established
+fp32 is mandatory for RSI, and until now the recipe was confined to
+H100/GH200. Estimated 10-epoch cost at global batch 4 (parity preserved,
+1 node x 4 GPUs): ~96 h on H100/GH200, ~287 h on A100 TF32. Polaris's
+`capacity` queue (1-4 nodes, **168 h**, priority 150, allocation has 34.5k
+node-hours) therefore yields ~6 epochs per submission — vs the ~1.2 epochs
+the pre-fix instability capped us at — and checkpoint/resume can chain
+submissions for the full 10.
+
 ## Bookkeeping
 
 - All probes: run-scoped `++checkpoint_dir` (the shared-default resume trap),

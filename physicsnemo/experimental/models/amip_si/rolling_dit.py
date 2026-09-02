@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from ._attention import sdpa
 from einops import rearrange
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from dataclasses import dataclass
 
@@ -230,6 +231,7 @@ class RollingDiT(_PNeMoModule):
                  c_grid_cross_layers=0,
                  c_grid_cross_heads=8,
                  state_layout=None,
+                 grad_checkpoint=False,
                  **kwargs):                  # tolerate extra config keys
         super().__init__(meta=MetaData())
         self.in_channels = in_channels
@@ -248,6 +250,15 @@ class RollingDiT(_PNeMoModule):
         self.scalar_dim = scalar_dim
 
         self.window_size = int(window_size)
+        # Recompute each transformer block's activations in the backward pass
+        # instead of storing them (torch.utils.checkpoint). The block stack is
+        # where this model's activation memory lives: at W=6 / 45x90 / dim 1024
+        # the 20 spatial + 20 temporal + 4 forcing blocks dominate the ~74 GB
+        # fp32 footprint, while weights + Muon state are only ~10 GB. Trades
+        # ~30-40% throughput for that memory; needed to fit fp32 on 40 GB cards
+        # (A100/A40, i.e. Polaris + most of Delta) since bf16 is not an option
+        # for RSI — it is what destabilises training (campaign 2, arm9c).
+        self.grad_checkpoint = bool(grad_checkpoint)
 
         # Phase 12f: predicted ocean channels occupy a block at the tail of
         # in/out_channels (it arrives here inside ``state_layout``, derived by
@@ -630,13 +641,33 @@ class RollingDiT(_PNeMoModule):
 
         # ── (1)+(2) Alternate per-frame spatial and causal-temporal attention,
         #            with forcing cross-attention on the last N blocks. ──
+        # ``use_reentrant=False`` is required, not stylistic: the reentrant
+        # implementation does not compose with DDP's autograd hooks and cannot
+        # take non-tensor arguments (the int b/W/n and the bool mask below).
+        # Checkpointing is skipped whenever grad is off, where it would only
+        # add recompute cost (eval, validation rollouts, the samplers).
+        ckpt = self.grad_checkpoint and torch.is_grad_enabled()
         for i, (sblock, tblock) in enumerate(zip(self.spatial_blocks, self.temporal_blocks)):
             if forcing_kv is not None and str(i) in self.forcing_blocks:
-                x = self.forcing_blocks[str(i)](
-                    x, forcing_kv, t_emb, b, W, n, forcing_mask
+                fblock = self.forcing_blocks[str(i)]
+                if ckpt:
+                    x = torch_checkpoint(
+                        fblock, x, forcing_kv, t_emb, b, W, n, forcing_mask,
+                        use_reentrant=False,
+                    )
+                else:
+                    x = fblock(x, forcing_kv, t_emb, b, W, n, forcing_mask)
+            if ckpt:
+                x = torch_checkpoint(
+                    sblock, x, t_emb, rope_cos_lat, rope_sin_lat,
+                    rope_cos_lon, rope_sin_lon, use_reentrant=False,
                 )
-            x = sblock(x, t_emb, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
-            x = tblock(x, t_emb, b, W, n)
+                x = torch_checkpoint(
+                    tblock, x, t_emb, b, W, n, use_reentrant=False,
+                )
+            else:
+                x = sblock(x, t_emb, rope_cos_lat, rope_sin_lat, rope_cos_lon, rope_sin_lon)
+                x = tblock(x, t_emb, b, W, n)
 
         if self.output_head is None:
             x = self.unpatchify_layer(x, t_emb)       # (b*W, nlat, nlon, out_channels)
