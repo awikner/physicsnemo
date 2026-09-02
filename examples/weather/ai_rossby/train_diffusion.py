@@ -977,7 +977,8 @@ def main(cfg: DictConfig) -> None:
             num_epochs=stage_epochs,
         )
         lr_scheduler = make_scheduler(
-            optimizer, sched_cfg, total_steps=steps_per_epoch * stage_epochs
+            optimizer, sched_cfg, total_steps=steps_per_epoch * stage_epochs,
+            steps_per_epoch=steps_per_epoch,
         )
         if done_in_stage > 0:
             # Fast-forward to the resume point so the schedule continues

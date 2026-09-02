@@ -834,6 +834,7 @@ def make_scheduler(
     cfg: Any,
     *,
     total_steps: int,
+    steps_per_epoch: int | None = None,
 ) -> torch.optim.lr_scheduler.LRScheduler:
     """Build a scheduler from a config dict-like.
 
@@ -844,8 +845,28 @@ def make_scheduler(
       ``max_lr`` defaults to ``lr``.
     * ``"LinearWarmupCosineAnnealingLR"`` — composes a linear warmup
       (``num_warmup_steps``) with cosine annealing to ``eta_min``.
+    * ``"StepLR"`` — multiply the lr by ``sl_gamma`` every ``sl_step_epochs``
+      EPOCHS. This is upstream amip_v2's schedule
+      (``StepLR(optimizer, step_size=1, gamma=0.95)`` in
+      ``modules/train_module.py``, stepped per-epoch by Lightning), provided
+      here for training-budget parity with the ERDM baseline. Our loop steps
+      the scheduler every OPTIMIZER step, so the epoch cadence is converted
+      via ``steps_per_epoch``, which the caller must pass.
     """
     name = getattr(cfg, "scheduler", "OneCycleLR")
+    if name == "StepLR":
+        gamma = float(getattr(cfg, "sl_gamma", 0.95))
+        step_epochs = float(getattr(cfg, "sl_step_epochs", 1))
+        if steps_per_epoch is None:
+            raise ValueError(
+                "scheduler=StepLR needs steps_per_epoch (its decay cadence is "
+                "per-EPOCH but this loop steps the scheduler per optimizer "
+                "step); pass steps_per_epoch=... to make_scheduler"
+            )
+        step_size = max(1, int(round(step_epochs * int(steps_per_epoch))))
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=step_size, gamma=gamma
+        )
     if name == "CosineToFloor":
         # Cosine from the base lr down to ``ct_floor_lr`` over
         # ``ct_decay_steps`` optimizer steps, then HOLD the floor for the rest
