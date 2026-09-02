@@ -89,13 +89,19 @@ Three of the four documented in `hpc/deltaai.md` are gone:
 
 ## Traps discovered (each cost a cycle)
 
-- **Delta cannot build images.** apptainer 1.5.1 bundles **mksquashfs 4.7.5
-  (2026/03/01)**, which dies on this image: `FATAL ERROR: Bug in orderer` at the
-  default 128 procs, SIGSEGV (exit 139) at `-processors 8`. Download and rootfs
-  extraction succeed; only squashing fails. Delta ships a working system
-  mksquashfs 4.4 in `/usr/sbin`, but **apptainer ignores `$PATH` for its bundled
-  helpers** (tested — the error still names `/usr/libexec/apptainer/bin/`), so it
-  cannot be redirected without root. **Worth an NCSA ticket.**
+- **Delta cannot build images — and this breaks NCSA's *documented* method.**
+  The Delta container guide says "Docker images can be converted to Apptainer sif
+  format via the `apptainer pull` command", and `/sw/external/NGC/README` gives it
+  verbatim. apptainer 1.5.1 bundles **mksquashfs 4.7.5 (2026/03/01)**, which fails
+  with `FATAL ERROR: Bug in orderer` at the default 128 procs and SIGSEGV (exit
+  139) at `-processors 8`. Download and rootfs extraction succeed; only squashing
+  fails. It is **not** the `/tmp`-exhaustion failure the guide documents
+  (`No space left on device`, cured by `rm -rf /tmp/build-temp*`): reproduced with
+  no litter present, 1099 GB free, fresh cache/tmpdir. Control:
+  `docker://alpine:3.20` converts fine on the same host, so it is size-dependent.
+  Delta ships a working system mksquashfs 4.4 in `/usr/sbin`, but **apptainer
+  ignores `$PATH` for its bundled helpers** (tested), so it cannot be redirected
+  without root. **Worth an NCSA ticket**, since it breaks their own procedure.
   → DeltaAI (apptainer 1.4.2) converts fine, shares `/work/nvme` with Delta, and
   `apptainer pull --arch` never executes layers, so it builds **both** arches.
 - **`apptainer pull` needs ~3x the final image on disk** and running it under

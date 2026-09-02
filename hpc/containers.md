@@ -125,22 +125,53 @@ is the usual case; it verifies the source with `globus ls`, not a local file tes
 ### Why DeltaAI converts, not Delta
 
 Delta looks like the obvious hub — it has the data, native apptainer on login
-nodes, and outbound internet. But its apptainer 1.5.1 bundles **mksquashfs 4.7.5
-(2026/03/01), which is broken for an image this size**: `FATAL ERROR: Bug in
-orderer` at the default 128 processors, and SIGSEGV (exit 139) at
-`-processors 8`. The OCI download and rootfs extraction both succeed; only the
-squashfs step dies. Delta *does* ship a working system mksquashfs 4.4 in
-`/usr/sbin`, but apptainer ignores `$PATH` for its bundled helpers, so it cannot
-be redirected there without root (tested). `pull_sif.sh` refuses to run on a host
-whose bundled mksquashfs is 4.7.x rather than waste the download.
+nodes, and outbound internet. **But the method NCSA documents does not work there
+for an image this size.** The Delta container guide opens with "Docker images can
+be converted to Apptainer sif format via the `apptainer pull` command", and
+`/sw/external/NGC/README` on the machine gives it verbatim as
+`apptainer pull docker://nvcr.io/nvidia/pytorch:24.07-py3`. That exact command
+dies in the squashfs step:
+
+```
+FATAL: While making image from oci registry: ... while creating squashfs:
+       /usr/libexec/apptainer/bin/mksquashfs command failed: exit status 1:
+       FATAL ERROR: Bug in orderer
+```
+
+apptainer 1.5.1 bundles **mksquashfs 4.7.5 (2026/03/01)**. The OCI download and
+rootfs extraction both succeed; only squashing fails — `Bug in orderer` at the
+default 128 processors, SIGSEGV (exit 139) at `-processors 8`.
+
+This is **not** the `/tmp`-exhaustion failure the Delta guide documents (that one
+reads `Write failed because No space left on device` and is cured by
+`rm -rf /tmp/build-temp*`). Reproduced on a clean slate: no `build-temp` litter
+present, 1099 GB free on `/tmp`, fresh cache and tmpdir — same `Bug in orderer`.
+Control: `docker://alpine:3.20` converts fine on the same host and toolchain, so
+the fault is size-dependent, not configuration.
+
+Delta *does* ship a working system mksquashfs 4.4 in `/usr/sbin`, but apptainer
+ignores `$PATH` for its bundled helpers, so it cannot be redirected there without
+root (tested — the error still names `/usr/libexec/apptainer/bin/`).
+`pull_sif.sh` refuses to run on a host whose bundled mksquashfs is 4.7.x rather
+than waste the download.
 
 DeltaAI's apptainer 1.4.2 converts the same image cleanly, shares `/work/nvme`
 with Delta so the output needs no transfer, and — because `apptainer pull --arch`
 only downloads and squashes layers without ever executing them — produces the
 **x86_64** image from aarch64 hardware too.
 
-This is worth an NCSA ticket: a broken mksquashfs on Delta will bite anyone
-building containers there, not only this project.
+**This warrants an NCSA ticket**, because it breaks their own documented
+procedure, not merely our use of it. Minimal reproducer:
+
+```bash
+# on a Delta login node, clean slate
+rm -rf /tmp/build-temp*
+export APPTAINER_CACHEDIR=/tmp/$USER-c/cache APPTAINER_TMPDIR=/tmp/$USER-c/tmp
+mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR
+apptainer pull docker://nvcr.io/nvidia/pytorch:26.01-py3   # ~25 GB unpacked
+# -> FATAL ERROR: Bug in orderer     (apptainer 1.5.1 / mksquashfs 4.7.5)
+# docker://alpine:3.20 on the same host succeeds -> size-dependent.
+```
 
 ### Disk and quota
 
