@@ -117,6 +117,11 @@ qsub -v TAG=latest hpc/containers/build_sif_polaris.pbs
 
 Measured image sizes: **8.8 GB** (x86_64), **9.1 GB** (aarch64).
 
+Replication to Stampede3 over Globus is verified end-to-end (9.43 GB, ~1 min).
+`replicate_sif.sh` drives a server-to-server transfer, so it does **not** have to
+run on the source cluster — a workstation with the Globus CLI and a live session
+is the usual case; it verifies the source with `globus ls`, not a local file test.
+
 ### Why DeltaAI converts, not Delta
 
 Delta looks like the obvious hub — it has the data, native apptainer on login

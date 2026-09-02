@@ -59,12 +59,19 @@ case "$DST" in
 esac
 
 SIF="ai-rossby-${TAG}-${ARCH}.sif"
-[ -s "${SRC_DIR}/${SIF}" ] || {
-    echo "error: missing ${SRC_DIR}/${SIF} — run pull_sif.sh first" >&2
-    exit 1
-}
 
-echo "[$(date)] transfer ${SIF} ($(du -h "${SRC_DIR}/${SIF}" | cut -f1))"
+# Verify the source through Globus rather than with a local `-s` test: this is a
+# server-to-server transfer, so the script does not have to run on the source
+# cluster (driving it from a workstation is the common case) and the file will
+# usually not be on the local filesystem at all.
+if ! "$GLOBUS" ls "${SRC_UUID}:${SRC_DIR}/" 2>/dev/null | grep -qx "${SIF}"; then
+    echo "error: ${SIF} not found on the source collection at ${SRC_DIR}/" >&2
+    echo "       Run hpc/containers/pull_sif.sh on a DeltaAI login node first," >&2
+    echo "       or check the session: globus session show" >&2
+    exit 1
+fi
+
+echo "[$(date)] transfer ${SIF}"
 echo "          ${SRC_UUID}:${SRC_DIR} -> ${DST_UUID}:${DST_DIR}"
 
 # --sync-level mtime: one big file, and Globus integrity-checks the transfer
