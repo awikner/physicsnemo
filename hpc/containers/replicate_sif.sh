@@ -44,15 +44,16 @@ case "$DST" in
         DST_UUID=d33b3614-6d04-11e5-ba46-22000b92c6ec           # NCAR GLADE
         DST_DIR=/glade/work/awikner/containers ;;
     midway3)
-        # Midway3 has no Globus collection registered (hpc/data_registry.yaml
-        # leaves midway3/dsi blank) and no globus-cli installed, so it is
-        # scp-only for now. One ~20 GB file makes that acceptable.
-        echo "Midway3 has no registered Globus collection — using scp instead." >&2
-        SIF="${SRC_DIR}/ai-rossby-${TAG}-${ARCH}.sif"
-        [ -s "$SIF" ] || { echo "error: missing $SIF — run pull_sif.sh first" >&2; exit 1; }
-        ssh midway3 "mkdir -p /project/pedramh/awikner/containers"
-        exec scp "$SIF" "midway3:/project/pedramh/awikner/containers/"
-        ;;
+        # "UChicago RCC Midway3" mapped collection. hpc/data_registry.yaml still
+        # says midway3 has none — that note is stale; the collection exists and
+        # the registry should gain a midway3 entry.
+        #
+        # It is a GCSv5 mapped collection, so it needs a one-off data_access
+        # consent beyond the base session:
+        #   globus session consent \
+        #     'urn:globus:auth:scope:transfer.api.globus.org:all[*https://auth.globus.org/scopes/2fde89c0-6fb4-11eb-8c47-0eb1aa8d4337/data_access]'
+        DST_UUID=2fde89c0-6fb4-11eb-8c47-0eb1aa8d4337           # UChicago RCC Midway3
+        DST_DIR=/scratch/midway3/awikner/containers ;;
     *)
         echo "error: unknown destination '$DST'" >&2
         exit 2 ;;

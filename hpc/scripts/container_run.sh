@@ -24,6 +24,8 @@
 #   AI_ROSSBY_NV             1|0 to force GPU passthrough on/off (auto-detected)
 #   AI_ROSSBY_BIND_EXTRA     extra comma-separated bind paths
 #   AI_ROSSBY_PYTHONPATH     PYTHONPATH inside the container (default: repo root)
+#   AI_ROSSBY_CUDA_COMPAT    auto|1|0 — CUDA forward-compat libs for old drivers
+#   AI_ROSSBY_CUDA_MIN_DRIVER  driver major the image needs natively (default 580)
 #
 # The repo checkout is bind-mounted at its host path rather than copied into the
 # image, and the host filesystems are bound with identical paths inside, so no
@@ -159,10 +161,61 @@ unset CC CXX FC F77 F90 LD_LIBRARY_PATH LD_PRELOAD PYTHONHOME VIRTUAL_ENV
 export APPTAINERENV_PYTHONPATH="${AI_ROSSBY_PYTHONPATH:-$REPO}"
 export APPTAINERENV_PYTHONNOUSERSITE=1
 
+# In-container LD_LIBRARY_PATH is built up here, most-significant first. It is
+# assembled rather than inherited, so nothing from the host module system leaks.
+LD_PREFIX=""
+add_ld_prefix() { [ -n "$1" ] && LD_PREFIX="${LD_PREFIX:+$LD_PREFIX:}$1"; }
+
+# ---- CUDA forward compatibility ------------------------------------------
+# The image is built on CUDA 13.1, which wants an r580+ host driver. Where the
+# driver is older -- Midway3's pedramh-gpu H100 NVL nodes are on r535 -- NGC
+# ships forward-compatibility driver libraries inside the image
+# (/usr/local/cuda/compat/lib.real, currently libcuda.so.590.48.01) so the newer
+# runtime works against the older kernel driver.
+#
+# NGC normally enables those from /opt/nvidia/nvidia_entrypoint.sh, which
+# `apptainer exec` bypasses entirely, so we have to do it. The compat directory
+# must come FIRST: apptainer --nv injects the *host* driver's libcuda into
+# /.singularity.d/libs, and whichever libcuda the loader finds first wins.
+#
+# Forward compat is supported on datacenter GPUs from r525 up. Below that the
+# only options are a CUDA 12.x base image or a driver upgrade, so say so rather
+# than fail obscurely inside torch.
+CUDA_COMPAT_DIR="${AI_ROSSBY_CUDA_COMPAT_DIR:-/usr/local/cuda/compat/lib.real}"
+CUDA_NATIVE_MIN="${AI_ROSSBY_CUDA_MIN_DRIVER:-580}"   # r580 = CUDA 13.x
+CUDA_COMPAT_FLOOR=525                                  # forward-compat baseline
+
+case "${AI_ROSSBY_CUDA_COMPAT:-auto}" in
+    0|off|no)
+        ;;
+    1|on|yes|force)
+        add_ld_prefix "$CUDA_COMPAT_DIR"
+        echo "container_run: CUDA compat forced on" >&2
+        ;;
+    *)  # auto: decide from the host driver
+        host_drv=""
+        if [ -n "$NV_FLAG" ] && command -v nvidia-smi >/dev/null 2>&1; then
+            host_drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+                       | head -1 | cut -d. -f1)
+        fi
+        if [ -n "$host_drv" ] && [ "$host_drv" -lt "$CUDA_NATIVE_MIN" ] 2>/dev/null; then
+            if [ "$host_drv" -lt "$CUDA_COMPAT_FLOOR" ] 2>/dev/null; then
+                echo "container_run: WARNING host driver r${host_drv} is below the r${CUDA_COMPAT_FLOOR}" >&2
+                echo "               forward-compatibility floor; this image needs r${CUDA_NATIVE_MIN}+." >&2
+                echo "               Expect CUDA init to fail. Use a CUDA 12.x base image here." >&2
+            else
+                add_ld_prefix "$CUDA_COMPAT_DIR"
+                echo "container_run: host driver r${host_drv} < r${CUDA_NATIVE_MIN}; enabling CUDA forward-compat libs" >&2
+            fi
+        fi
+        ;;
+esac
+
 # Polaris multi-node NCCL needs the host CXI/libfabric stack visible inside.
 if [ "$CLUSTER" = polaris ] && [ "${AI_ROSSBY_POLARIS_FABRIC:-1}" = 1 ]; then
-    export APPTAINERENV_LD_LIBRARY_PATH="/opt/cray/libfabric/2.2.0rc1/lib64:/soft/libraries/hwloc/lib:/opt/cray/pe/lib64"
+    add_ld_prefix "/opt/cray/libfabric/2.2.0rc1/lib64:/soft/libraries/hwloc/lib:/opt/cray/pe/lib64"
 fi
+
 
 eval "$MODULE_CMD" >/dev/null 2>&1 || {
     echo "error: could not load the apptainer module on ${CLUSTER}:" >&2
@@ -178,6 +231,23 @@ command -v apptainer >/dev/null 2>&1 || {
 
 # Diagnostics go to stderr so that `VAR=$(container_run.sh python -c ...)`
 # captures only the payload's stdout.
+# Finalise LD_LIBRARY_PATH now that apptainer is on PATH.
+#
+# APPTAINERENV_LD_LIBRARY_PATH REPLACES the value baked into the image rather
+# than prepending to it, and the image's own value carries
+# torch/lib and torch_tensorrt/lib. Clobbering it breaks torch. So read the
+# image's default and put our entries in front of it.
+if [ -n "$LD_PREFIX" ]; then
+    _img_ld="$(apptainer exec "$SIF" printenv LD_LIBRARY_PATH 2>/dev/null || true)"
+    # That reading was taken inside a container, so it already carries
+    # apptainer's own /.singularity.d/libs — which apptainer appends again on the
+    # real run. Drop it here so the final path has it exactly once.
+    _img_ld="$(printf '%s' "$_img_ld" \
+        | awk -v RS=: -v ORS= '$0 != "/.singularity.d/libs" && NF {print sep $0; sep=":"}')"
+    export APPTAINERENV_LD_LIBRARY_PATH="${LD_PREFIX}${_img_ld:+:$_img_ld}"
+    echo "container_run: LD_LIBRARY_PATH prefix=${LD_PREFIX}" >&2
+fi
+
 echo "container_run: cluster=${CLUSTER} arch=${ARCH} nv=${NV_FLAG:-none}" >&2
 echo "container_run: sif=${SIF}" >&2
 echo "container_run: binds=${BIND_LIST}" >&2
