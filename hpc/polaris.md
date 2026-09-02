@@ -190,6 +190,70 @@ export the block above. Worth reporting the broken modulefiles to ALCF.
 
 ---
 
+## Single-node PyTorch training bring-up (RSI, verified 2026-09-02)
+
+First end-to-end *training* run of the ai-rossby stack here (job `7586366`:
+4x A100, fp32+TF32, activation checkpointing, global batch 4). Everything
+below is in `polaris_env.sh` in the RSI tree
+(`/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi`); source it and
+it works. Ten fixes were needed, so read this before repeating them.
+
+**Two corrections to the sections above.** (1) `/opt/cray/libfabric/2.2.0rc1`
+**no longer exists** — the system is now `libfabric/2.3.1`, loaded by default;
+the hardcoded path in the NCCL block above is stale. (2) Every
+`/soft/libraries/aws-ofi-nccl/*` plugin is still built against libfabric
+1.22.0, and forcing `NCCL_NET="AWS Libfabric"` against 2.3.1 now **segfaults
+rank 0 during init** (job `7586252`) — the "in practice this does not matter"
+note above was measured against 2.2.0rc1. Meanwhile omitting the block
+entirely gives a **first-collective hang** (watchdog 480 s -> SIGABRT, job
+`7585823`). Resolution: **gate the plugin block on node count.** It is an
+inter-node concern; intra-node NCCL uses NVLink/P2P/shm and needs no net
+plugin. Single-node leaves NCCL on defaults; multi-node exports the block
+(and still needs `--cpu-bind depth -d 8`).
+
+**Module/env (single node):**
+```bash
+module use /soft/modulefiles
+module load PrgEnv-gnu          # MUST precede conda: conda/2025-09-25
+module load conda               #   depends_on gcc-native/14.2, which is gone
+module load cray-hdf5-parallel  #   (only /14 exists) -> load fails otherwise
+source /soft/applications/conda/2025-09-25/mconda3/etc/profile.d/conda.sh
+conda activate base             # Lmod execute{} blocks do NOT fire in
+                                # non-interactive shells; without this source
+                                # `conda`/`python` are undefined in PBS bodies
+export CUDA_HOME=/soft/compilers/cudatoolkit/cuda-13.0.3   # NOT 12.9.1:
+export CUDNN_PATH=/soft/libraries/cudnn/cudnn-cuda13-linux-x64-v9.13.0.50
+export CUDNN_HOME="$CUDNN_PATH"                # this torch links libcudart.so.13
+export NVTE_CUDA_INCLUDE_DIR="$CUDA_HOME/include"
+export AI_ROSSBY_NO_CUDNN_SDPA=1               # else SIGABRT at first forward
+export LD_LIBRARY_PATH="$RSI_SHIMS:$CUDA_HOME/lib64:$CUDA_HOME/extras/CUPTI/lib64:$CUDNN_PATH/lib:$LD_LIBRARY_PATH"
+```
+
+| symptom | cause | fix |
+|---|---|---|
+| `requires loading gcc-native/14.2 which failed` | conda modulefile names a gcc that no longer exists | load `PrgEnv-gnu` first |
+| `conda: command not found` in ssh/PBS | Lmod `execute{}` blocks don't run non-interactively | source `conda.sh` explicitly |
+| `libcublas.so.*[0-9] not found in system path` | misleading: real failure is `libcudart.so.13` — torch 2.8.0 links CUDA **13** despite `torch.version.cuda == 12.9` | `CUDA_HOME=.../cuda-13.0.3` + cuda13 cudnn |
+| `libmpi_gnu_123.so.12` missing | soname renamed across PE releases (`_123` = gcc-12.3 marker; lib is at `ofi/gnu/12.3/lib/libmpi_gnu.so.12`) | symlink shim dir, first on `LD_LIBRARY_PATH` |
+| `libhdf5_parallel_gnu_123.so.200` missing | conda h5py built against an HDF5 that is gone; installed Cray HDF5 is `.so.310` — a **major** ABI break, so do NOT shim | `pip install --ignore-installed h5py` (ALCF-documented) |
+| `ldconfig -p \| grep libcudnn.so` returns 1 | `transformer_engine` (inherited via `--system-site-packages`) probes cuDNN, and system `ldconfig` does not index `/soft` | set `CUDNN_PATH`/`CUDNN_HOME` (checked first) |
+| `Path(nvidia.__file__)` TypeError | same package: `nvidia` is a namespace pkg here, so `__file__ is None` | set `NVTE_CUDA_INCLUDE_DIR` |
+| `SIGABRT` at first forward, NCCL bootstrap fine | torch picks the cuDNN attention backend, no plan at v2 geometries | `AI_ROSSBY_NO_CUDNN_SDPA=1` |
+| missing `warp`, `s3fs`, `treelib`, `nvtx`, `zarr`, `netCDF4`, `cftime`, `h5netcdf` | not in conda base | pip into the venv |
+| `import muon` pulls h5py / lacks `MuonWithAuxAdam` | PyPI `muon` is an unrelated multi-omics package | `pip install "muon-optimizer @ git+https://github.com/KellerJordan/Muon"` |
+
+**venv** per the ALCF guide: `python -m venv venvs/2025-09-25 --system-site-packages`
+(inherits xarray/hydra/omegaconf/einops/wandb from conda base).
+**torch cannot be imported on a LOGIN node until the CUDA-13 + MPI-shim fixes
+are applied**; with them it imports fine, which makes iteration much faster.
+
+**Measured throughput — A100, fp32+TF32 + activation checkpointing, 4 GPUs,
+global batch 4:** **3.36 s/step**, peak **18.2 GB of 40 GB** (44%). So
+1 epoch = 12 h, 10 epochs = 123 h, and the `capacity` queue's **168 h ceiling
+fits ~13.7 epochs in a single submission** — no checkpoint/resume chaining
+needed. Losses match Midway's H100 run at the same step (6.877e3 vs 6.874e3
+at batch 0). Without checkpointing fp32 needs 74 GB and does **not** fit.
+
 ## Job template — multi-node PyTorch
 
 ```bash
