@@ -83,6 +83,39 @@ eval vs the ERDM sst_pred baseline.
 Not retrying (campaign-1 dead ends): gradient clipping alone, GnormLrGovernor
 v1/v2, rewind-on-excursion, alpha/churn sampler dials (inference-side only).
 
+## RESULTS (complete 2026-09-02) — precision was the answer
+
+Gate: no gnorm excursion (>20x a fixed 4k-9k baseline, sustained) before
+30k steps; the pre-campaign baseline broke at ~15k.
+
+| arm | change from baseline | onset | final loss | verdict |
+|---|---|---|---|---|
+| (baseline) | — | ~15,000 | — | reference |
+| arm0 | training-side forcing-alignment audit | n/a | n/a | ✅ PASS (26/26 slots bit-exact) |
+| arm1_floor | ct_floor_lr 3e-6, decay 25k | 12,380 | — | ❌ FAIL (worse) |
+| arm3_uniform | weighting=uniform | 14,337 | — | ❌ FAIL |
+| arm9b_wd | weight_decay 0.01 | 14,520 | — | ❌ FAIL |
+| arm9c_muon10 | muon_lr_multiplier 10 (bf16) | 9,001 | — | ❌ FAIL (earliest) |
+| **arm9a_fp32** | **amp=none + matmul_precision=high** | none | 455 | ✅ **PASS** |
+| **arm9_upstream_match** | **fp32+TF32 + wd 0.01 + muon x10** | none | **280.5** | ✅ **PASS** |
+
+**Conclusion: bf16 is what destabilises RSI.** fp32 (with TF32 matmul) alone
+is sufficient — arm9a. Nothing else helped: the LR floor made onset *earlier*,
+flattening the snr_bump weighting did nothing, and weight decay alone bought
+~0. arm9c is the sharpest negative: upstream's muon x10 LR, which is stable
+for them in fp32, breaks at 9k steps in bf16 with gnorm 2140x baseline — so
+**fp32 is what makes their higher LR survivable**, and LR magnitude was never
+the driver. Arm0 also rules out the collaborator's lag-1 forcing-alignment
+hypothesis on the training side (the eval side was already bit-proven).
+
+**Production recipe = arm9** (i.e. upstream ERDM sst_pred's own optimizer
+configuration): `++training.amp=none ++training.matmul_precision=high
+++training.optimizer.weight_decay=0.01
+++training.optimizer.muon_lr_multiplier=10`. It converges ~38% lower than
+fp32-alone (280.5 vs 455) because the x10 LR is now usable, and gnorm still
+*falls* at 30k (3.51e3 baseline -> 1.31e3) — well-conditioned, not merely
+surviving. Pair with activation checkpointing (below) for 40 GB cards.
+
 ## Measured cost + hardware calibration (2026-09-01)
 
 All at global batch 4 (4 GPUs x batch 1, no accumulation) — the same global
