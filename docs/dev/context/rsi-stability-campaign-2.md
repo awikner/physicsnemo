@@ -185,6 +185,89 @@ node-hours) therefore yields ~6 epochs per submission — vs the ~1.2 epochs
 the pre-fix instability capped us at — and checkpoint/resume can chain
 submissions for the full 10.
 
+## Batch-size scaling: does global batch 40 hurt? (measured 2026-09-04)
+
+Polaris' `prod` queue is the only one that reliably schedules, but its minimum
+is 10 nodes, which at per-rank batch 1 forces **global batch 40** (10x the ERDM
+sst_pred baseline) and cuts optimizer steps 10x for a fixed epoch budget. Jobs
+`7589775/6`: 40 ranks, `steps_per_epoch=1315`, 2 epochs, lr `5e-5*sqrt(10)` =
+1.5811e-4, EMA decay `0.999^10`, otherwise arm9's exact overrides — including
+reproducing arm9's schedule, which was `CosineToFloor` with
+`ct_floor_lr == lr`, i.e. **a perfectly constant lr** (ratio 1.0). Checked
+against arm9's own `.hydra/overrides.yaml`, not the summary above; matching the
+production StepLR instead would have added a schedule confound.
+
+The comparison is valid because `_train_step` returns a **rank-local** loss (no
+all_reduce) and per-rank batch is 1 in both runs — single-sample losses either
+way, hence medians over a +-200-step window.
+
+| epoch | batch 4 (arm9) | batch 40 | ratio |
+|---|---|---|---|
+| 0.25 | 601.9 | 1250.3 | 2.08 |
+| 0.50 | 453.0 | 807.4 | 1.78 |
+| 1.00 | 367.5 | 493.0 | 1.34 |
+| 1.50 | 331.6 | 406.5 | 1.23 |
+| 1.95 | 311.3 | 370.9 | **1.19** |
+
+After two full epochs batch 40 has not reached what batch 4 reached in **one**.
+But per UPDATE it is ~50% better throughout (at 2,600 steps: 370.3 vs 692.9).
+To reach loss 370.9: batch 4 needed 12,450 steps / 0.95 epochs / 11.6 h on
+1 node; batch 40 needed 2,630 steps / 2.00 epochs / **2.6 h** on 10 nodes.
+**4.7x fewer updates, 2.1x more data, 4.5x faster wall-clock, 2.2x the
+node-hours** — it converts node-hours (abundant: 34,480 available) into
+wall-clock (scarce).
+
+**So 24 epochs at batch 40 is NOT quality-equivalent to 24 at batch 4** — on
+this evidence nearer batch-4-at-~11-epochs; matching would need ~50 epochs.
+Caveat: this is epochs 0-2, where large batch is penalised hardest, and the gap
+was still closing fast and decelerating (slope -0.78 -> -0.27 -> -0.11 per
+epoch, trending to ~1.10-1.15). Where it lands at epoch 24 is unknown and
+UNKNOWABLE from arm9, which stops at 2.28 epochs. gnorm curves nearly overlap
+by epoch 2 (1466 vs 1404), so batch 40 is behind on progress, not misbehaving.
+
+### Partial checkpointing — the level sweep (measured 2026-09-04, Polaris debug)
+
+All-or-nothing is a bad trade on a 40 GB A100: OFF needs 74 GB (does not fit),
+ON costs +31%. `RollingDiT.grad_checkpoint_levels` (surfaced as
+`++training.grad_checkpoint_levels=N`) checkpoints only the first N of the 20
+levels; `None` = all, so old configs are unchanged. Counted from the INPUT side
+so the uncheckpointed levels are the last ones, whose activations backward
+frees first rather than holding them resident through the recomputes.
+
+Job `7591890`, 4x A100-40GB, fp32+TF32, global batch 4, 30 steps per point:
+
+| ckpt levels | peak MiB | % of card | s/step | vs full-ckpt |
+|---|---|---|---|---|
+| 20 (full) | 18,183 | 44.4% | 3.345 | — |
+| 16 | 31,653 | 77.3% | 3.174 | +5.1% |
+| **14** | **37,013** | **90.4%** | **3.103** | **+7.2%** |
+| 13 | 39,691 | 96.9% | 3.069 | +8.3% |
+| 12 | — | — | — | **OOM** (died after 1 step) |
+| 10 / 8 | — | — | — | **OOM** (0 steps) |
+
+**Use 14.** 13 is the true minimum and the fastest that runs, but it sits at
+96.9% of the card with 1,269 MiB spare — too thin for a multi-day run once
+fragmentation drift and the validation rollouts land on top. 14 keeps 3,947 MiB
+of headroom for 1.1 points of the 8.3%. Note the cliff is sharp: 13 runs, 12
+dies. There is no graceful degradation to lean on.
+
+Linear and cross-checked — per-level cost 2,678–3,368 MiB, fits
+`peak = 80,245 - 3,086*levels` MiB and `s/step = 2.548 + 0.0396*levels`.
+Extrapolated to zero levels that is 80,245 MiB / 2.548 s/step against the
+74,327 MiB / 2.530 s/step measured independently on GH200 with checkpointing
+off: step time agrees to 0.7%, memory 8% high (expected — the fit is anchored
+on points sitting in the allocator's fragmentation regime).
+
+Mathematically exact, so it is safe to change between runs:
+`test/models/amip_si/test_grad_checkpoint.py` pins bitwise-identical forwards
+and <1e-4 relative gradients at every level count, and the ON/OFF losses were
+already identical at batches 0/100/149.
+
+**The 2026-09-04 batch-40 prod campaign ran at 20/20** (the sweep landed after
+it started, and ~2 h of saving was not worth a mid-chain recipe change against
+a ±20 h queue-wait uncertainty). Apply `++training.grad_checkpoint_levels=14`
+to runs submitted from here on.
+
 ## Bookkeeping
 
 - All probes: run-scoped `++checkpoint_dir` (the shared-default resume trap),

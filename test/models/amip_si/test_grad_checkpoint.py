@@ -132,3 +132,76 @@ def test_no_op_when_flag_off_even_with_grad():
         assert not calls
     finally:
         rd.torch_checkpoint = real
+
+
+# ---------------------------------------------------------------------------
+# Partial checkpointing (grad_checkpoint_levels)
+# ---------------------------------------------------------------------------
+# The all-or-nothing choice is a bad trade on a 40 GB A100: OFF needs 74 GB
+# (does not fit), ON costs +31% compute. Checkpointing only the first N levels
+# is the middle ground, so the same equivalence guarantee has to hold for it —
+# a partial wrapper that changed the maths would be far easier to ship
+# unnoticed than the all-on one.
+
+
+def _build_partial(n_levels):
+    torch.manual_seed(1234)
+    m = RollingDiT(**KW, grad_checkpoint=True, grad_checkpoint_levels=n_levels)
+    m.train()
+    return m
+
+
+def test_levels_defaults_to_none_meaning_all():
+    assert _build(True).grad_checkpoint_levels is None
+
+
+def test_negative_levels_rejected():
+    with pytest.raises(ValueError, match="grad_checkpoint_levels"):
+        RollingDiT(**KW, grad_checkpoint=True, grad_checkpoint_levels=-1)
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 3, 4])
+def test_partial_forward_matches_uncheckpointed(n):
+    """Every level count must leave the forward bitwise unchanged."""
+    off, on = _build(False), _build_partial(n)
+    on.load_state_dict(off.state_dict())
+    args = _inputs(off)
+    with torch.no_grad():
+        a, b = off(*args), on(*args)
+    assert torch.equal(a, b), (a - b).abs().max().item()
+
+
+@pytest.mark.parametrize("n", [0, 2, 4])
+def test_partial_gradients_match(n):
+    off, on = _build(False), _build_partial(n)
+    on.load_state_dict(off.state_dict())
+    args = _inputs(off)
+
+    off(*args).square().mean().backward()
+    on(*args).square().mean().backward()
+
+    for (name, pa), (_, pb) in zip(off.named_parameters(), on.named_parameters()):
+        if pa.grad is None:
+            continue
+        denom = pa.grad.abs().max().clamp_min(1e-12)
+        rel = (pa.grad - pb.grad).abs().max() / denom
+        assert rel < 1e-4, f"{name} (levels={n}): rel {rel.item():.3g}"
+
+
+def test_levels_zero_is_equivalent_to_off():
+    """N=0 must checkpoint nothing — the escape hatch for 'flag on, no effect'."""
+    m = _build_partial(0)
+    assert m.grad_checkpoint is True and m.grad_checkpoint_levels == 0
+    off = _build(False)
+    m.load_state_dict(off.state_dict())
+    args = _inputs(off)
+    a = off(*args); b = m(*args)
+    assert torch.equal(a, b)
+
+
+def test_levels_above_total_is_harmless_at_model_level():
+    """The trainer range-checks; the model itself must not crash if asked for
+    more levels than it has (it simply checkpoints all of them)."""
+    m = _build_partial(KW["num_blocks"] + 5)
+    args = _inputs(m)
+    m(*args).square().mean().backward()   # must not raise

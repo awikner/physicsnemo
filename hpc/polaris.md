@@ -36,17 +36,26 @@ GPU/NUMA affinity is inverted — GPU *i* sits on NUMA node *3−i*:
 
 ## Queues
 
-| Queue | Nodes | Walltime |
-|---|---|---|
-| `debug` | 1–2 | 5 min – **1 h** |
-| `debug-scaling` | 1–10 | 5 min – **1 h** |
-| `prod` | **10**–496 | 5 min – 24 h |
-| `preemptable` | 1–10 | up to **72 h** |
-| `demand` | 1–56 | 1 h |
+| Queue | Nodes | Walltime | Concurrency limit |
+|---|---|---|---|
+| `debug` | 1–2 | 5 min – **1 h** | 1 running per **user** |
+| `debug-scaling` | 1–10 | 5 min – **1 h** | 1 queued per **user** |
+| `capacity` | 1–**4** | 5 min – **168 h** | **1 running per PROJECT**, 2 queued |
+| `prod` | **10**–496 | 5 min – 24 h | 100 queued per project |
+| `preemptable` | 1–10 | up to **72 h** | 10 running / 20 queued per project |
+| `demand` | 1–56 | 1 h | 100 queued per project |
 
 `debug` takes **up to 2 nodes**, not 1 — it is the fastest turnaround for the 1-vs-2-node
 comparisons we care about. `prod` has a **10-node minimum**, so anything between 3 and 9
 nodes must go to `debug-scaling` (≤1 h) or `preemptable`.
+
+**`capacity` is the only queue with a long wall (168 h), and it runs exactly ONE job per
+project at a time** (`max_run = [p:PBS_GENERIC=1]`, verified 2026-09-02 via
+`qstat -Qf capacity`). A queued job there reports `comment = Not Running: Project has
+reached queue capacity's running limit` — that is a *project-mate's* job holding the slot,
+not a problem with yours, and there is nothing to fix. Plan long runs accordingly: two
+runs cannot share `capacity`, so the second one belongs in `preemptable` (10 concurrent,
+72 h cap, preemptible — fine when per-epoch checkpoint/resume is verified).
 
 ## Storage
 
@@ -171,6 +180,22 @@ ALCF documents that `NCCL_COLLNET_ENABLE` and friends cause **hangs/timeouts** w
 Megatron-DeepSpeed; if a job hangs at init, try
 `unset NCCL_NET_GDR_LEVEL NCCL_CROSS_NIC NCCL_COLLNET_ENABLE NCCL_NET`.
 
+**But know what that fallback costs, and what it does *not* do** — measured at 4 nodes /
+16 ranks on the 2.1 GiB RSI gradient (job `7586641`):
+
+| Config | busbw |
+|---|---|
+| documented block, as above | **34.65 GB/s** |
+| `unset NCCL_COLLNET_ENABLE` | 34.57 GB/s (noise — safe to drop if it hangs) |
+| `unset NCCL_NET` (+ the others) | **17.61 GB/s** ⬅ half |
+
+Dropping `NCCL_COLLNET_ENABLE` is free, so take that fallback first. Unsetting `NCCL_NET`
+is **not** free, and it does not do what it looks like: NCCL still auto-loads
+`libnccl-net.so` because the plugin dir is on `LD_LIBRARY_PATH`, so you get the plugin
+*unconfigured* rather than no plugin — hence half the bandwidth while still logging
+`Using network AWS Libfabric`. To genuinely run without the plugin you must also drop the
+plugin dir from `LD_LIBRARY_PATH`.
+
 ### Broken conda module variants
 
 | Module | Plugin dir it sets | On disk? |
@@ -200,16 +225,27 @@ it works. Ten fixes were needed, so read this before repeating them.
 
 **Two corrections to the sections above.** (1) `/opt/cray/libfabric/2.2.0rc1`
 **no longer exists** — the system is now `libfabric/2.3.1`, loaded by default;
-the hardcoded path in the NCCL block above is stale. (2) Every
+the hardcoded path in the NCCL block above is stale (drop that one `export`;
+the rest of the block is still right). (2) Every
 `/soft/libraries/aws-ofi-nccl/*` plugin is still built against libfabric
-1.22.0, and forcing `NCCL_NET="AWS Libfabric"` against 2.3.1 now **segfaults
-rank 0 during init** (job `7586252`) — the "in practice this does not matter"
-note above was measured against 2.2.0rc1. Meanwhile omitting the block
-entirely gives a **first-collective hang** (watchdog 480 s -> SIGABRT, job
-`7585823`). Resolution: **gate the plugin block on node count.** It is an
-inter-node concern; intra-node NCCL uses NVLink/P2P/shm and needs no net
-plugin. Single-node leaves NCCL on defaults; multi-node exports the block
-(and still needs `--cpu-bind depth -d 8`).
+1.22.0 and none of them bundles its own copy — `ldd` shows all of them
+resolving `libfabric.so.1` to the system 2.3.1. Forcing
+`NCCL_NET="AWS Libfabric"` **single-node** segfaults rank 0 during init (job
+`7586252`), while omitting the block entirely gives a **first-collective
+hang** (watchdog 480 s -> SIGABRT, job `7585823`). Resolution: **gate the
+plugin block on node count.** It is an inter-node concern; intra-node NCCL
+uses NVLink/P2P/shm and needs no net plugin. Single-node leaves NCCL on
+defaults; multi-node exports the block (and still needs
+`--cpu-bind depth -d 8`).
+
+> **The libfabric-2.3.1 worry does NOT extend to multi-node — measured
+> 2026-09-02.** The plugin/2.3.1 ABI mismatch above reads like it should break
+> inter-node too. It does not: at 4 nodes / 16 ranks the documented block
+> selects `cxi (found 2 nics)`, reports `Using network AWS Libfabric`, and
+> all-reduces the 2.1 GiB RSI gradient at **37.29 GB/s busbw with
+> `correct=True`** (job `7586669`) — at or above the 36.96 GB/s measured at
+> 8 ranks before the libfabric upgrade. Use the block as documented at
+> ≥2 nodes.
 
 **Module/env (single node):**
 ```bash
@@ -253,6 +289,21 @@ global batch 4:** **3.36 s/step**, peak **18.2 GB of 40 GB** (44%). So
 fits ~13.7 epochs in a single submission** — no checkpoint/resume chaining
 needed. Losses match Midway's H100 run at the same step (6.877e3 vs 6.874e3
 at batch 0). Without checkpointing fp32 needs 74 GB and does **not** fit.
+
+**Multi-node scaling is essentially free for this model** (job `7586669`,
+2026-09-02). 4 nodes / 16 ranks, per-rank batch 1 (global batch 16):
+**3.40 s/step** against 3.36 s at 4 ranks — **1% overhead for 4x the
+throughput**. Expected from the fabric numbers: the 2.1 GiB gradient
+all-reduces in 0.113 s, which DDP overlaps with a backward pass made longer
+by activation recompute. `steps_per_epoch` falls 13,143 -> 3,286 as it should
+(52,572 windows / 16), so a 24-epoch budget costs **~75 h** at 4 nodes vs
+~294 h at 1 node.
+
+Two things this needs that a single-node job does not: the PMI rank shim
+(`hpc/scripts/polaris_rank_env.sh` — physicsnemo reads ENV/SLURM/OpenMPI, and
+PALS matches none of them) and `--cpu-bind depth -d 8`. `torchrun
+--standalone` cannot do multi-node at all; use `mpiexec` per the template
+above.
 
 ## Job template — multi-node PyTorch
 

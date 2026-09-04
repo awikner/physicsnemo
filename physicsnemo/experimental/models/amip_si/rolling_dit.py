@@ -232,6 +232,7 @@ class RollingDiT(_PNeMoModule):
                  c_grid_cross_heads=8,
                  state_layout=None,
                  grad_checkpoint=False,
+                 grad_checkpoint_levels=None,
                  **kwargs):                  # tolerate extra config keys
         super().__init__(meta=MetaData())
         self.in_channels = in_channels
@@ -259,6 +260,28 @@ class RollingDiT(_PNeMoModule):
         # (A100/A40, i.e. Polaris + most of Delta) since bf16 is not an option
         # for RSI — it is what destabilises training (campaign 2, arm9c).
         self.grad_checkpoint = bool(grad_checkpoint)
+        # How many of the ``num_blocks`` levels to checkpoint, counted from the
+        # input side. ``None`` means all of them (the original behaviour, so
+        # existing configs are unchanged).
+        #
+        # Partial checkpointing exists because the all-or-nothing choice is a
+        # bad trade on a 40 GB A100: OFF needs 74 GB (does not fit), ON costs
+        # +31% compute. Activation memory is ~linear in the number of levels
+        # left UNcheckpointed, so checkpointing only as many as the card
+        # actually requires recovers most of that 31%.
+        #
+        # Counted from the input side on purpose: the levels left
+        # uncheckpointed are then the LAST ones, whose stored activations are
+        # freed first as backward walks down, so they are not still resident
+        # while the earlier checkpointed levels recompute.
+        self.grad_checkpoint_levels = (
+            None if grad_checkpoint_levels is None else int(grad_checkpoint_levels)
+        )
+        if self.grad_checkpoint_levels is not None and self.grad_checkpoint_levels < 0:
+            raise ValueError(
+                f"grad_checkpoint_levels must be >= 0 or None, got "
+                f"{self.grad_checkpoint_levels}"
+            )
 
         # Phase 12f: predicted ocean channels occupy a block at the tail of
         # in/out_channels (it arrives here inside ``state_layout``, derived by
@@ -646,8 +669,12 @@ class RollingDiT(_PNeMoModule):
         # take non-tensor arguments (the int b/W/n and the bool mask below).
         # Checkpointing is skipped whenever grad is off, where it would only
         # add recompute cost (eval, validation rollouts, the samplers).
-        ckpt = self.grad_checkpoint and torch.is_grad_enabled()
+        ckpt_on = self.grad_checkpoint and torch.is_grad_enabled()
+        n_ckpt = self.grad_checkpoint_levels
         for i, (sblock, tblock) in enumerate(zip(self.spatial_blocks, self.temporal_blocks)):
+            # Per-level: all levels when grad_checkpoint_levels is None, else
+            # the first ``n_ckpt`` only.
+            ckpt = ckpt_on and (n_ckpt is None or i < n_ckpt)
             if forcing_kv is not None and str(i) in self.forcing_blocks:
                 fblock = self.forcing_blocks[str(i)]
                 if ckpt:

@@ -78,6 +78,7 @@ from train_loop import (  # noqa: E402
     GnormLrGovernor,
     RewindBuffer,
     adopt_ocean_contract,
+    advance_sampler_epoch,
     apply_math_precision,
     assert_checkpoint_dir_contract,
     choose_worker_start_method,
@@ -760,10 +761,25 @@ def main(cfg: DictConfig) -> None:
                 "grad_checkpoint support (implemented for RollingDiT)"
             )
         bb.grad_checkpoint = True
+        # Optional partial checkpointing: checkpoint only the first N of the
+        # backbone's levels. Activation memory is ~linear in the levels left
+        # UNcheckpointed, so on a card that does not need the full 4.5x saving
+        # this buys back most of the +31% compute. None/absent = all levels.
+        n_levels = cfg_train.get("grad_checkpoint_levels", None)
+        total = int(getattr(bb, "num_blocks", -1))
+        if n_levels is not None:
+            n_levels = int(n_levels)
+            if not 0 <= n_levels <= total:
+                raise ValueError(
+                    f"training.grad_checkpoint_levels={n_levels} out of range "
+                    f"for a backbone with {total} block levels"
+                )
+            bb.grad_checkpoint_levels = n_levels
         # PhysicsNeMo's PythonLogger.info takes ONE pre-formatted string —
         # printf-style args raise TypeError (cost a 38 s job to learn).
         logger.info(
-            f"activation checkpointing ON for {getattr(bb, 'num_blocks', -1)} "
+            f"activation checkpointing ON for "
+            f"{total if n_levels is None else n_levels}/{total} "
             f"block levels (spatial + temporal + forcing)"
         )
     # Anti-fork guard (Phase 12d.13): the model must be sized for exactly the
@@ -1048,6 +1064,10 @@ def main(cfg: DictConfig) -> None:
         stage_iter = 0
 
         for _ in range(stage_epochs - done_in_stage):
+            # Reshuffle for this epoch (no-op without a DistributedSampler).
+            # Skipping this silently turns N epochs into N passes over one
+            # frozen partition — see train_loop.advance_sampler_epoch.
+            advance_sampler_epoch(loader, global_epoch)
             for batch_idx, sample in enumerate(loader):
                 if max_iterations is not None and stage_iter >= max_iterations:
                     break

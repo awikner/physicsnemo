@@ -613,6 +613,29 @@ def choose_worker_start_method(
     return "forkserver"
 
 
+def advance_sampler_epoch(loader: Any, epoch: int) -> bool:
+    """Tell a ``DistributedSampler`` which epoch is starting.
+
+    ``DistributedSampler`` seeds its permutation from ``(seed, epoch)`` and its
+    ``epoch`` only moves when someone calls ``set_epoch``. Miss the call and
+    every epoch replays the identical order *and* the identical rank->sample
+    assignment — a 24-epoch run becomes 24 passes over one frozen partition,
+    with no error and no log line. ``train.py`` calls ``set_epoch`` on its
+    datapipe for exactly this reason; the diffusion trainer goes through this
+    helper.
+
+    Pass ``global_epoch`` (not a stage-local index) so a resumed run picks up
+    the permutation belonging to the epoch it is actually starting.
+
+    Returns True if a sampler was advanced, so callers can log/assert.
+    """
+    sampler = getattr(loader, "sampler", None)
+    if isinstance(sampler, torch.utils.data.DistributedSampler):
+        sampler.set_epoch(int(epoch))
+        return True
+    return False
+
+
 _MATMUL_PRECISIONS = ("highest", "high", "medium")
 
 
