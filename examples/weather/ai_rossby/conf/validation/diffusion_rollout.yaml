@@ -34,20 +34,29 @@ every_n_epochs: 5
 rollout:
   enabled: True
   # Lead times (in dataset steps) at which to score predictions.
-  log_steps: [1, 3, 6]
+  log_steps: [1, 3, 6, 10]
   # Total ICs evaluated per epoch across all DDP ranks (Phase 8c Q3 = 4).
   max_initial_conditions: 4
   ic_stride: 30
   batch_size: 1
   # Ensemble axis (Phase 8c Q5 = 1, configurable).
-  ensemble_size: 1
+  ensemble_size: 10
   # ``deterministic`` | ``replicate_only`` | ``gaussian_ic``.
-  perturber: deterministic
+  # MUST NOT be ``deterministic`` when ensemble_size > 1 — that perturber
+  # raises ("requires ensemble_size=1"). ``replicate_only`` is the right one
+  # for a diffusion model: the IC is replicated unperturbed and the ensemble
+  # emerges from the stochastic sampler itself.
+  perturber: replicate_only
   perturber_scales: {}
-  # Horizon defaults to ``scheduler.window_size`` for rolling
-  # schedulers and to ``max(log_steps)`` for single-step. Override here
-  # to extend the rollout past the training window (RFM / ERDM only).
-  horizon: null
+  # Horizon defaults to ``scheduler.window_size`` for rolling schedulers and
+  # to ``max(log_steps)`` for single-step. Set explicitly here to
+  # 10 days, i.e. PAST the 6-frame training window. Supported for rolling
+  # schedulers: RSIScheduler.sample_rollout is autoregressive (``for k in
+  # range(horizon)``, shifting the window each step) and is what the 40-year
+  # climate rollout runs on; the validator's only constraint is
+  # max(log_steps) <= horizon, and its IC-admissibility math already accounts
+  # for ``window_size + horizon - 2 + nocean`` future rows.
+  horizon: 10
   # Validation-time diffusion sampler — independent of training.
   sampler:
     # ``null`` falls back to the inference scheduler's own ``num_steps``.
@@ -56,7 +65,22 @@ rollout:
     # length ``horizon`` gives a per-emitted-frame schedule instead,
     # e.g.:
     #   num_steps: [20, 20, 10, 10, 4, 4]
-    num_steps: null
+    # 2 = upstream amip_v2's inference setting for the fancy SST model
+    # (configs/ERDM_fancy.yaml: num_steps 2, sigma_min 0.002, sigma_max 500,
+    # rho -10, heun, S_churn 1.0). ERDM_ocean.yaml carries an IDENTICAL
+    # sampler block, so "fancy" vs sst_pred is not a distinction here.
+    num_steps: 2
+  # Per-pixel time-mean climatology for ACC, in the SAME normalized space the
+  # validator scores in (the dataset transform's output). Without these three
+  # paths the validator builds no ACC accumulators at all and ``acc: True``
+  # below is silently inert — which is how it sat until 2026-09-04.
+  # Build with examples/weather/ai_rossby/make_val_climatology.py (same store,
+  # same overrides as the training run).
+  climatology:
+    surface_path: null
+    upper_air_path: null
+    diagnostic_path: null
+
   metrics:
     rmse: True
     acc: True

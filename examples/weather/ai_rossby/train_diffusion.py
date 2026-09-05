@@ -436,6 +436,29 @@ def _build_validator(
     horizon = rollout_cfg.get("horizon", None)
     horizon = int(horizon) if horizon is not None else None
 
+    # Per-pixel time-mean climatology for ACC. The validator builds NO acc
+    # accumulators when these are absent, so ``metrics.acc: True`` is inert
+    # without them — which is how it sat until 2026-09-04. Must be in the
+    # NORMALIZED space (ACC consumes ctx.pred_mean/ctx.truth, unlike RMSE
+    # which consumes the denormalized pair); build with
+    # make_val_climatology.py against the same store.
+    clim_cfg = rollout_cfg.get("climatology", {}) or {}
+    clim = {}
+    for group in ("surface", "upper_air", "diagnostic"):
+        raw = clim_cfg.get(f"{group}_path", None)
+        if raw is None:
+            continue
+        path = Path(_resolve_path(raw))
+        if not path.exists():
+            raise FileNotFoundError(
+                f"validation.rollout.climatology.{group}_path={path} does not "
+                f"exist — ACC would be silently skipped rather than fail"
+            )
+        clim[group] = torch.load(path, map_location=device, weights_only=True)
+    if clim:
+        shapes = {k: tuple(v.shape) for k, v in clim.items()}
+        _logging.getLogger(__name__).info(f"ACC climatology loaded: {shapes}")
+
     return DiffusionRolloutValidator(
         raw_ds,
         wrapper=wrapper,
@@ -455,6 +478,9 @@ def _build_validator(
         normalizer=normalizer,
         sampler_num_steps=sampler_num_steps,
         seed=int(cfg.seed),
+        climatology_surface=clim.get("surface"),
+        climatology_upper_air=clim.get("upper_air"),
+        climatology_diagnostic=clim.get("diagnostic"),
     )
 
 
@@ -805,6 +831,11 @@ def main(cfg: DictConfig) -> None:
     optimizer = make_optimizer(
         inner_model, _flatten_optimizer_cfg(cfg_train.optimizer)
     )
+    # The CONFIGURED per-group lrs, captured before any checkpoint load can
+    # overwrite them. Muon puts hidden weights and the aux AdamW group on
+    # different lrs (muon_lr_multiplier), so this is per-group, not one value.
+    # Needed by the resume fast-forward below — see _reset_group_lrs.
+    base_group_lrs = [float(g["lr"]) for g in optimizer.param_groups]
 
     # --- Mixed precision --------------------------------------------------
     amp_dtype = _resolve_amp_dtype(cfg_train.get("amp", None))
@@ -992,6 +1023,34 @@ def main(cfg: DictConfig) -> None:
             steps_per_epoch=steps_per_epoch,
             num_epochs=stage_epochs,
         )
+        if done_in_stage > 0:
+            # RESET to the configured lrs before building the scheduler, or the
+            # fast-forward below double-counts. Two reasons it must be here:
+            #
+            #  * ``StepLR`` (and the other multiplicative schedulers) computes
+            #    the next lr from the CURRENT ``param_group['lr']``, not from a
+            #    fixed base; and
+            #  * ``load_checkpoint`` -> ``set_optimizer_state_dict`` restores
+            #    ``param_groups``, so the optimizer arrives here already
+            #    carrying the DECAYED lr from the previous submission.
+            #
+            # Fast-forwarding on top of that applies ``done`` decays to an
+            # already-decayed lr, and across a chain of resumes the decay count
+            # compounds as k^2+k-2 instead of staying linear. Measured on the
+            # 24-epoch batch-40 run (jobs 7591784-91): by epoch 14 the Muon
+            # group was at 4.361e-05 against an intended 7.711e-04 — 18x too
+            # low, decays 70 instead of 14 — and epochs 15-24 would have run at
+            # ~5.8e-07, i.e. no learning at all. Resetting first makes the
+            # fast-forward idempotent: lr == base * decay(done * spe) however
+            # many times the run has been resumed.
+            #
+            # Schedulers that capture ``base_lrs`` at construction (LambdaLR,
+            # CosineAnnealingLR, ...) need this BEFORE make_scheduler for the
+            # same reason: their base would otherwise be the decayed value.
+            for group, base_lr in zip(optimizer.param_groups, base_group_lrs):
+                group["lr"] = base_lr
+                group.pop("initial_lr", None)
+
         lr_scheduler = make_scheduler(
             optimizer, sched_cfg, total_steps=steps_per_epoch * stage_epochs,
             steps_per_epoch=steps_per_epoch,
@@ -1004,7 +1063,8 @@ def main(cfg: DictConfig) -> None:
             logger.info(
                 f"resume: lr scheduler fast-forwarded "
                 f"{done_in_stage * steps_per_epoch} steps "
-                f"(lr now {optimizer.param_groups[0]['lr']:.3e})"
+                f"(lr now {optimizer.param_groups[0]['lr']:.3e}, "
+                f"base {base_group_lrs[0]:.3e})"
             )
         # Optional gnorm-triggered lr ratchet (off unless training.lr_drop.
         # enabled) — the RSI A2 floor destabilizes at ANY constant lr, so the
