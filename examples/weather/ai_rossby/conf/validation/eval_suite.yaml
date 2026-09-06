@@ -138,6 +138,17 @@ qbo:
   months_per_bin: 1.0    # also the unit the reported period estimate is in
   steps_per_bin: null
 
+# Per-frame PHYSICAL field for named variables, kept on the CPU as
+# (horizon, H, W) float32. This is the artifact a TREND is fitted from:
+# amip_v2 saves the field and the daily global-mean series and does the fit
+# downstream. 12,783 frames at 45x90 is 207 MB, so saving the field (rather
+# than streaming OLS sufficient statistics) means a different lat weighting,
+# a sub-period refit or the spatial pattern all cost no extra rollout.
+# Needs batch_size=1; refuses IC-split DDP.
+field_series:
+  enabled: False
+  variables: []        # e.g. [2m_temperature]
+
 global_mean:
   enabled: True
   # Each name is looked up against ``model.surface_variables`` then

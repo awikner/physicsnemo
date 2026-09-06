@@ -254,3 +254,145 @@ def as_constant_truth(
             z = z.to(device)
         out[name[group]] = z.unsqueeze(0).expand(batch_size, *z.shape)
     return out
+
+
+def _downsample(x: torch.Tensor, factor: int) -> torch.Tensor:
+    """Bilinear downsample the trailing (H, W), matching the coarse store's own
+    build operator (``F.interpolate(bilinear, align_corners=False)``)."""
+    import torch.nn.functional as F
+
+    if factor == 1:
+        return x
+    lead, (h, w) = x.shape[:-2], x.shape[-2:]
+    flat = x.reshape(1, -1, h, w)
+    out = F.interpolate(
+        flat, size=(h // factor, w // factor), mode="bilinear",
+        align_corners=False,
+    )
+    return out.reshape(*lead, h // factor, w // factor)
+
+
+def verify_against_store(
+    obs: dict[str, torch.Tensor],
+    *,
+    dataset,
+    normalizer,
+    rows: Sequence[int],
+    downsample_factor: int = 1,
+    log=None,
+    rel_tol: float = 0.05,
+) -> dict:
+    r"""THE alignment gate. Run this before any expensive rollout.
+
+    Compares the obs climatology against the STORE's own time-mean over the
+    same rows, after downsampling the obs to the store's grid.
+
+    Why this is decisive rather than merely suggestive: bilinear downsampling
+    and time-averaging are both linear, so they commute exactly, and the obs
+    climatology's source archive is the same ``ERA5 h5_dailyavg`` the
+    ``amip_dailyavg`` store was converted from. Agreement should therefore sit
+    at float rounding. Every misalignment produces a discrepancy orders of
+    magnitude larger, and each has its own signature:
+
+    * **lat flip** -- max|diff| ~50 K in t2m, AND the flipped comparison agrees
+      instead. Reported explicitly as ``flip_is_better``.
+    * **level-axis reversal** -- z500 lands at the wrong level, off by ~1e5
+      m^2/s^2. (:func:`assert_physical_anchors` already catches this at load.)
+    * **channel permutation** -- one channel wildly off, its neighbours fine.
+    * **unit mismatch** -- an exact 273.15 or power-of-ten offset.
+    * **wrong averaging span** -- a small ~0.1-0.3 K residual, which is how you
+      tell it apart from all of the above.
+
+    ``rows`` should be a strided sample (every 10th row is plenty); the mean of
+    a strided sample is an unbiased estimate of the full mean.
+
+    Raises when the flipped comparison beats the aligned one -- that is a
+    definite flip, and continuing would silently double every bias.
+    """
+    groups = {"surface": "surface_in", "upper_air": "upper_air_in",
+              "diagnostic": "diagnostic"}
+    sums: dict[str, torch.Tensor] = {}
+    n = 0
+    for t in rows:
+        try:
+            sample = dataset[(int(t), 1)]
+        except (TypeError, KeyError):
+            sample = dataset[int(t)]
+        kw = {g: sample[key].unsqueeze(0) for g, key in groups.items()
+              if key in sample}
+        phys = normalizer.denormalize_state(**kw)
+        for g, v in phys.items():
+            v = v[0].double()
+            sums[g] = v if g not in sums else sums[g] + v
+        n += 1
+    if n == 0:
+        raise ObsClimatologyError("no rows sampled")
+    store_mean = {g: v / n for g, v in sums.items()}
+
+    report: dict = {"n_rows": n, "downsample_factor": int(downsample_factor),
+                    "groups": {}}
+    flips: list[str] = []
+    for g, ref in store_mean.items():
+        if g not in obs:
+            continue
+        o = _downsample(obs[g].double(), int(downsample_factor))
+        if o.shape != ref.shape:
+            raise ObsClimatologyError(
+                f"{g}: obs downsampled to {tuple(o.shape)} but the store's "
+                f"time-mean is {tuple(ref.shape)}"
+            )
+        d = (o - ref).abs()
+        d_flip = (o.flip(-2) - ref).abs()
+        # PER-CHANNEL relative residual, then the worst. A group-wide scale
+        # would let a large-magnitude channel hide a broken small one: surface
+        # holds both surface_pressure (~1e5 Pa) and t2m (~288 K), so a full
+        # 273.15 K unit error in t2m came out as a 1.6% group-relative residual
+        # and slid under a 5% tolerance.
+        per_ch = d.reshape(d.shape[0], -1).mean(dim=1)
+        # Floor the per-channel scale at a fraction of the group's own scale.
+        # A relative residual is undefined for a channel whose reference is
+        # ~0, and without a floor such a channel divides by ~0 and dominates
+        # the verdict on numerical noise alone.
+        ch_scale = ref.reshape(ref.shape[0], -1).abs().mean(dim=1)
+        ch_scale = ch_scale.clamp_min(
+            1e-3 * ref.abs().mean().clamp_min(1e-12)
+        )
+        per_ch_rel = per_ch / ch_scale
+        entry = {
+            "max_abs": float(d.max()),
+            "mean_abs": float(d.mean()),
+            "rel_mean_abs": float(per_ch_rel.max()),
+            "rel_per_channel": [float(v) for v in per_ch_rel],
+            "mean_abs_if_flipped": float(d_flip.mean()),
+            "flip_is_better": bool(d_flip.mean() < d.mean()),
+        }
+        # Which channel is worst -- a permutation shows up as exactly one.
+        entry["worst_channel"] = int(per_ch_rel.argmax())
+        entry["worst_channel_mean_abs"] = float(per_ch[per_ch_rel.argmax()])
+        report["groups"][g] = entry
+        if entry["flip_is_better"]:
+            flips.append(g)
+        if log is not None:
+            log.info(
+                f"align {g}: mean|diff|={entry['mean_abs']:.4g} "
+                f"(rel {entry['rel_mean_abs']:.2e}), max={entry['max_abs']:.4g}, "
+                f"flipped would be {entry['mean_abs_if_flipped']:.4g}, "
+                f"worst ch {entry['worst_channel']}"
+            )
+    if flips:
+        raise ObsClimatologyError(
+            f"LATITUDE FLIP detected for {flips}: the row-reversed comparison "
+            f"agrees better than the aligned one. Continuing would silently "
+            f"double every bias. Report: {report['groups']}"
+        )
+    bad = {g: e["rel_mean_abs"] for g, e in report["groups"].items()
+           if e["rel_mean_abs"] > rel_tol}
+    report["within_tolerance"] = not bad
+    report["rel_tol"] = rel_tol
+    if bad and log is not None:
+        log.warning(
+            f"alignment residual above {rel_tol:.0%} for {bad} — not a flip "
+            f"(that is checked separately), so suspect a differing averaging "
+            f"span, a channel permutation or a unit mismatch"
+        )
+    return report

@@ -49,6 +49,12 @@ def _synthetic(*, flip_lat=False, reverse_levels=False):
     ua[3] = z[:, None, None].expand(L, H, W)
     tprof = torch.linspace(240.0, 296.0, L)
     ua[0] = tprof[:, None, None].expand(L, H, W)
+    # Fill the wind and humidity channels too: an all-zero channel makes a
+    # RELATIVE residual undefined, which is a fixture artifact rather than
+    # anything real (no ERA5 channel is identically zero).
+    ua[1] = torch.linspace(30.0, 5.0, L)[:, None, None].expand(L, H, W)
+    ua[2] = torch.linspace(-8.0, 2.0, L)[:, None, None].expand(L, H, W)
+    ua[4] = torch.linspace(2e-6, 1e-2, L)[:, None, None].expand(L, H, W)
     if flip_lat:
         surface = surface.flip(-2)
         ua = ua.flip(-2)
@@ -212,3 +218,113 @@ def test_real_amip_v2_file_passes_every_anchor():
     assert anchors["t2m_row0"] == pytest.approx(226.8, abs=0.5)
     assert anchors["t2m_rowN"] == pytest.approx(258.9, abs=0.5)
     assert tuple(obs["upper_air"].shape) == (5, 26, 180, 360)
+
+
+# ---------------------------------------------------------------------------
+# verify_against_store — the pre-run alignment gate
+# ---------------------------------------------------------------------------
+# Bilinear downsampling and time-averaging are both linear, so they commute
+# exactly, and the obs climatology's source archive is the same one the store
+# was converted from. Agreement should therefore be at float rounding, and any
+# misalignment is orders of magnitude larger with its own signature.
+
+
+class _StoreStub:
+    """A store whose frames average to a known field, in NORMALIZED space."""
+
+    def __init__(self, phys, mean, std, n_time=40):
+        self.n_time = n_time
+        self._z = {k: (v - mean[k]) / std[k] for k, v in phys.items()}
+
+    def __getitem__(self, idx):
+        return {"surface_in": self._z["surface"],
+                "upper_air_in": self._z["upper_air"]}
+
+
+class _NormStub:
+    def __init__(self, mean, std):
+        self._m, self._s = mean, std
+
+    def denormalize_state(self, **kw):
+        out = {}
+        for g, v in kw.items():
+            out[g] = v * self._s[g] + self._m[g]
+        return out
+
+
+def _store_and_norm(obs, factor):
+    """A store whose time-mean IS the downsampled obs climatology."""
+    from obs_climatology import _downsample
+
+    phys = {g: _downsample(obs[g], factor) for g in ("surface", "upper_air")}
+    mean = {"surface": torch.tensor(280.0), "upper_air": torch.tensor(250.0)}
+    std = {"surface": torch.tensor(15.0), "upper_air": torch.tensor(30.0)}
+    return _StoreStub(phys, mean, std), _NormStub(mean, std)
+
+
+def test_aligned_store_agrees_at_float_rounding():
+    from obs_climatology import verify_against_store
+
+    obs = _synthetic()
+    ds, nz = _store_and_norm(obs, 4)
+    rep = verify_against_store(
+        obs, dataset=ds, normalizer=nz, rows=range(0, 40, 10),
+        downsample_factor=4,
+    )
+    assert rep["within_tolerance"]
+    for g, e in rep["groups"].items():
+        assert e["rel_mean_abs"] < 1e-5, (g, e)
+        assert not e["flip_is_better"]
+
+
+def test_a_flipped_obs_file_is_caught_and_refused():
+    """The failure the gate exists for: shapes match, bias doubles."""
+    from obs_climatology import verify_against_store
+
+    obs = _synthetic()
+    ds, nz = _store_and_norm(obs, 4)
+    flipped = {g: v.flip(-2) for g, v in obs.items()}
+    with pytest.raises(ObsClimatologyError, match="LATITUDE FLIP"):
+        verify_against_store(flipped, dataset=ds, normalizer=nz,
+                             rows=range(0, 40, 10), downsample_factor=4)
+
+
+def test_a_unit_offset_shows_as_a_large_residual_not_a_flip():
+    """273.15 K offset: must NOT be reported as a flip, and must break
+    tolerance so it cannot slip through."""
+    from obs_climatology import verify_against_store
+
+    obs = _synthetic()
+    ds, nz = _store_and_norm(obs, 4)
+    shifted = {g: v.clone() for g, v in obs.items()}
+    shifted["surface"] = shifted["surface"] - 273.15
+    rep = verify_against_store(shifted, dataset=ds, normalizer=nz,
+                               rows=range(0, 40, 10), downsample_factor=4)
+    assert not rep["within_tolerance"]
+    assert not rep["groups"]["surface"]["flip_is_better"]
+    assert rep["groups"]["surface"]["mean_abs"] == pytest.approx(273.15, rel=1e-3)
+
+
+def test_a_channel_permutation_localizes_to_one_channel():
+    from obs_climatology import verify_against_store
+
+    obs = _synthetic()
+    ds, nz = _store_and_norm(obs, 4)
+    swapped = {g: v.clone() for g, v in obs.items()}
+    swapped["surface"][2] = swapped["surface"][2] + 40.0   # t2m only
+    rep = verify_against_store(swapped, dataset=ds, normalizer=nz,
+                               rows=range(0, 40, 10), downsample_factor=4)
+    assert rep["groups"]["surface"]["worst_channel"] == 2
+    assert rep["groups"]["surface"]["worst_channel_mean_abs"] == pytest.approx(
+        40.0, rel=1e-3
+    )
+
+
+def test_shape_mismatch_raises_rather_than_broadcasting():
+    from obs_climatology import verify_against_store
+
+    obs = _synthetic()
+    ds, nz = _store_and_norm(obs, 4)
+    with pytest.raises(ObsClimatologyError, match="but the store's"):
+        verify_against_store(obs, dataset=ds, normalizer=nz,
+                             rows=range(0, 40, 10), downsample_factor=2)

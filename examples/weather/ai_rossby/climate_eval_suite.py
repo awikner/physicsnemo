@@ -578,6 +578,158 @@ class QBOScorer:
         return {"qbo": block}
 
 
+def fit_linear_trend(
+    series,
+    *,
+    step_hours: float,
+    per: str = "decade",
+    block: Optional[int] = None,
+) -> dict:
+    r"""OLS trend of a time series, in units per decade (or per year).
+
+    ``amip_v2`` saves the daily global-mean series and fits it downstream,
+    outside the repo; this is that fit, in-tree, so a saved result carries both
+    the series and the number quoted from it.
+
+    ``block`` first averages the series in consecutive blocks of that many
+    steps. Pass ``365`` at a 24 h step for an annual-mean fit, which is the
+    statistic to quote: the raw daily series is dominated by the seasonal
+    cycle, so its slope is unbiased but its standard error is meaningless
+    unless you deseasonalize. (Block averaging drifts ~9 days against the
+    calendar over 35 years, which is negligible for a trend but is why the
+    calendar-exact version lives in the post-processing tool.)
+
+    Returns ``{slope, intercept, r2, stderr, n, per}`` with ``slope`` in
+    units per ``per``. NaNs are dropped, so a partially-written series from a
+    killed run still fits.
+    """
+    import numpy as np
+
+    x = np.asarray(series, dtype="float64").reshape(len(series), -1).squeeze()
+    if x.ndim != 1:
+        raise ValueError(f"expected a 1-D series, got shape {x.shape}")
+    step = float(step_hours)
+    if block:
+        n_full = (len(x) // int(block)) * int(block)
+        if n_full == 0:
+            raise ValueError(
+                f"series of {len(x)} steps is shorter than one block of {block}"
+            )
+        x = x[:n_full].reshape(-1, int(block)).mean(axis=1)
+        step = step * float(block)
+    t_hours = np.arange(len(x), dtype="float64") * step
+    ok = np.isfinite(x)
+    if ok.sum() < 3:
+        raise ValueError(f"only {int(ok.sum())} finite points; cannot fit")
+    x, t_hours = x[ok], t_hours[ok]
+
+    per_hours = {"decade": 24.0 * 365.25 * 10.0, "year": 24.0 * 365.25}
+    if per not in per_hours:
+        raise ValueError(f"per must be one of {sorted(per_hours)}, got {per!r}")
+    t = t_hours / per_hours[per]
+
+    tm, xm = t.mean(), x.mean()
+    stt = float(((t - tm) ** 2).sum())
+    slope = float(((t - tm) * (x - xm)).sum() / stt)
+    intercept = float(xm - slope * tm)
+    resid = x - (intercept + slope * t)
+    ss_res, ss_tot = float((resid ** 2).sum()), float(((x - xm) ** 2).sum())
+    n = int(len(x))
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r2": (1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan"),
+        # OLS standard error; only meaningful once the seasonal cycle is gone
+        # (i.e. with block averaging), which is why the annual fit is the one
+        # to quote.
+        "stderr": float((ss_res / max(n - 2, 1) / stt) ** 0.5),
+        "n": n,
+        "per": per,
+        "block": int(block) if block else None,
+    }
+
+
+class FieldSeriesScorer:
+    """Per-frame PHYSICAL field for a few named variables: ``(horizon, H, W)``.
+
+    Campaign B's primary artifact, mirroring ``amip_v2``'s ``t2m_field.npy``.
+    t2m over 12,783 frames at 45x90 is 207 MB in fp32 -- small enough that
+    saving the FIELD dominates saving any statistic derived from it: the trend,
+    the global mean under any lat weighting, the seasonal cycle, sub-period
+    refits and the spatial pattern all follow at zero extra cost, and a wrong
+    weight convention then costs a re-analysis rather than a re-rollout.
+
+    (A streaming-OLS scorer -- n, sum_t, sum_t2, sum_x, sum_tx as f64 fields --
+    is the right tool only if this grows to all 151 channels, where the field
+    would be 31 GB.)
+
+    Requires one IC (``B == 1``): a series is a single trajectory. Under
+    member-split every rank holds the identical cross-rank ensemble mean, so
+    finalize takes the local copy with no collective; IC-split is refused,
+    because trajectories from different ICs cannot be averaged into one series.
+    NaN-prefilled so a partially-written series is self-describing, and omitted
+    under ``local_only`` so progress snapshots stay small.
+    """
+
+    def __init__(self, *, catalog: VariableCatalog, variables: Sequence[str],
+                 store_dtype: torch.dtype = torch.float32):
+        self.variables = list(variables)
+        self.store_dtype = store_dtype
+        self._index: dict[str, tuple[str, int]] = {}
+        for name in self.variables:
+            if name in catalog.surface:
+                self._index[name] = ("surface", list(catalog.surface).index(name))
+            elif name in catalog.diagnostic:
+                self._index[name] = ("diagnostic",
+                                     list(catalog.diagnostic).index(name))
+            else:
+                raise ValueError(
+                    f"field variable {name!r} not found in the catalog's surface "
+                    f"or diagnostic variables"
+                )
+        self._fields: dict[str, torch.Tensor] = {}
+        self._step_hours: Optional[float] = None
+
+    def bind(self, drive: DiffusionRolloutValidator) -> None:
+        if int(getattr(drive, "batch_size", 1) or 1) != 1:
+            raise ValueError(
+                f"FieldSeriesScorer needs batch_size=1 (one IC per rollout); "
+                f"got {drive.batch_size}. A field series is one trajectory."
+            )
+        if getattr(drive, "_world_size", 1) > 1 and not getattr(
+            drive, "member_split", False
+        ):
+            raise ValueError(
+                "FieldSeriesScorer refuses IC-split DDP: each rank would roll a "
+                "DIFFERENT initial condition and the frames could not be "
+                "assembled into one series. Use member-split (ensemble_size a "
+                "multiple of world_size) or a single rank."
+            )
+        h, w = drive.scored_grid
+        for name in self.variables:
+            self._fields[name] = torch.full(
+                (drive.horizon, h, w), float("nan"), dtype=self.store_dtype
+            )
+
+    def score_step(self, ctx: StepContext) -> None:
+        for name, (grp, idx) in self._index.items():
+            if grp != ctx.kind:
+                continue
+            # pred_phys is the cross-rank ensemble MEAN in physical units.
+            self._fields[name][ctx.m_idx] = (
+                ctx.pred_phys[0, idx].detach().to("cpu", self.store_dtype)
+            )
+
+    def finalize(self, *, local_only: bool = False) -> dict[str, dict]:
+        if local_only:
+            # Progress snapshots would otherwise carry a 207 MB tensor.
+            return {"field_series": {
+                name: {"n_written": int(torch.isfinite(f[:, 0, 0]).sum())}
+                for name, f in self._fields.items()
+            }}
+        return {"field_series": {name: f for name, f in self._fields.items()}}
+
+
 class FluxSeriesScorer:
     """Lat-weighted global-mean per-step series for named flux channels.
 
@@ -588,8 +740,10 @@ class FluxSeriesScorer:
     length scaled with the IC batch count and were never reduced.
     """
 
-    def __init__(self, *, catalog: VariableCatalog, flux_variables: Sequence[str]):
+    def __init__(self, *, catalog: VariableCatalog, flux_variables: Sequence[str],
+                 lat_weights: Optional[torch.Tensor] = None):
         self.flux_variables = list(flux_variables)
+        self.lat_weights = lat_weights
         self._flux_index: dict[str, tuple[str, int]] = {}
         for name in self.flux_variables:
             if name in catalog.surface:
@@ -621,8 +775,12 @@ class FluxSeriesScorer:
         for name, (grp, idx) in self._flux_index.items():
             if grp != ctx.kind:
                 continue
-            pred_scalars = lat_weighted_global_scalars(ctx.pred_phys[:, idx])
-            truth_scalars = lat_weighted_global_scalars(ctx.truth_phys[:, idx])
+            pred_scalars = lat_weighted_global_scalars(
+                ctx.pred_phys[:, idx], lat_weights=self.lat_weights
+            )
+            truth_scalars = lat_weighted_global_scalars(
+                ctx.truth_phys[:, idx], lat_weights=self.lat_weights
+            )
             self._sums[name]["pred"][ctx.m_idx] += pred_scalars.double().sum()
             self._sums[name]["truth"][ctx.m_idx] += truth_scalars.double().sum()
             self._counts[name][ctx.m_idx] += float(pred_scalars.numel())
@@ -932,6 +1090,8 @@ class EvalSuiteRunner:
     def __init__(self, drive: DiffusionRolloutValidator, scorers: Sequence, *,
                  output_path: str, partial_save_every_frames: int = 0,
                  rank: int = 0, config_echo: Optional[dict] = None, log=None,
+                 lat_weights: Optional[torch.Tensor] = None,
+                 step_hours: float = 24.0,
                  headline_spec=None, catalog: Optional[VariableCatalog] = None):
         self.drive = drive
         self.scorers = list(scorers)
@@ -939,6 +1099,12 @@ class EvalSuiteRunner:
         self.partial_every = int(partial_save_every_frames)
         self.rank = int(rank)
         self.config_echo = dict(config_echo or {})
+        # Passed to compute_headline_bias so the table and the scorer agree
+        # about the weighting convention (see store_lat_weights).
+        self.lat_weights = lat_weights
+        # Hours per MODEL step (24 for AMIP daily). Sets the time axis of every
+        # trend fit, so a wrong value rescales the slope directly.
+        self.step_hours = float(step_hours)
         self.headline_spec = list(headline_spec) if headline_spec else None
         self.catalog = catalog
         self.log = log or logger
@@ -974,8 +1140,36 @@ class EvalSuiteRunner:
             and "climatology" in results
         ):
             results["headline"] = compute_headline_bias(
-                results["climatology"], self.catalog, self.headline_spec
+                results["climatology"], self.catalog, self.headline_spec,
+                lat_weights=self.lat_weights,
             )
+        # Trend of every global-mean series, so the saved .pt carries both the
+        # series and the number quoted from it. The ANNUAL fit is the one to
+        # quote: the raw daily series is dominated by the seasonal cycle, so
+        # its slope is unbiased but its stderr is not meaningful. Both are
+        # emitted because the pair shows whether the estimate is sensitive to
+        # the averaging choice.
+        gm = results.get("global_mean", {})
+        if gm and not partial:
+            step_hours = self.step_hours
+            trend: dict = {}
+            for which in ("flux_pred_series", "flux_truth_series"):
+                for name, series in (gm.get(which) or {}).items():
+                    key = f"{name}:{'pred' if 'pred' in which else 'truth'}"
+                    entry = {}
+                    for label, blk in (("daily", None), ("annual", 365)):
+                        try:
+                            entry[label] = fit_linear_trend(
+                                series.detach().cpu() if hasattr(series, "detach")
+                                else series,
+                                step_hours=step_hours, per="decade", block=blk,
+                            )
+                        except ValueError as exc:
+                            entry[label] = {"error": str(exc)}
+                    trend[key] = entry
+            if trend:
+                results["trend"] = trend
+
         if self.drive.ensemble_size > 1:
             results["spread_skill"] = derive_spread_skill(
                 rmse_acc, self.drive.log_steps
@@ -1067,6 +1261,7 @@ def main(cfg) -> None:
     from train_loop import (  # noqa: E402
         adopt_ocean_contract,
         assert_checkpoint_dir_contract,
+        model_step_hours,
         model_step_rows,
         steps_per_month,
     )
@@ -1363,8 +1558,23 @@ def main(cfg) -> None:
             FluxSeriesScorer(
                 catalog=catalog,
                 flux_variables=[str(x) for x in gm_cfg.flux_variables],
+                lat_weights=eval_lat_weights,
             )
         )
+
+    # Per-frame PHYSICAL fields for named variables (Campaign B's primary
+    # artifact: t2m over 12,783 frames is 207 MB, and saving the field means a
+    # different lat weighting or a sub-period refit costs no rollout).
+    fs_cfg = eval_cfg.get("field_series", None)
+    if fs_cfg is not None and bool(fs_cfg.get("enabled", False)):
+        fs_vars = [str(x) for x in (fs_cfg.get("variables", []) or [])]
+        if not fs_vars:
+            raise ValueError(
+                "eval_suite.field_series.enabled=True needs "
+                "field_series.variables (e.g. [2m_temperature])"
+            )
+        scorers.append(FieldSeriesScorer(catalog=catalog, variables=fs_vars))
+        log.info(f"field series: {fs_vars} at {drive_scored_grid}")
 
     ens_cfg = eval_cfg.get("ensemble_envelope", None)
     if ens_cfg is not None and bool(ens_cfg.get("enabled", False)):
@@ -1540,6 +1750,8 @@ def main(cfg) -> None:
         log=log,
         headline_spec=headline_spec,
         catalog=catalog,
+        lat_weights=eval_lat_weights,
+        step_hours=model_step_hours(ds_cfg, raw_ds),
     )
     runner.run(drive_model)
 
