@@ -69,7 +69,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
+import numpy as np
 import torch
+
+from physicsnemo import Module
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -326,20 +329,33 @@ class ClimatologyScorer:
     """
 
     def __init__(self, *, n_bins: int = 12, steps_per_bin: int = 1,
-                 track_bins: bool = True):
+                 track_bins: bool = True, track_members: bool = False,
+                 lat_weights: Optional[torch.Tensor] = None):
         self.n_bins = int(n_bins)
         self.steps_per_bin = max(1, int(steps_per_bin))
         self.track_bins = bool(track_bins)
+        self.track_members = bool(track_members)
+        # None -> lat_weighted_global_scalars' endpoint-inclusive default.
+        # Pass store-derived weights (store_lat_weights) for cell-centred
+        # grids; see that helper for why it matters.
+        self.lat_weights = lat_weights
         self._pred: dict = {}
         self._truth: dict = {}
+        self._member: list[dict] = []
+        self._local_E = 1
+        self._normalizer = None
 
     def bind(self, drive: DiffusionRolloutValidator) -> None:
-        sample = drive.dataset[0]
-        shapes = {"surface": tuple(sample["surface_in"].shape)}
-        if drive.has_upper_air:
-            shapes["upper_air"] = tuple(sample["upper_air_in"].shape)
-        if drive.rmse_diagnostic is not None and "diagnostic" in sample:
-            shapes["diagnostic"] = tuple(sample["diagnostic"].shape)
+        # Size from the SCORED grid, not the store probe. Under the cascade the
+        # drive rolls a coarse forecaster and scores the DOWNSCALED frame, so a
+        # probe-sized accumulator (45x90) met 180x360 fields and raised at the
+        # first frame. drive.scored_shapes falls back to the probe wherever the
+        # two agree, so non-cascade runs are unchanged.
+        shapes = dict(drive.scored_shapes)
+        if not drive.has_upper_air:
+            shapes.pop("upper_air", None)
+        if drive.rmse_diagnostic is None:
+            shapes.pop("diagnostic", None)
 
         def _aggs(shape):
             out = {"mean": StreamingTimeMean(shape, drive.device)}
@@ -349,6 +365,22 @@ class ClimatologyScorer:
 
         self._pred = {kind: _aggs(sh) for kind, sh in shapes.items()}
         self._truth = {kind: _aggs(sh) for kind, sh in shapes.items()}
+
+        # Per-member time-means, so the headline can carry an ERROR BAR. With
+        # only the ensemble mean an RSI-vs-ERDM difference cannot be called
+        # significant, which is the whole point of running 8 members.
+        #
+        # Accumulated in NORMALIZED space on purpose: denormalization is affine
+        # per channel, so denorm(mean_t(x)) == mean_t(denorm(x)) exactly, and
+        # this way the per-frame cost is one update per member instead of one
+        # denormalization per member.
+        self._local_E = int(getattr(drive, "local_ensemble_size", 1) or 1)
+        self._normalizer = getattr(drive, "normalizer", None)
+        if self.track_members:
+            self._member = [
+                {kind: StreamingTimeMean(sh, drive.device) for kind, sh in shapes.items()}
+                for _ in range(self._local_E)
+            ]
 
     def score_step(self, ctx: StepContext) -> None:
         if ctx.kind not in self._pred:
@@ -363,6 +395,12 @@ class ClimatologyScorer:
             )
             self._pred[ctx.kind]["binned"].update(ctx.pred_phys, bin_idx)
             self._truth[ctx.kind]["binned"].update(ctx.truth_phys, bin_idx)
+        if self._member:
+            # Member e occupies indices e, e+local_E, ... because the perturber
+            # builds the ensemble axis with repeat_interleave.
+            ens = ctx.pred_ensemble
+            for e in range(self._local_E):
+                self._member[e][ctx.kind].update(ens[e::self._local_E])
 
     def finalize(self, *, local_only: bool = False) -> dict[str, dict]:
         maps: dict[str, torch.Tensor] = {}
@@ -381,8 +419,77 @@ class ClimatologyScorer:
                 maps[f"{kind}_truth_binned"] = self._truth[kind]["binned"].finalize(
                     local_only=local_only
                 )
-            global_bias[kind] = lat_weighted_global_scalars(bias)
-        return {"climatology": maps, "global_bias": global_bias}
+            global_bias[kind] = lat_weighted_global_scalars(
+                bias, lat_weights=self.lat_weights
+            )
+
+        out = {"climatology": maps, "global_bias": global_bias}
+        if self._member:
+            out["member_spread"] = self._finalize_members(
+                maps, local_only=local_only
+            )
+        return out
+
+    def _finalize_members(self, maps: dict, *, local_only: bool) -> dict:
+        """Per-member global bias + RMSE-of-bias, and their spread.
+
+        Both headline columns are lat-weighted reductions of the SAME per-member
+        bias map -- ``mean(w*(pred-obs))`` and ``sqrt(mean(w*(pred-obs)^2))`` --
+        so reducing each member here gives the spread of exactly the numbers the
+        headline table quotes, without ever emitting 8 full map sets.
+
+        Under member-split each rank holds a different slice of the ensemble, so
+        the per-member scalars are all-gathered; the std would otherwise be
+        across this rank's members only, which is a silently narrower error bar.
+        """
+        import torch.distributed as tdist
+
+        res: dict[str, dict] = {}
+        gather = (
+            not local_only
+            and tdist.is_available()
+            and tdist.is_initialized()
+            and tdist.get_world_size() > 1
+        )
+        for kind in self._pred:
+            truth_mean = maps[f"{kind}_truth_mean"]
+            per_bias, per_rmse = [], []
+            for e in range(self._local_E):
+                zmean = self._member[e][kind].finalize(local_only=True)
+                phys = zmean
+                if self._normalizer is not None:
+                    phys = self._normalizer.denormalize_state(**{kind: zmean})[kind]
+                b = phys - truth_mean
+                per_bias.append(
+                    lat_weighted_global_scalars(b, lat_weights=self.lat_weights)
+                )
+                per_rmse.append(
+                    lat_weighted_global_scalars(
+                        b * b, lat_weights=self.lat_weights
+                    ).sqrt()
+                )
+            bias_t = torch.stack(per_bias, dim=0)      # (local_E, C[, L])
+            rmse_t = torch.stack(per_rmse, dim=0)
+            if gather:
+                ws = tdist.get_world_size()
+                bufs_b = [torch.empty_like(bias_t) for _ in range(ws)]
+                bufs_r = [torch.empty_like(rmse_t) for _ in range(ws)]
+                tdist.all_gather(bufs_b, bias_t.contiguous())
+                tdist.all_gather(bufs_r, rmse_t.contiguous())
+                bias_t = torch.cat(bufs_b, dim=0)      # (E_total, C[, L])
+                rmse_t = torch.cat(bufs_r, dim=0)
+            res[kind] = {
+                "n_members": int(bias_t.shape[0]),
+                "mean_bias_members": bias_t,
+                "rmse_bias_members": rmse_t,
+                "mean_bias_mean": bias_t.mean(dim=0),
+                "mean_bias_std": bias_t.std(dim=0, unbiased=True)
+                if bias_t.shape[0] > 1 else torch.zeros_like(bias_t[0]),
+                "rmse_bias_mean": rmse_t.mean(dim=0),
+                "rmse_bias_std": rmse_t.std(dim=0, unbiased=True)
+                if rmse_t.shape[0] > 1 else torch.zeros_like(rmse_t[0]),
+            }
+        return res
 
 
 class QBOScorer:
@@ -615,8 +722,133 @@ DEFAULT_HEADLINE_VARIABLES = (
 )
 
 
+def store_lat_weights(zarr_path, n_lat: int, *, device, dtype=torch.float32):
+    r"""``cos(lat)`` from a store's OWN lat coordinate, never synthesized.
+
+    Both existing weight paths (``validate.cos_lat_weights`` and
+    ``lat_weighted_global_scalars``'s default) build
+    ``cos(linspace(pi/2, -pi/2, H))``, which is endpoint-INCLUSIVE: the two
+    extreme rows land exactly on the poles, where cos is 0, so they carry no
+    weight at all. The AMIP grids are cell-CENTRED (-89.5..89.5 at 1 degree,
+    -88..88 at the coarsened 4 degrees), which is also what upstream
+    ``amip_v2``'s ``latitude_weights`` and its ``model_lat_weights`` reproduce.
+    Reading the coordinate gets both upstream conventions with one mechanism.
+
+    The effect is small -- the two polar rows carry ~0.24% of the weight, worth
+    ~0.01 K on a headline mean bias -- but it is a *parity* claim, so it is
+    worth being exact about rather than approximately right.
+
+    ``n_lat`` must be the SCORED grid, so for a cascade this wants a store at
+    the downscaler's resolution (``amip_dailyavg_boundary`` is native
+    180x360), not the coarse store the forecaster rolls on. Raises on a length
+    mismatch rather than broadcasting a wrong-length weight vector.
+    """
+    import xarray as xr
+
+    from train import _resolve_path
+
+    path = Path(_resolve_path(str(zarr_path)))
+    if path.is_dir() and not str(path).endswith(".zarr"):
+        years = sorted(path.glob("*.zarr"))
+        if not years:
+            raise FileNotFoundError(f"no per-year stores under {path}")
+        path = years[0]
+    ds = xr.open_zarr(path, consolidated=True, decode_times=False)
+    lat = np.asarray(ds["lat"].values, dtype="float64")
+    if lat.shape[0] != int(n_lat):
+        raise ValueError(
+            f"{path} has {lat.shape[0]} latitudes but the scored grid needs "
+            f"{n_lat}; point lat_coord_zarr at a store on the SCORED grid "
+            f"(a cascade scores at the downscaler's resolution, not the "
+            f"forecaster's)"
+        )
+    w = torch.as_tensor(np.cos(np.deg2rad(lat)), device=device, dtype=dtype)
+    return w / w.mean()
+
+
+def load_stage_weights(
+    wrapper,
+    *,
+    checkpoint: str,
+    use_ema: bool = True,
+    epoch: int | None = None,
+    device="cpu",
+    log=None,
+) -> dict:
+    r"""Load one stage's weights, optionally swapping in the EMA shadow.
+
+    Accepts either a checkpoint **directory** (the single-model eval path) or a
+    single ``.mdlus`` **file** (the combined cascade's per-stage specs), and
+    returns provenance ``{"path", "epoch", "weights_used"}``.
+
+    Two traps this exists to close:
+
+    * **EMA.** ``save_checkpoint`` writes the LIVE weights to the ``.mdlus`` and
+      the EMA shadow into ``metadata["ema"]`` of ``checkpoint.0.<epoch>.pt``,
+      while the training loop runs its own validation **EMA-applied** ("to
+      match inference weights"). So a ``.mdlus`` loaded on its own is not the
+      weights the training-time metrics describe. Upstream ``amip_v2`` performs
+      no EMA swap at inference, so ``use_ema=False`` is the amip_v2-parity
+      choice and ``use_ema=True`` is the match-our-own-validation choice —
+      either is defensible, but it must be recorded, which is why
+      ``weights_used`` is returned rather than logged and dropped.
+    * **Epoch.** ``load_checkpoint`` defaults to the LATEST epoch in the
+      directory. An evaluation of "epoch 10" that silently read epoch 14 would
+      look entirely normal.
+    """
+    from physicsnemo.utils import load_checkpoint
+
+    from train import _resolve_path
+    from train_loop import assert_checkpoint_contract, assert_checkpoint_dir_contract
+
+    path = Path(_resolve_path(str(checkpoint)))
+    meta: dict = {}
+    if path.is_dir():
+        assert_checkpoint_dir_contract(wrapper, str(path), log=log)
+        loaded_epoch = load_checkpoint(
+            str(path), models=wrapper, device=device, epoch=epoch,
+            metadata_dict=meta,
+        )
+    else:
+        # A bare .mdlus carries no metadata, so the EMA (if wanted) comes from
+        # the sibling checkpoint.0.<epoch>.pt written by the same save call.
+        assert_checkpoint_contract(wrapper, str(path), log=log)
+        wrapper.load_state_dict(Module.from_checkpoint(str(path)).state_dict(),
+                                strict=True)
+        loaded_epoch = epoch
+        if use_ema:
+            stem = path.name.split(".")
+            idx = stem[-2] if len(stem) >= 3 else None
+            sib = path.parent / f"checkpoint.0.{idx}.pt"
+            if sib.exists():
+                blob = torch.load(sib, map_location=device, weights_only=False)
+                meta = (blob.get("metadata") or {}) if isinstance(blob, dict) else {}
+                if loaded_epoch is None and idx is not None:
+                    loaded_epoch = int(idx)
+            elif log is not None:
+                log.warning(
+                    f"use_ema=True but no sibling {sib.name} beside {path.name}; "
+                    f"using raw weights"
+                )
+
+    weights_used = "raw"
+    if use_ema:
+        from inference import _apply_ema_weights
+
+        applied = _apply_ema_weights(wrapper, meta.get("ema"), logger=log)
+        weights_used = "ema" if applied else "raw_ema_unavailable"
+    wrapper.eval()
+    prov = {"path": str(path), "epoch": loaded_epoch, "weights_used": weights_used}
+    if log is not None:
+        log.info(
+            f"weights: {path.name} epoch={loaded_epoch} used={weights_used}"
+        )
+    return prov
+
+
 def compute_headline_bias(clim_maps: dict, catalog: VariableCatalog,
-                          spec) -> dict:
+                          spec, *,
+                          lat_weights: Optional[torch.Tensor] = None) -> dict:
     """Upstream bias.py's headline statistics from the finalized bias maps.
 
     For each ``(label, name, level)``: lat-weighted MEAN and lat-weighted RMSE
@@ -662,8 +894,10 @@ def compute_headline_bias(clim_maps: dict, catalog: VariableCatalog,
                 f"{catalog.surface} or diagnostic {catalog.diagnostic}"
             )
         b = bias.unsqueeze(0).double()
-        mean = float(lat_weighted_global_scalars(b)[0])
-        rmse = float(lat_weighted_global_scalars(b ** 2)[0].sqrt())
+        mean = float(lat_weighted_global_scalars(b, lat_weights=lat_weights)[0])
+        rmse = float(
+            lat_weighted_global_scalars(b ** 2, lat_weights=lat_weights)[0].sqrt()
+        )
         out[label] = {"mean_bias": mean, "rmse_bias": rmse}
     return out
 
@@ -950,10 +1184,15 @@ def main(cfg) -> None:
         raw_ds, ds_cfg = _build_eval_dataset(cfg, log)
         wrapper = build_model(cfg.model).to(dist.device)
         ckpt_dir = _resolve_path(str(eval_cfg.checkpoint_dir))
-        assert_checkpoint_dir_contract(wrapper, ckpt_dir, log=log)
-        loaded_epoch = load_checkpoint(ckpt_dir, models=wrapper, device=dist.device)
-        log.info(f"loaded checkpoint epoch={loaded_epoch} from {ckpt_dir}")
-        wrapper.eval()
+        weights_prov = load_stage_weights(
+            wrapper,
+            checkpoint=ckpt_dir,
+            use_ema=bool(eval_cfg.get("use_ema", True)),
+            epoch=eval_cfg.get("checkpoint_epoch", None),
+            device=dist.device,
+            log=log,
+        )
+        loaded_epoch = weights_prov["epoch"]
         if getattr(raw_ds, "forcing_pipeline", None) is not None:
             # No-op for models without a c_grid contract (deterministic families).
             raw_ds.forcing_pipeline.assert_matches(wrapper, name="cfg.model")
@@ -1036,6 +1275,37 @@ def main(cfg) -> None:
 
     # ── scorers from the config blocks ─────────────────────────────────────
     per_month = steps_per_month(ds_cfg, raw_ds)
+    # The grid the drive will actually SCORE at: the unpack wrapper's
+    # resolution on the cascade path (the downscaler's full grid), else the
+    # drive model's. Computed here so the obs climatology's grid can be checked
+    # before anything expensive starts.
+    _score_src = unpack_wrapper if unpack_wrapper is not None else drive_model
+    _sg = getattr(_score_src, "horizontal_resolution", None)
+    drive_scored_grid = (
+        (int(tuple(_sg)[0]), int(tuple(_sg)[1]))
+        if _sg is not None and len(tuple(_sg)) == 2
+        else None
+    )
+
+    # Optional store-derived lat weights (see store_lat_weights). Default None
+    # keeps the endpoint-inclusive convention every existing result used, so
+    # turning this on is an explicit decision rather than a silent shift.
+    lat_coord_zarr = eval_cfg.get("lat_coord_zarr", None)
+    eval_lat_weights = None
+    if lat_coord_zarr:
+        if drive_scored_grid is None:
+            raise ValueError(
+                "eval_suite.lat_coord_zarr needs the scored grid, but the model "
+                "does not declare horizontal_resolution"
+            )
+        eval_lat_weights = store_lat_weights(
+            lat_coord_zarr, drive_scored_grid[0], device=dist.device
+        )
+        log.info(
+            f"lat weights from {lat_coord_zarr} "
+            f"({drive_scored_grid[0]} rows, cell-centred)"
+        )
+
     scorers: list = []
 
     clim_cfg = eval_cfg.get("climatology", None)
@@ -1062,6 +1332,12 @@ def main(cfg) -> None:
                 # bias-only configuration: means/bias/global_bias without the
                 # heavy per-bin aggregators.
                 track_bins=clim_on,
+                # Per-member time-means -> an error bar on the headline. Only
+                # meaningful with an ensemble; costs local_E x the mean
+                # accumulator (~78 MB per member at 180x360).
+                track_members=bool(block.get("track_members", False))
+                and ensemble_size > 1,
+                lat_weights=eval_lat_weights,
             )
         )
 
@@ -1143,6 +1419,45 @@ def main(cfg) -> None:
             )
 
     # ── drive + runner ─────────────────────────────────────────────────────
+    # ── truth source ────────────────────────────────────────────────────
+    # "obs_climatology" replaces the per-frame store truth with amip_v2's
+    # frame-invariant obs climatology. This is the only workable route when no
+    # truth exists at the SCORED grid — a 180x360 cascade driven from a store
+    # that only holds 45x90 — and it is exact for the time-mean bias because
+    # mean_t(pred) - obs == mean_t(pred - obs). The cost is that rmse_step* then
+    # means RMSE-vs-climatology, not skill, so it is echoed into the results.
+    truth_source = str(eval_cfg.get("truth_source", "dataset"))
+    constant_truth = None
+    obs_meta: dict = {}
+    obs_anchors: dict = {}
+    if truth_source == "obs_climatology":
+        from obs_climatology import as_constant_truth, load_obs_climatology
+
+        obs_dir = eval_cfg.get("obs_climatology_dir", None)
+        if not obs_dir:
+            raise ValueError(
+                "eval_suite.truth_source=obs_climatology requires "
+                "eval_suite.obs_climatology_dir"
+            )
+        obs, obs_meta, obs_anchors = load_obs_climatology(
+            _resolve_path(str(obs_dir)),
+            catalog=catalog,
+            grid=drive_scored_grid,
+            levels=list(cfg.model.get("levels", []) or []) or None,
+            device=dist.device,
+            log=log,
+        )
+        constant_truth = as_constant_truth(
+            obs, normalizer=normalizer,
+            batch_size=int(eval_cfg.get("batch_size", 1)),
+            device=dist.device,
+        )
+    elif truth_source != "dataset":
+        raise ValueError(
+            f"eval_suite.truth_source must be 'dataset' or 'obs_climatology', "
+            f"got {truth_source!r}"
+        )
+
     drive = DiffusionRolloutValidator(
         raw_ds,
         wrapper=drive_model,
@@ -1166,6 +1481,8 @@ def main(cfg) -> None:
         frame_transform=frame_transform,
         unpack_wrapper=unpack_wrapper,
         init_downsample_factor=init_downsample_factor,
+        constant_truth=constant_truth,
+        stream=bool(eval_cfg.get("stream", True)),
     )
     runner = EvalSuiteRunner(
         drive,
@@ -1201,6 +1518,14 @@ def main(cfg) -> None:
                 else None
             ),
             "init_downsample_factor": init_downsample_factor,
+            # Under obs_climatology the rmse_* block is RMSE vs CLIMATOLOGY,
+            # not skill. Recorded so a saved .pt is never ambiguous.
+            "truth_source": truth_source,
+            "obs_climatology_dir": str(eval_cfg.get("obs_climatology_dir", "") or ""),
+            "obs_climatology_meta": obs_meta,
+            "obs_climatology_anchors": obs_anchors,
+            "scored_grid": list(drive_scored_grid) if drive_scored_grid else None,
+            "stream": bool(eval_cfg.get("stream", True)),
             "scoring_grid": (
                 "x".join(str(int(v)) for v in raw_ds[0]["surface_in"].shape[-2:])
             ),

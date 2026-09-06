@@ -59,6 +59,45 @@ max_initial_conditions: 1
 ic_stride: 9999
 batch_size: 1
 # ``null`` (uniform, scheduler default) | int | list[int] of length `horizon`.
+# Weights provenance. save_checkpoint writes the LIVE weights to the .mdlus and
+# the EMA shadow into metadata["ema"] of checkpoint.0.<epoch>.pt, while the
+# TRAINER validates EMA-applied. So use_ema decides which weights this eval
+# actually scores:
+#   true  -> matches our own training-time validation numbers
+#   false -> matches upstream amip_v2, which performs no EMA swap at inference
+# Either is defensible; the choice is echoed into results["config"] as
+# weights_used so a saved .pt is never ambiguous about it.
+# Where the truth for each scored frame comes from.
+#   dataset          -- the store's own frame at t+k (per-frame truth; skill)
+#   obs_climatology  -- amip_v2's frame-invariant obs climatology, subtracted
+#                       instead. The ONLY workable route when no truth exists at
+#                       the SCORED grid (e.g. a 180x360 cascade driven from a
+#                       store holding only 45x90), and exact for the time-mean
+#                       bias since mean_t(pred) - obs == mean_t(pred - obs).
+#                       NOTE: rmse_step* then means RMSE vs CLIMATOLOGY, not
+#                       skill. Echoed into results["config"]["truth_source"].
+# cos(lat) weights read from a store's OWN lat coordinate instead of the
+# endpoint-inclusive cos(linspace(pi/2,-pi/2,H)) default, which puts the two
+# extreme rows exactly on the poles (weight 0). The AMIP grids are cell-centred
+# (-89.5..89.5 at 1 deg, -88..88 at 4 deg), matching upstream amip_v2's
+# latitude_weights / model_lat_weights. Must be a store at the SCORED grid --
+# for a cascade that is the DOWNSCALER's resolution (amip_dailyavg_boundary is
+# native 180x360), not the coarse store the forecaster rolls on.
+# null = keep the historical convention (worth ~0.01 K on a headline bias).
+lat_coord_zarr: null
+
+truth_source: dataset
+obs_climatology_dir: null
+# Stream the rollout frame-at-a-time instead of materialising
+# (B*E, horizon, C, H, W) -- 36 GB at E=8 over 5 years, 32 GB at E=1 over 35.
+# Falls back automatically when the scheduler has no sample_rollout_generator.
+stream: true
+
+use_ema: true
+# null = the LATEST epoch in the checkpoint dir. Pin it for a named-epoch
+# evaluation -- "epoch 10" that silently read epoch 14 looks entirely normal.
+checkpoint_epoch: null
+
 sampler_num_steps: 4     # ignored (with an info log) for deterministic checkpoints
 # Rank-0 partial progress snapshots, every N scored frames (0 disables).
 # LOCAL-ONLY finalize — zero collectives, so it cannot desync ranks: exact
@@ -72,6 +111,12 @@ climatology:
   n_bins: 12            # 12 x 1 month = a monthly climatology over ~1 year
   months_per_bin: 1.0
   steps_per_bin: null   # derived; set an int to override (see the header)
+  # Keep a per-MEMBER time-mean as well, so the headline table can be quoted
+  # as mean +- std across the ensemble. Without it an 8-member run still
+  # reports a single number and an RSI-vs-ERDM difference cannot be called
+  # significant. Ignored when ensemble_size == 1. Costs local_E x the mean
+  # accumulator (~78 MB per member at 180x360).
+  track_members: False
 
 # Legacy alias: global_bias is ALWAYS emitted with the climatology scorer
 # (it costs milliseconds; the old BiasValidator re-ran the whole rollout for

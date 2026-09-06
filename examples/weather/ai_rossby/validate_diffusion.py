@@ -326,6 +326,8 @@ class DiffusionRolloutValidator:
         frame_transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         unpack_wrapper=None,
         init_downsample_factor: Optional[int] = None,
+        constant_truth: Optional[dict] = None,
+        stream: bool = True,
     ):
         if ensemble_size < 1:
             raise ValueError("ensemble_size must be ≥ 1")
@@ -420,12 +422,25 @@ class DiffusionRolloutValidator:
         #     scalars, so downsample-then-normalize == the coarse store).
         self.frame_transform = frame_transform
         self.unpack_wrapper = unpack_wrapper
-        self.init_downsample_factor = (
-            int(init_downsample_factor) if init_downsample_factor else None
-        )
+        # Frame-invariant truth (the amip_v2 obs climatology). See
+        # _truth_for_frame for why this is exact for the time-mean bias, and
+        # why it is window-path only.
+        self.constant_truth = constant_truth
+        # <= 1 means OFF, not "downsample by 1". climate_eval_suite defaults
+        # this to the downscaler's downsample_factor, which is correct only when
+        # the drive store is FULL res; driven from an already-coarse store a
+        # factor of 4 would shrink the 45x90 init window to 11x22.
+        _idf = int(init_downsample_factor) if init_downsample_factor else None
+        self.init_downsample_factor = _idf if (_idf or 0) > 1 else None
 
         # Dispatch on scheduler: rolling = has sample_rollout.
         self.window_mode = hasattr(self.scheduler, "sample_rollout")
+        # Stream the rollout when the scheduler offers a generator. Guarded on
+        # the attribute so a scheduler without one (rfm) keeps the materialized
+        # path unchanged.
+        self.stream = bool(stream) and hasattr(
+            self.scheduler, "sample_rollout_generator"
+        )
         self.window_size = (
             int(getattr(self.scheduler, "window_size", 0))
             if self.window_mode
@@ -469,15 +484,29 @@ class DiffusionRolloutValidator:
                 )
             self.sampler_num_steps = [int(s) for s in sampler_num_steps]
 
-        # Derive grid + channel layout from a probe sample.
+        # Derive CHANNEL layout from a probe sample. The GRID deliberately does
+        # NOT come from here — see ``scored_grid``.
         sample = dataset[0]
         self.n_surface = sample["surface_in"].shape[0]
-        self.n_lat = sample["surface_in"].shape[-2]
         self.has_upper_air = "upper_air_in" in sample
         self.n_upper_var = (
             sample["upper_air_in"].shape[0] if self.has_upper_air else 0
         )
+        self._n_levels = (
+            int(sample["upper_air_in"].shape[1]) if self.has_upper_air else 0
+        )
+        self._n_diagnostic = (
+            int(sample["diagnostic"].shape[0]) if "diagnostic" in sample else 0
+        )
+        self._probe_grid = (
+            int(sample["surface_in"].shape[-2]), int(sample["surface_in"].shape[-1])
+        )
 
+        # n_lat is the SCORED grid's latitude count, not the store's. On the
+        # cascade path the drive rolls a coarse forecaster and scores the
+        # DOWNSCALED frame, so sizing the lat weights from the store probe put
+        # 45-row weights against 180-row fields and raised at the first frame.
+        self.n_lat = self.scored_grid[0]
         lat_w = cos_lat_weights(self.n_lat, device, torch.float32)
         self.register_lat = lat_w
 
@@ -678,6 +707,43 @@ class DiffusionRolloutValidator:
     # ------------------------------------------------------------------ #
     # Public entry.
     # ------------------------------------------------------------------ #
+
+    @property
+    def scored_grid(self) -> tuple[int, int]:
+        """``(H, W)`` of what ``_score_step`` actually receives.
+
+        NOT the drive store's grid. Under the cascade hooks the emitted frame
+        is transformed (``frame_transform``) and unpacked by a DIFFERENT
+        wrapper (``unpack_wrapper``, i.e. the downscaler), so the scored grid
+        is that wrapper's ``horizontal_resolution`` — documented on
+        ``XDDCWrapper`` as "the *full* (high) resolution grid".
+
+        Falls back to the store probe when the wrapper does not declare a
+        resolution (test stubs, and every non-cascade path, where the two
+        agree by construction — so the mid-training path is unchanged).
+        """
+        src = self.unpack_wrapper if self.unpack_wrapper is not None else self.wrapper
+        res = getattr(src, "horizontal_resolution", None)
+        if res is not None and len(tuple(res)) == 2:
+            return int(tuple(res)[0]), int(tuple(res)[1])
+        return self._probe_grid
+
+    @property
+    def scored_shapes(self) -> dict[str, tuple[int, ...]]:
+        """Per-group field shapes on the SCORED grid.
+
+        For scorers that allocate per-pixel accumulators (ClimatologyScorer's
+        StreamingTimeMean / StreamingBinnedMean). Channel counts come from the
+        store probe — the cascade changes resolution, not channels — and the
+        grid from :attr:`scored_grid`.
+        """
+        h, w = self.scored_grid
+        out: dict[str, tuple[int, ...]] = {"surface": (self.n_surface, h, w)}
+        if self.has_upper_air:
+            out["upper_air"] = (self.n_upper_var, self._n_levels, h, w)
+        if self._n_diagnostic:
+            out["diagnostic"] = (self._n_diagnostic, h, w)
+        return out
 
     @torch.no_grad()
     def run(self, model, *, epoch: int = 0) -> dict[str, float]:
@@ -1033,12 +1099,15 @@ class DiffusionRolloutValidator:
         # OOM headroom analysis, 2026-08-25) — the pruned set is ~5 GB.
         _traj_keys = ("surface_in", "varying_boundary", "calendar",
                       "constant_boundary")
+        # Under streaming the trajectory stays on the CPU: rsi/erdm's
+        # generator already moves each W-frame window with
+        # ``.to(device, non_blocking=True)``, so the GPU never holds more than
+        # one window (~7 MB) and the per-frame H2D is ~0.04% of a ~3 s frame.
         traj_frames = []
         for i in range(traj_len):
             full = self._stack([t + i * self.step_size for t in batch_ics])
-            traj_frames.append(self._to_device(
-                {k: v for k, v in full.items() if k in _traj_keys}
-            ))
+            pruned = {k: v for k, v in full.items() if k in _traj_keys}
+            traj_frames.append(pruned if self.stream else self._to_device(pruned))
 
         def _stack_traj(key):
             xs = [f[key] for f in traj_frames]
@@ -1064,6 +1133,37 @@ class DiffusionRolloutValidator:
 
         if hasattr(self.scheduler, "on_rollout_start"):
             self.scheduler.on_rollout_start(init_window_ens)
+
+        if self.stream:
+            # Stream frame-at-a-time and score as we go. The materialized
+            # trajectory is what makes a long rollout impossible, not the
+            # forcings: (B*E, horizon, C, H, W) is 36 GB at E=8 over 5 years
+            # and 32 GB at E=1 over 35 years, both past a 40 GB A100, while the
+            # pruned forcing trajectory is only 2.6 / 17.8 GB and lives on the
+            # CPU (below).
+            #
+            # forcing_provider is deliberately NOT used. Left to itself the
+            # scheduler keeps computing its own one-step-shifted ocean window
+            # (``_gather_window(c_grid_traj, k + 1)``), so the AMIP ocean
+            # imposition stays structurally correct; handing that job to a
+            # closure is precisely how it becomes a silent identity-copy bug,
+            # since the shapes match either way.
+            for k0, x_k in self.scheduler.sample_rollout_generator(
+                model,
+                init_y,
+                c_grid_traj,
+                c_scalar_traj,
+                horizon=self.horizon,
+                num_steps=self.sampler_num_steps,
+            ):
+                k = k0 + 1                      # generator is 0-indexed
+                if k not in log_step_to_idx:
+                    continue
+                self._score_emitted_frame(
+                    k, log_step_to_idx[k], x_k, batch_ics, wrapper
+                )
+            return
+
         traj = self.scheduler.sample_rollout(
             model,
             init_y,
@@ -1074,32 +1174,73 @@ class DiffusionRolloutValidator:
         )
         # traj is (B*E, horizon, C, H, W) of packed flat channels.
 
-        # Score each requested log_step against the dataset frame at t+k.
+        # Score each requested log_step against the truth for t+k.
         for k in range(1, self.horizon + 1):
             if k not in log_step_to_idx:
                 continue
-            m_idx = log_step_to_idx[k]
-            x_k = traj[:, k - 1]
-            if self.frame_transform is not None:
-                # e.g. strip the ocean tail and downscale to the scoring
-                # grid; the transformed frame is unpacked by unpack_wrapper.
-                x_k = self.frame_transform(x_k)
-            _unpack = self.unpack_wrapper if self.unpack_wrapper is not None else wrapper
-            unpacked = _unpack.unpack_state(x_k)
-            target = self._to_device(
-                self._stack([t + k * self.step_size for t in batch_ics])
+            self._score_emitted_frame(
+                k, log_step_to_idx[k], traj[:, k - 1], batch_ics, wrapper
             )
-            self._score_step(m_idx, unpacked["surface_in"], target["surface_in"], "surface")
-            if self.has_upper_air and "upper_air_in" in unpacked:
-                self._score_step(
-                    m_idx, unpacked["upper_air_in"], target["upper_air_in"], "upper_air"
-                )
-            if self.has_diagnostic and "diagnostic" in unpacked and "diagnostic" in target:
-                self._score_step(
-                    m_idx, unpacked["diagnostic"], target["diagnostic"], "diagnostic"
-                )
-            if self.on_frame_scored is not None:
-                self.on_frame_scored(k)
+
+    def _truth_for_frame(
+        self, k: int, batch_ics: list[int]
+    ) -> dict[str, torch.Tensor]:
+        """Normalized truth for emitted frame ``k``, on the SCORED grid.
+
+        ``constant_truth`` (the amip_v2 obs climatology) makes the truth
+        frame-INVARIANT, which is what allows a 180x360 bias evaluation to be
+        driven from a store that only holds 45x90. It is exact for the
+        statistic that matters, because
+
+            mean_t(pred) - obs  ==  mean_t(pred - obs)
+
+        so ``ClimatologyScorer``'s ``{kind}_bias`` map is still precisely
+        ``pred_time_mean - obs_climatology`` and ``compute_headline_bias``
+        needs no change.
+
+        Note this is only safe here, in the WINDOW path: ``_rollout_window``
+        uses the ``t + k`` fetch solely for scoring, whereas
+        ``_rollout_single_step`` also advances its boundary/calendar from that
+        same frame — swapping in a constant there would freeze the forcings.
+
+        Under constant truth the ``rmse_step*`` block means RMSE-vs-CLIMATOLOGY
+        rather than skill; callers echo ``truth_source`` so a saved result is
+        never ambiguous about which it is.
+        """
+        if self.constant_truth is not None:
+            return self.constant_truth
+        return self._to_device(
+            self._stack([t + k * self.step_size for t in batch_ics])
+        )
+
+    def _score_emitted_frame(
+        self, k: int, m_idx: int, x_k: torch.Tensor, batch_ics: list[int], wrapper
+    ) -> None:
+        """Transform, unpack and score one emitted frame.
+
+        Factored out so the materialized and streaming rollout paths cannot
+        drift apart — they must score identically, and a divergence here would
+        show up only as a quiet numerical difference between two runs that
+        claim to be the same protocol.
+        """
+        if self.frame_transform is not None:
+            # e.g. strip the ocean tail and downscale to the scoring grid; the
+            # transformed frame is unpacked by unpack_wrapper.
+            x_k = self.frame_transform(x_k)
+        _unpack = self.unpack_wrapper if self.unpack_wrapper is not None else wrapper
+        unpacked = _unpack.unpack_state(x_k)
+        target = self._truth_for_frame(k, batch_ics)
+        self._score_step(m_idx, unpacked["surface_in"], target["surface_in"], "surface")
+        if self.has_upper_air and "upper_air_in" in unpacked:
+            self._score_step(
+                m_idx, unpacked["upper_air_in"], target["upper_air_in"], "upper_air"
+            )
+        if self.has_diagnostic and "diagnostic" in unpacked and "diagnostic" in target:
+            self._score_step(
+                m_idx, unpacked["diagnostic"], target["diagnostic"], "diagnostic"
+            )
+        if self.on_frame_scored is not None:
+            self.on_frame_scored(k)
 
     # ------------------------------------------------------------------ #
     # Finalize.
