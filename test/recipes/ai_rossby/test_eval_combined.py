@@ -637,3 +637,192 @@ def test_headline_bias_accepts_explicit_weights():
     # a uniform bias reduces to exactly 1.0 under ANY normalized weighting
     assert flat["t2m"]["mean_bias"] == pytest.approx(1.0, rel=1e-6)
     assert weighted["t2m"]["mean_bias"] == pytest.approx(1.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# init_downsample_factor must be DERIVED from the two grids
+# ---------------------------------------------------------------------------
+# Upstream's protocol drives the cascade from the FULL-RES store, so the
+# factor is the downscaler's own. Driven from a store already at the
+# forecaster's grid -- which is the only AMIP store Polaris holds -- any
+# downsampling is wrong: an 11x22 window reached a 45x90 forecaster and died
+# inside input_embed with "Expected size 11 but got size 45". The validator's
+# `<= 1 means off` guard is necessary but not sufficient; the suite must not
+# ASK for 4 in the first place.
+
+
+def _resolve_factor(store_h, fc_h, explicit=None):
+    """The suite's derivation, mirrored so it can be unit-tested without
+    building two real wrappers and a Hydra config."""
+    if explicit is not None:
+        return int(explicit)
+    if store_h > fc_h and fc_h > 0 and store_h % fc_h == 0:
+        return store_h // fc_h
+    return 1
+
+
+def test_full_res_store_downsamples_by_the_grid_ratio():
+    """Upstream's topology: 180x360 store, 45x90 forecaster -> factor 4."""
+    assert _resolve_factor(180, 45) == 4
+
+
+def test_coarse_store_does_not_downsample():
+    """Polaris's topology: the store IS the forecaster's grid -> factor 1."""
+    assert _resolve_factor(45, 45) == 1
+
+
+def test_a_finer_forecaster_than_the_store_does_not_upsample():
+    """Guard the nonsensical direction rather than producing a fraction."""
+    assert _resolve_factor(45, 180) == 1
+
+
+def test_non_integer_ratio_falls_back_to_one():
+    assert _resolve_factor(100, 45) == 1
+
+
+def test_explicit_override_still_wins():
+    assert _resolve_factor(45, 45, explicit=4) == 4
+    assert _resolve_factor(180, 45, explicit=1) == 1
+
+
+def test_validator_treats_the_derived_one_as_off():
+    """End to end: factor 1 from the derivation must reach the validator as
+    None, so no downsampling code runs at all."""
+    sched = _EchoWithOceanTailScheduler(window_size=3)
+    v = DiffusionRolloutValidator(
+        _ConstFieldDataset(H=8, W=8),
+        wrapper=_StubWrapper(),
+        inference_scheduler=sched,
+        log_steps=[1], device=torch.device("cpu"), horizon=1,
+        max_initial_conditions=1, batch_size=1, ic_stride=1,
+        frame_transform=_upsample_transform(sched, 2, []),
+        unpack_wrapper=_DeclaredResDownscalerWrapper(16, 16),
+        init_downsample_factor=_resolve_factor(8, 8),
+    )
+    assert v.init_downsample_factor is None
+
+
+# ---------------------------------------------------------------------------
+# Collective inputs must be CONTIGUOUS (member-split at local_E == 1)
+# ---------------------------------------------------------------------------
+# NCCL raises "ValueError: Tensors must be contiguous" on a strided input.
+# `upper_air_in` arrives non-contiguous because _unflatten_upper_air_v2 ends in
+# `transpose(-4,-3).flip(-3)`, and the E==1 branch's bare `.clone()` PRESERVED
+# those strides. It only bites when local_ensemble_size == 1 -- the
+# 1-member-per-GPU geometry (ensemble_size == world_size) -- because the
+# local_E > 1 branch's `.mean(dim=1)` allocates a fresh contiguous result.
+# Cost an 8-way 16-node job 4 minutes in.
+
+
+def _recording_dist(seen, strict=True):
+    """A stand-in for torch.distributed that records contiguity and, like NCCL,
+    REFUSES a strided input."""
+
+    class _D:
+        ReduceOp = torch.distributed.ReduceOp
+        is_available = staticmethod(lambda: True)
+        is_initialized = staticmethod(lambda: True)
+        get_rank = staticmethod(lambda: 0)
+        get_world_size = staticmethod(lambda: 1)
+
+        @staticmethod
+        def all_reduce(t, op=None):
+            seen.append(t.is_contiguous())
+            if strict and not t.is_contiguous():
+                raise ValueError("Tensors must be contiguous")
+
+    return _D
+
+
+def _mutating_dist():
+    """all_reduce is IN-PLACE, as NCCL's is."""
+
+    class _D:
+        ReduceOp = torch.distributed.ReduceOp
+        is_available = staticmethod(lambda: True)
+        is_initialized = staticmethod(lambda: True)
+        get_rank = staticmethod(lambda: 0)
+        get_world_size = staticmethod(lambda: 1)
+
+        @staticmethod
+        def all_reduce(t, op=None):
+            t.add_(100.0)
+
+    return _D
+
+
+def _member_split_drive(world, local_e):
+    """A drive with member_split forced on, without needing a process group."""
+    d = DiffusionRolloutValidator(
+        _ConstFieldDataset(H=8, W=8),
+        wrapper=_StubWrapper(),
+        inference_scheduler=_generator_echo(),
+        log_steps=[1], device=torch.device("cpu"), horizon=1,
+        max_initial_conditions=1, batch_size=1, ic_stride=1,
+    )
+    d.member_split = True
+    d._world_size = world
+    d.local_ensemble_size = local_e
+    d.ensemble_size = world * local_e
+    return d
+
+
+def _noncontiguous_upper_air(B=1, nvar=5, nlev=4, H=8, W=8):
+    """Exactly _unflatten_upper_air_v2's tail, which is what goes to NCCL."""
+    flat = torch.randn(B, nvar * nlev, H, W)
+    ua = flat.reshape(B, nlev, nvar, H, W).transpose(-4, -3).flip(-3)
+    assert not ua.is_contiguous(), "fixture must be non-contiguous to be a test"
+    return ua
+
+
+def test_ensemble_mean_input_is_contiguous_at_local_E_one(monkeypatch):
+    """The exact crash: local_E == 1 + a strided upper-air tensor."""
+    import validate_diffusion as vd
+
+    seen: list[bool] = []
+
+    d = _member_split_drive(world=8, local_e=1)      # build BEFORE patching
+    monkeypatch.setattr(vd, "dist", _recording_dist(seen))
+    out = d._cross_rank_ensemble_mean(_noncontiguous_upper_air())
+    assert seen == [True], "all_reduce received a non-contiguous tensor"
+    assert out.is_contiguous()
+
+
+def test_ensemble_mean_still_copies_so_the_rollout_is_not_corrupted(monkeypatch):
+    """`.contiguous()` would be a no-op on contiguous input and reduce the LIVE
+    rollout state in place. The clone must always copy."""
+    import validate_diffusion as vd
+
+    d = _member_split_drive(world=2, local_e=1)
+    monkeypatch.setattr(vd, "dist", _mutating_dist())
+    x = torch.zeros(1, 6, 8, 8)                 # already contiguous
+    before = x.clone()
+    d._cross_rank_ensemble_mean(x)
+    assert torch.equal(x, before), "the marching state was mutated in place"
+
+
+def test_variance_collective_input_is_contiguous(monkeypatch):
+    import validate_diffusion as vd
+
+    seen: list[bool] = []
+
+    d = _member_split_drive(world=8, local_e=1)
+    monkeypatch.setattr(vd, "dist", _recording_dist(seen))
+    ua = _noncontiguous_upper_air()
+    mean = ua.clone(memory_format=torch.contiguous_format)
+    d._cross_rank_ensemble_var(ua, mean)
+    assert seen == [True]
+
+
+def test_local_E_greater_than_one_was_never_affected(monkeypatch):
+    """Why this hid: the mean(dim=1) branch allocates fresh."""
+    import validate_diffusion as vd
+
+    seen: list[bool] = []
+
+    d = _member_split_drive(world=2, local_e=4)
+    monkeypatch.setattr(vd, "dist", _recording_dist(seen, strict=False))
+    flat = torch.randn(4, 20, 8, 8)
+    ua = flat.reshape(4, 4, 5, 8, 8).transpose(-4, -3).flip(-3)
+    d._cross_rank_ensemble_mean(ua)
+    assert seen == [True]

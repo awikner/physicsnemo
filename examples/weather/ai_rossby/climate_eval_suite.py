@@ -1332,6 +1332,42 @@ def main(cfg) -> None:
         downscaler, d_sched = _build_stage(
             combined_spec.downscaler, device=dist.device, log=log
         )
+        # EMA for the FORECASTER. rollout._build_stage loads a bare .mdlus,
+        # which carries the LIVE weights -- the EMA shadow lives in
+        # metadata["ema"] of the sibling checkpoint.0.<epoch>.pt. Without this
+        # the combined path silently scored different weights from the
+        # single-model path, and results["config"]["weights_used"] came out
+        # EMPTY (found when the smoke's NetCDF export had a blank attr).
+        # The downscaler is a frozen upstream artifact with no sibling
+        # checkpoint, so it stays raw -- recorded separately rather than
+        # implied.
+        f_use_ema = bool(eval_cfg.get("use_ema", True))
+        f_weights = "raw"
+        if f_use_ema:
+            from inference import _apply_ema_weights
+
+            f_path = Path(_resolve_path(str(combined_spec.forecaster.checkpoint)))
+            stem = f_path.name.split(".")
+            idx = stem[-2] if len(stem) >= 3 else None
+            sib = f_path.parent / f"checkpoint.0.{idx}.pt"
+            if sib.exists():
+                blob = torch.load(sib, map_location=dist.device, weights_only=False)
+                meta = (blob.get("metadata") or {}) if isinstance(blob, dict) else {}
+                applied = _apply_ema_weights(forecaster, meta.get("ema"), logger=log)
+                f_weights = "ema" if applied else "raw_ema_unavailable"
+            else:
+                log.warning(
+                    f"use_ema=True but no sibling {sib.name} beside "
+                    f"{f_path.name}; forecaster stays on raw weights"
+                )
+                f_weights = "raw_ema_unavailable"
+            forecaster.eval()
+        log.info(
+            f"combined weights: forecaster={f_weights} "
+            f"(epoch {idx if f_use_ema else '?'}), downscaler=raw (frozen upstream)"
+        )
+        combined_weights_used = f_weights
+
         adopt_ocean_contract(f_sched, forecaster)
         combined = CombinedModule(
             forecaster=forecaster,
@@ -1358,12 +1394,28 @@ def main(cfg) -> None:
             return _c._downscale(_s.strip_ocean(x), num_steps=_n)
 
         unpack_wrapper = downscaler
-        # The forecaster runs at the coarse grid but the drive's dataset is
-        # the full-res store: downsample the oracle init window's STATE by
-        # the downscaler's own factor (the coarse store's build operator).
-        init_downsample_factor = int(
-            eval_cfg.get("init_downsample_factor", None)
-            or getattr(downscaler, "downsample_factor", 4)
+        # Downsample the oracle init window's STATE only when the drive store
+        # is at a FINER grid than the forecaster wants. Upstream's protocol
+        # drives from the full-res store, where the factor is the downscaler's
+        # own (the coarse store's build operator) -- but driven from a store
+        # that is ALREADY at the forecaster's grid (Polaris holds only the
+        # coarse 45x90 one) any downsampling is wrong: it fed an 11x22 window
+        # to a 45x90 forecaster and died inside input_embed with
+        # "Expected size 11 but got size 45". Derived from the two grids rather
+        # than assumed, with the explicit override still winning.
+        _store_h = int(raw_ds[0]["surface_in"].shape[-2])
+        _fc_res = getattr(forecaster, "horizontal_resolution", None)
+        _fc_h = int(tuple(_fc_res)[0]) if _fc_res is not None else _store_h
+        _explicit = eval_cfg.get("init_downsample_factor", None)
+        if _explicit is not None:
+            init_downsample_factor = int(_explicit)
+        elif _store_h > _fc_h and _fc_h > 0 and _store_h % _fc_h == 0:
+            init_downsample_factor = _store_h // _fc_h
+        else:
+            init_downsample_factor = 1
+        log.info(
+            f"init_downsample_factor={init_downsample_factor} "
+            f"(store {_store_h} rows, forecaster {_fc_h} rows)"
         )
         if getattr(raw_ds, "forcing_pipeline", None) is not None:
             raw_ds.forcing_pipeline.assert_matches(
@@ -1530,7 +1582,16 @@ def main(cfg) -> None:
                 # Per-member time-means -> an error bar on the headline. Only
                 # meaningful with an ensemble; costs local_E x the mean
                 # accumulator (~78 MB per member at 180x360).
-                track_members=bool(block.get("track_members", False))
+                # Read from EITHER block: `block` is the bias block when
+                # climatology.enabled is False, and a caller who asked for
+                # per-member means on the climatology block would otherwise
+                # get them silently dropped -- which is exactly what happened
+                # to the first Campaign A smoke (member_spread absent, so the
+                # headline had no error bar).
+                track_members=(
+                    bool(clim_cfg.get("track_members", False) if clim_cfg else False)
+                    or bool(bias_cfg.get("track_members", False) if bias_cfg else False)
+                )
                 and ensemble_size > 1,
                 lat_weights=eval_lat_weights,
             )
@@ -1730,6 +1791,14 @@ def main(cfg) -> None:
             "init_downsample_factor": init_downsample_factor,
             # Under obs_climatology the rmse_* block is RMSE vs CLIMATOLOGY,
             # not skill. Recorded so a saved .pt is never ambiguous.
+            "weights_used": (
+                combined_weights_used if combined_spec is not None
+                else weights_prov["weights_used"]
+            ),
+            "downscaler_weights_used": (
+                "raw (frozen upstream artifact, no EMA sibling)"
+                if combined_spec is not None else None
+            ),
             "truth_source": truth_source,
             "obs_climatology_dir": str(eval_cfg.get("obs_climatology_dir", "") or ""),
             "obs_climatology_meta": obs_meta,

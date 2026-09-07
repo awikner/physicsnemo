@@ -814,7 +814,22 @@ class DiffusionRolloutValidator:
             # all_reduce is in-place and the E==1 "mean" is the input itself,
             # which is a live VIEW of the marching rollout state — reducing it
             # in place would corrupt the trajectory on every rank.
-            pred_mean = pred_ensemble.clone()
+            #
+            # ``memory_format=contiguous_format`` is load-bearing, not tidiness:
+            # a bare ``.clone()`` PRESERVES the source strides, and
+            # ``upper_air_in`` arrives non-contiguous because
+            # ``_unflatten_upper_air_v2`` ends in ``transpose(-4,-3).flip(-3)``.
+            # NCCL then refuses it with "ValueError: Tensors must be
+            # contiguous" — which only bites at local_E == 1, since the
+            # local_E > 1 branch's ``.mean(dim=1)`` allocates a fresh
+            # contiguous result. That is exactly the 1-member-per-GPU geometry
+            # (ensemble_size == world_size), so it stayed hidden until then.
+            #
+            # ``.contiguous()`` would NOT do: on an already-contiguous input it
+            # is a no-op returning the SAME tensor, reintroducing the in-place
+            # corruption this clone exists to prevent. clone(contiguous_format)
+            # always copies AND guarantees the layout.
+            pred_mean = pred_ensemble.clone(memory_format=torch.contiguous_format)
         else:
             return pred_ensemble
         if self.member_split:
@@ -839,6 +854,12 @@ class DiffusionRolloutValidator:
         )
         sq = dev.pow(2).sum(dim=1)
         if self.member_split:
+            # A reduction allocates a fresh contiguous tensor today, so this is
+            # belt-and-braces — but NCCL's contiguity requirement is not
+            # obvious from the call site, and the mean path above shipped a
+            # crash for exactly this reason.
+            if not sq.is_contiguous():
+                sq = sq.contiguous()
             dist.all_reduce(sq, op=dist.ReduceOp.SUM)
         return sq / float(self.ensemble_size)
 

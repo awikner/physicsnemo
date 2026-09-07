@@ -848,6 +848,9 @@ def _make_muon_optimizer(model: torch.nn.Module, cfg: Any) -> torch.optim.Optimi
     mult = getattr(cfg, "muon_lr_multiplier", None)
     if mult is not None:
         muon_kwargs["muon_lr_multiplier"] = float(mult)
+    mom = getattr(cfg, "muon_momentum", None)
+    if mom is not None:
+        muon_kwargs["muon_momentum"] = float(mom)
     param_groups = model.muon_param_groups(**muon_kwargs)
     return MuonWithAuxAdam(param_groups)
 
@@ -942,8 +945,29 @@ def make_scheduler(
             end_factor=1.0,
             total_iters=warmup_steps,
         )
+        # The cosine horizon. Default: the stage's own length. But a chained
+        # run sets num_epochs = min(target, done + 2) PER LINK, so the default
+        # would give link 1 a 2-epoch cosine and link 2 a 4-epoch one -- the
+        # schedule would change shape at every boundary, and a 4-epoch TEST of
+        # a 24-epoch recipe would anneal to the floor by epoch 4 instead of
+        # sampling the first 4 epochs of the real schedule. cosine_total_epochs
+        # pins the horizon so every link (and the test) runs the same curve.
+        total_for_cosine = total_steps
+        cte = getattr(cfg, "cosine_total_epochs", None)
+        if cte is not None:
+            if steps_per_epoch is None:
+                raise ValueError(
+                    "scheduler.cosine_total_epochs needs steps_per_epoch"
+                )
+            total_for_cosine = int(round(float(cte) * int(steps_per_epoch)))
+            if total_for_cosine <= warmup_steps:
+                raise ValueError(
+                    f"cosine_total_epochs={cte} gives {total_for_cosine} steps, "
+                    f"not more than the {warmup_steps}-step warmup"
+                )
         cosine = CosineAnnealingLR(
-            optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=eta_min
+            optimizer, T_max=max(1, total_for_cosine - warmup_steps),
+            eta_min=eta_min,
         )
         return SequentialLR(
             optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]

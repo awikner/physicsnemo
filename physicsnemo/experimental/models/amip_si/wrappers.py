@@ -208,6 +208,7 @@ def _muon_groups(
     weight_decay: float,
     muon_lr_multiplier: float,
     adam_betas: tuple[float, float],
+    muon_momentum: float = 0.95,
 ) -> list[dict]:
     """Assemble the two-group list consumed by ``muon.MuonWithAuxAdam``.
 
@@ -221,6 +222,13 @@ def _muon_groups(
             use_muon=True,
             lr=lr * muon_lr_multiplier,
             weight_decay=weight_decay,
+            # Nesterov-momentum beta for the orthogonalized update. The package
+            # default (0.95) is a ~20-step averaging window, tuned for small
+            # batches where the extra noise-averaging earns its lag. At global
+            # batch 40 -- ~7x the measured gradient noise scale (B_noise ~ 6)
+            # -- each gradient is already clean and the window is redundant
+            # averaging that only adds lag, so large-batch runs want it lower.
+            momentum=muon_momentum,
         ),
         dict(
             params=adamw_params,
@@ -495,6 +503,7 @@ class AmipDiTWrapper(_PNeMoModule):
         weight_decay: float = 0.01,
         muon_lr_multiplier: float = 10.0,
         adam_betas: tuple[float, float] = (0.9, 0.95),
+        muon_momentum: float = 0.95,
     ) -> list[dict]:
         r"""Split :class:`AmipDiT` parameters into Muon vs. aux-AdamW groups.
 
@@ -532,6 +541,7 @@ class AmipDiTWrapper(_PNeMoModule):
             weight_decay=weight_decay,
             muon_lr_multiplier=muon_lr_multiplier,
             adam_betas=adam_betas,
+            muon_momentum=muon_momentum,
         )
 
 
@@ -943,6 +953,7 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         weight_decay: float = 0.01,
         muon_lr_multiplier: float = 10.0,
         adam_betas: tuple[float, float] = (0.9, 0.95),
+        muon_momentum: float = 0.95,
     ) -> list[dict]:
         r"""Split :class:`RollingDiT` parameters into Muon vs. aux-AdamW groups.
 
@@ -1006,6 +1017,7 @@ class RollingDiTWrapper(_PNeMoModule, _RollingPackUnpackMixin):
             weight_decay=weight_decay,
             muon_lr_multiplier=muon_lr_multiplier,
             adam_betas=adam_betas,
+            muon_momentum=muon_momentum,
         )
 
 
@@ -1094,6 +1106,7 @@ class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
         weight_decay: float = 0.01,
         muon_lr_multiplier: float = 10.0,
         adam_betas: tuple[float, float] = (0.9, 0.95),
+        muon_momentum: float = 0.95,
     ) -> list[dict]:
         r"""Split :class:`ERDM` (UNet) parameters into Muon vs. aux-AdamW groups.
 
@@ -1144,6 +1157,7 @@ class ERDMWrapper(_PNeMoModule, _RollingPackUnpackMixin):
             weight_decay=weight_decay,
             muon_lr_multiplier=muon_lr_multiplier,
             adam_betas=adam_betas,
+            muon_momentum=muon_momentum,
         )
 
 
