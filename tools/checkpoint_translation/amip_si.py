@@ -865,7 +865,15 @@ def build_target_wrapper(
         with open(model_yaml) as fh:
             cfg = yaml.safe_load(fh)
         cls_name = _resolve_target_wrapper(cfg, target_class)
-        for k in ("name", "module", "target", "model_type"):
+        # Strip the SAME identification + recipe-metadata keys that
+        # train.build_model excludes (train._MODEL_CONFIG_ONLY_KEYS): the
+        # wrappers take channel/geometry args only. timedelta_hours in
+        # particular is a family property read by train_loop.model_step_rows,
+        # not a constructor arg -- omitting it here made every config that
+        # carries it (amip_erdm_sst_pred.yaml, amip_rsi_sst_pred.yaml, ...)
+        # raise "unexpected keyword argument 'timedelta_hours'". The earlier
+        # fancy conversions used the no-config (hparams) path and never hit it.
+        for k in ("name", "module", "target", "model_type", "timedelta_hours"):
             cfg.pop(k, None)
         return classes[cls_name](**cfg)
 
