@@ -421,6 +421,15 @@ AF_UNIX socket under TMPDIR, and the debug node's PBS TMPDIR
 that path past the 108-byte limit; the Phase 5 fine-tune script pins
 `TMPDIR=/tmp`.
 
+**Submitted 2026-09-09 15:50 UTC** (all resume from the bundle epoch-20
+pair copied into `checkpoints_ft5_{shrink,pf,pfshrink}_b40`): S22 job
+7601531 (one 2-epoch link); P22 jobs 7601532 -> 7601533 (one epoch per link,
+`depend=afterany`); PS22 jobs 7601534 -> 7601535; B20 baseline eval job
+7601536 (debug-scaling, `b20_base` + `b20_k145`). The chain's own epoch 22
+(control C22) is due from link 7599775. Evaluations of C22 / S22 / P22 /
+PS22 follow with `polaris_rsi_drift_eval_multi_phase5.pbs` on 10 nodes once
+the checkpoints exist.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
