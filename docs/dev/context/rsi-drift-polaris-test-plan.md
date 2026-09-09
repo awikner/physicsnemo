@@ -140,6 +140,37 @@ drop would mean rectification. The single-variant script
 (`polaris_rsi_drift_eval5yr_phase3.pbs`, `EVAL_CFG`/`EVAL_CKPT_DIR`/`EVAL_EPOCH`/
 `EVAL_HORIZON`/`EVAL_TAG`) is kept for the fine-tune's 1-year scoring.
 
+## Phase 3 results (2026-09-09, job 7601013, five 5-year 8-member runs; killed at the wall 80 s after the last variant had written its results)
+
+Shrinkage alpha of the 5-year time-mean bias map (`polaris_results.py alpha`),
+surface spread at step 10 / mean over steps 1097-1827, and the surface
+RMSE-vs-climatology plateau (mean over steps 100-1827):
+
+| run | alpha surface mean (skt / sp / t2m / q2m / u10 / v10) | alpha upper-air T / u / v / z / q | alpha diag mean | spread 10 / late | plateau |
+|---|---|---|---|---|---|
+| shipped e24 (2026-09-07 file) | 0.718 (0.681 / 0.490 / 0.683 / 0.718 / 0.864 / 0.871) | 0.751 / 0.845 / 0.901 / 0.757 / 0.807 | 0.758 | 0.110 / 0.244 | 612.5 |
+| base, re-run with the anchor trace | identical to 3 decimals | identical | 0.758 | 0.110 / 0.244 | 612.5 |
+| k120 (`fresh_noise_scale` 1.2) | 0.719 (0.682 / 0.490 / 0.684 / 0.720 / 0.865 / 0.874) | 0.751 / 0.845 / 0.901 / 0.757 / 0.809 | 0.757 | 0.115 / 0.246 | 611.7 |
+| k145 (1.45) | 0.717 (0.680 / 0.487 / 0.682 / 0.719 / 0.863 / 0.872) | 0.750 / 0.845 / 0.901 / 0.757 / 0.807 | 0.756 | 0.121 / 0.233 | 615.1 |
+| k145, seed 1 | 0.718 (0.680 / 0.487 / 0.683 / 0.719 / 0.864 / 0.873) | 0.751 / 0.845 / 0.901 / 0.757 / 0.807 | 0.756 | 0.121 / 0.228 | 616.8 |
+| k180 (1.8) | 0.713 (0.675 / 0.483 / 0.678 / 0.713 / 0.861 / 0.870) | 0.743 / 0.842 / 0.896 / 0.753 / 0.804 | 0.753 | 0.130 / 0.231 | 610.2 |
+| ERDM e24 | ~0.000 | ~0.01 | -0.005 | 0.136 / 0.303 | 64.5 |
+
+Five-year headline for k120 from its log: z500 bias-map RMSE 2061, t2m
+10.51 K, t2m mean bias -3.71 K (shipped: 2059 / 10.42 / -3.47).
+
+Readings. (i) The fresh-slot latent inflation changes the five-year
+shrinkage alpha by at most 0.006 on any channel and the drift plateau by
+< 1%: Layer A is fully eliminated as a cause of the time-mean collapse, with
+the cleanest possible control (the shipped-sampler re-run reproduces the
+2026-09-07 file to 3 decimals, and seed 1 agrees with seed 0 to 0.001).
+(ii) What it does change is the short-lead dispersion, monotonically in
+kappa (day-10 surface spread 0.110 -> 0.115 / 0.121 / 0.130, ERDM 0.136),
+with the late spread unchanged or slightly lower. So the report's Layer A
+fix is worth keeping for calibration at leads 5-20 and is irrelevant to the
+drift. (iii) The five-year runs carry per-rank anchor traces every 50 rolls
+(`trace_rank*.pt`) for any later look at the anchor chain over the full span.
+
 ## Phase 4 results (2026-09-09)
 
 Fine-tune job 7600874 (`polaris_rsi_ft_shrink_phase4.pbs`, `loss.anchor_shrink 0.3`,

@@ -71,9 +71,14 @@ win.
   ERDM's diagnostic spread) and leaves the drift plateau unchanged (1.8
   delays the run-away by ~5 days); `final_denoise` and `num_steps 4` both
   *accelerate* the run-away (day-30 surface RMSE 402 and 383 vs 219). Layer A
-  is the dispersion defect and nothing else; Phase 3 (5-year at 1.8) and
-  Phase 4 (pattern-shrink anchor fine-tune from epoch 24, paired with 1.45 at
-  inference) were launched on that basis.
+  is the dispersion defect and nothing else. **Phase 3 (five-year runs at
+  1.2 / 1.45 / 1.8, plus the shipped sampler re-run and a second seed):** the
+  five-year shrinkage alpha is unchanged to within 0.006 on every channel
+  (surface mean 0.718 -> 0.719 / 0.717 / 0.713) and the drift plateau to
+  within 1%, while the day-10 spread rises monotonically toward ERDM's
+  (0.110 -> 0.130 vs 0.136). Layer A is eliminated as a cause of the
+  time-mean collapse with a reproducibility check (the re-run matches the
+  original file to 3 decimals; seeds agree to 0.001).
 
 - **Phase 4 (training-side, first result):** one epoch of fine-tuning from
   epoch 24 with the pattern-shrink anchor augmentation (`loss.anchor_shrink
