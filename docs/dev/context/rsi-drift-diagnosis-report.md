@@ -27,6 +27,63 @@ run on the cluster; no checkpoint was available locally.
 
 ---
 
+## Addendum, 2026-09-09: what the Polaris runs established
+
+Section 4's tests were run on the epoch-24 checkpoint (plan, job scripts and
+full tables: [rsi-drift-polaris-test-plan](rsi-drift-polaris-test-plan.md)).
+Where the results below differ from the text of sections 0-7, the results
+win.
+
+- **Test 1 (teacher-forced readout):** the RSI anchor readout (slot 6,
+  t = 0.5) passes 99.6% of the truth's anomaly amplitude on-manifold (ERDM's
+  back-slot denoiser 99.1%); both heads are *above* the oracle Bayes floor
+  for the fast channels. There is no on-manifold contraction of the quantity
+  RSI copies forward, so the mis-scaled skip (A2) is a conditioning defect
+  and not a drift mechanism on the real model. New measurement: a uniform
+  offset added to the window is passed to the anchor readout at 0.66-0.86 by
+  RSI for the slow channels (0.77 mean) but only at 0.05-0.6 by ERDM (0.48
+  mean; 0.06 for surface pressure), because ERDM must re-derive the level
+  from forcing and the cleaner slots every roll while RSI's input *is* the
+  previous state. That is the formulation's restoring-force asymmetry,
+  quantified.
+- **Test 2 (cascade with anchor trace, 4 ICs, and the 8-member 300-day
+  traces):** the anchor chain holds ~0.93 of truth to roll 28, then the fast
+  channels' anchors collapse (0.78 at roll 28 -> 0.38 at roll 50 for
+  S_c > 0.15) while their emitted frames are still intact; the emitted frames
+  follow 10-15 rolls later; the slow channels (T, z, surface pressure) follow
+  by roll 70-100 through the network's cross-channel response. The
+  anchor/emitted ratio stays at 0.92-0.96 throughout (no compounding readout
+  shrink). ERDM stays at 1.00 at every roll and channel.
+- **Test 4 (multi-roll flush):** from a true window both models dissolve a
+  perturbation into weather chaos within ~24 rolls (RSI 1.5x slower); from the
+  free-run window at roll 30, ERDM erases a uniform offset by roll 18 while
+  RSI still carries ~1/3 of it and ~45% of a pattern shrink at roll 36. The
+  off-manifold loss of restoring force is real and RSI-specific.
+- **Test 6 (spread on disk):** the real RSI is under-dispersed vs ERDM by
+  only 12-19% at leads 5-20 (chaotic growth compensates the fresh-slot
+  deficit), 0.81x at long lead for the surface group and 1.5x *over* for the
+  upper air.
+- **Test 7 (alpha vs S_c):** Spearman 0.78 across 81 channels (fast channels
+  collapse most); the actual per-channel scale range is 0.017-0.40, not the
+  0.017-0.9 assumed in sections 0-3 and in the toys.
+- **Test 3 / 5 (inference-only variants, 300 days, 8 members):** fresh-slot
+  inflation 1.2 / 1.45 / 1.8 closes the day-10 spread deficit (1.45 matches
+  ERDM's diagnostic spread) and leaves the drift plateau unchanged (1.8
+  delays the run-away by ~5 days); `final_denoise` and `num_steps 4` both
+  *accelerate* the run-away (day-30 surface RMSE 402 and 383 vs 219). Layer A
+  is the dispersion defect and nothing else; Phase 3 (5-year at 1.8) and
+  Phase 4 (pattern-shrink anchor fine-tune from epoch 24, paired with 1.45 at
+  inference) were launched on that basis.
+
+Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
+no-restoring-force branch (brief H1 sharpened), entered when the fast
+channels' anchor chains go off-manifold at roll ~28, and it is a property of
+what the readout is asked to trust (the previous state) rather than of any
+per-roll bias; the training-side remedies in section 5 are the ones that
+address it.
+
+---
+
 ## 0. Verdict
 
 The RSI-vs-ERDM gap has **two layers**, and the brief's hypotheses conflated

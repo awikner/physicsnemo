@@ -481,7 +481,8 @@ def _summarize(name, res, names, groups):
         K = ratio.shape[0]
         s["emit_over_truth_astd_mean_over_channels"] = {
             str(k): float(ratio[k - 1].mean()) for k in (1, 2, 5, 10, 20, 30, 40, 60, 80, 100, 120) if k <= K}
-        s["emit_over_truth_astd_final_by_channel"] = {names[c]: float(ratio[-1, c]) for c in range(len(names))}
+        s["emit_over_truth_astd_final_by_channel"] = {
+            names[c]: float(ratio[-1, c]) for c in range(min(len(names), ratio.shape[1]))}
         if "trace" in res:
             tr = res["trace"]
             anc = tr["anchor_std"] / res["truth_std"][: tr["anchor_std"].shape[0]].clamp_min(1e-8)

@@ -165,8 +165,71 @@ the median channel (~0.99 at S_c ~0.1). There is no on-manifold amplitude
 contraction in the quantity RSI copies forward. Consequences: the mis-scaled
 skip is not producing a level bias on the training manifold (report Layer B,
 "on-manifold" branch: rejected); whatever drives the time-mean collapse
-switches on off-manifold (Tests 2 and 4 decide). Per-channel slot-6 values,
-level gain and shrink response follow when job 7600870 writes `summary.json`.
+switches on off-manifold (Tests 2 and 4 decide).
+
+**Test 1, full (job 7600870; teacher-forced true windows, 4 ICs, global
+t = 0.5, slot 6 = the anchor-producing readout; 151 state channels):**
+
+| quantity, slot 6 | RSI mean (lo / mid / hi S_c tercile) | ERDM mean (lo / mid / hi) |
+|---|---|---|
+| std(y_hat)/std(y) | 0.996 (0.999 / 0.996 / 0.992) | 0.991 (1.000 / 0.993 / 0.980) |
+| slope of y_hat on y | 0.991 (0.999 / 0.992 / 0.982) | 0.982 (0.998 / 0.986 / 0.962) |
+| level gain (readout mean response to a uniform +0.3 window offset) | **0.77** (0.84 / 0.84 / 0.62) | **0.48** (0.62 / 0.60 / 0.23) |
+| shrink response (readout anomaly std after x0.7 window shrink; 0.70 = pass-through, 1.0 = full restore) | 0.82 (0.80 / 0.81 / 0.83) | 0.82 (0.84 / 0.81 / 0.82) |
+
+Per channel, level gain at slot 6 (RSI / ERDM): surface pressure 0.66 /
+**0.06**, 2m temperature 0.74 / 0.38, T@500 0.79 / 0.58, z@500 0.82 / 0.55,
+q@850 0.86 / 0.63, v@250 0.65 / 0.04, 10m v 0.55 / 0.05, precipitation 0.42 /
+0.08, high cloud 0.47 / 0.17. Slot 1 (the emitted readout) has level gain
+1.00 and shrink response 0.70 for both models (pure pass-through, as it
+should be at tau = 11/12). Same picture at t = 0 (RSI slot-6 level gain 0.70,
+ERDM 0.46).
+
+Readings. (i) Amplitude: both heads are *above* the Bayes-floor expectation
+for the fast channels (precipitation std ratio 0.98 RSI / 0.94 ERDM against
+an oracle ~0.83): the trained readouts pass the window's pattern through
+rather than shrinking it. No contraction anywhere on-manifold. (ii) Level:
+this is the formulation asymmetry, measured. ERDM's back slot is sigma_max
+noise, so its denoiser must and does re-derive the absolute level from the
+forcings and the cleaner slots, and a uniform offset in the window is largely
+ignored (5% passed for surface pressure). RSI's anchor readout sees an input
+that *is* the previous state to within one increment, so an offset in the
+window is information and is passed on at 0.66-0.86 for the slow channels.
+That is Bayes-correct under RSI's training law (true anchors) and is exactly
+why an off-manifold level error has nothing to oppose it in RSI while ERDM
+resets it every roll. (iii) The x0.7 shrink is partly restored by both back
+slots (0.70 -> 0.82), ERDM a little more for surface pressure (0.985 vs
+0.814).
+
+**Test 2, cascade with truth normalization (job 7600870; 4 ICs, batch 2,
+120 rolls; emitted and anchor spatial-anomaly std / truth's, mean over 151
+channels; lo / mid / hi S_c terciles in parentheses):**
+
+| roll | RSI emitted | RSI anchor | RSI anchor, hi tercile | ERDM emitted |
+|---|---|---|---|---|
+| 1 | 1.000 | 0.995 | 0.973 | 1.000 |
+| 10 | 1.012 (1.00 / 1.02 / 1.02) | 0.968 | 0.958 | 0.997 |
+| 20 | 0.991 (0.98 / 1.03 / 0.96) | 0.958 | 0.917 | 0.992 |
+| 28 | 0.999 (1.01 / 1.06 / 0.93) | 0.937 | **0.778** | 1.003 |
+| 35 | 0.986 (1.09 / 1.05 / 0.81) | 0.917 | 0.680 | 0.995 |
+| 50 | 0.838 (1.13 / 0.94 / **0.45**) | 0.732 | 0.384 | 1.010 |
+| 70 | 0.731 (1.02 / 0.77 / 0.42) | 0.678 | 0.374 | 0.995 |
+| 100 | 0.768 (1.07 / 0.78 / 0.46) | 0.701 | 0.418 | 1.005 |
+| 120 | 0.725 (1.09 / 0.69 / 0.40) | 0.666 | 0.366 | 0.986 (1.00 / 0.98 / 0.98) |
+
+Per channel, RSI emitted / truth at rolls 28 / 50 / 100 / 120: precipitation
+0.99 / 0.27 / 0.28 / 0.25; v@250 0.80 / 0.28 / 0.28 / 0.25; 10m v 0.92 /
+0.40 / 0.35 / 0.33; 2m temperature 0.96 / 0.75 / 0.37 / 0.37; T@500 1.01 /
+0.69 / 0.38 / 0.39; z@500 0.84 / 0.59 / 0.32 / 0.33; q@850 0.94 / 0.53 /
+0.35 / 0.36; surface pressure 0.98 / 0.91 / 0.71 / 0.71. ERDM: every channel
+0.87-1.05 at every roll. The RSI window slots at roll 120 sit at 0.67-0.73
+of truth. Confirms the sweep-trace reading with an independent truth
+normalization and the ERDM control: latency to roll ~28, fast-channel
+anchors lead (0.78 at roll 28 while their emitted frames are still 0.93),
+the fast channels lose 55-75% of their amplitude by roll 50, the slow
+channels follow by roll 70-100, and the slow tercile's *instantaneous*
+anomaly std ends *above* truth (1.07-1.13) because the collapsed state has a
+different spatial structure, not a uniformly damped one.
 
 **Test 4 (multi-roll flush, 4 ICs x 2, 36 rolls; job 7600866).** Metric:
 `rms(perturbed - reference) / rms(perturbation)` per group, divided by the
