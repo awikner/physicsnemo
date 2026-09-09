@@ -249,6 +249,107 @@ have bought what it can for the pattern; the wider-shrink variant (0.6, job
 alpha is reachable this way. (iii) The short-range cost grows slightly with
 epochs (step-1 surface RMSE 9.6 -> 10.7).
 
+**Epoch 28 (four shrink-0.3 epochs, job 7601154 -> eval 7601399) and the
+shrink-0.6 variant at epoch 26 (job 7601155 -> eval 7601400), one year, 8
+members** (`polaris_results.py compare`; all fine-tunes resume from the shipped
+epoch-24 pair; "ep" counts fine-tune epochs after 24):
+
+| | shipped e24 (5 yr) | ft25 (0.3) | ft26 (0.3) | ft28 (0.3) | ft26 (0.6) | ERDM e24 (5 yr) |
+|---|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias (m2/s2) | 2059 / -973 | 1029 / -668 | **1030 / -568** | 1105 / **-478** | 1134 / -579 | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K) | 10.47 / -3.65 | 4.98 / -2.47 | **4.81** / -1.40 | 5.39 / **-0.99** | 5.66 / -2.04 | 0.21 / -0.01 |
+| t850 bias-map RMSE / mean bias (K) | 8.88 / -3.36 | 5.01 / -3.05 | 4.90 / -2.14 | 5.20 / -1.73 | 5.50 / -2.50 | 0.18 / -0.03 |
+| u250 bias-map RMSE / mean bias (m/s) | 10.47 / -0.78 | 7.67 / -2.15 | 8.06 / -2.23 | 8.12 / -1.98 | 8.89 / -3.94 | 0.70 / 0.21 |
+| surface RMSE-vs-clim, mean steps 100-365 | 611 | 397 | 350 | **336** | 345 | 63 |
+| upper-air RMSE-vs-clim, mean steps 100-365 | 519 | 478 | 395 | **370** | 389 | 453 |
+| surface RMSE-vs-clim at 30 / 50 / 85 / 200 / 365 | 219 / 487 / 619 / 614 / 609 | 139 / 270 / 337 / 408 / 413 | 128 / 326 / 328 / 347 / 358 | 136 / 373 / 344 / 333 / 339 | 242 / 384 / 346 / 347 / 347 | 75 / 70 / 53 / 76 / 86 |
+| surface spread at 10 / 100 / 365 | 0.110 / 0.255 / 0.241 | 0.127 / 0.236 / 0.209 | 0.126 / 0.249 / 0.208 | 0.121 / 0.240 / 0.210 | 0.115 / 0.227 / 0.209 | 0.136 / 0.310 / 0.312 |
+| alpha skt / sp / t2m / q2m / u10 / v10 | 0.68 / 0.49 / 0.68 / 0.72 / 0.86 / 0.87 | **0.21 / -0.08 / 0.20 / 0.34 / 0.40 / 0.60** | 0.27 / -0.02 / 0.26 / 0.36 / 0.42 / 0.65 | 0.32 / 0.05 / 0.32 / 0.39 / 0.49 / 0.69 | 0.32 / 0.06 / 0.31 / 0.44 / 0.51 / 0.72 | ~0 |
+| alpha upper-air T / u / v / z / q (mean over levels) | 0.75 / 0.84 / 0.90 / 0.76 / 0.81 | **0.43 / 0.48 / 0.68 / 0.31** / 0.64 | 0.48 / 0.51 / 0.69 / 0.34 / 0.49 | 0.48 / 0.55 / 0.70 / 0.41 / 0.52 | 0.47 / 0.55 / 0.75 / 0.42 / 0.31 | ~0 |
+| alpha diagnostics, mean | 0.76 | 0.41 | 0.44 | 0.48 | 0.49 | ~0 |
+| 10-day validation, surface RMSE step 1 / step 10 | 2.3 / 80.7 (e20) | 9.6 / 94.8 | 10.7 / 89.0 | 5.9 / 86.9 (ep27), 8.1 / 87.1 (ep28) | 11.7 / 148.7 (ep25), 10.5 / 138.8 (ep26) | |
+
+The 300-frame surface trace (steps 25..365 by 25): ft28 `115 373 349 335 333
+333 334 333 334 337 337 337 336 337`; ft26 (0.6) `150 384 358 344 345 347 349
+347 344 343 343 343 344 348`; ft26 (0.3) `111 326 344 319 346 348 350 347 349
+347 352 355 356 358`; shipped `173 487 604 620 621 626 627 614 608 614 605 607
+606 617`; ERDM `80 70 59 45 59 55 64 76 69 62 61 55 60 73`.
+
+**Anchor traces of the fine-tuned runs** (`RSI_TRACE_PATH`, member 0 of each
+one-year run and of the shipped five-year re-run; `polaris_results.py trace`;
+emitted-frame spatial-anomaly std relative to roll 1, mean over rolls
+100-365):
+
+| channel set | shipped e24 | ft25 (0.3) | ft26 (0.3) | ft28 (0.3) | ft26 (0.6) |
+|---|---|---|---|---|---|
+| surface + diagnostics (21) | 0.43 | 0.68 | 0.63 | 0.61 | 0.66 |
+| tropospheric T (125-1000 hPa) | 0.37 | 0.60 | 0.51 | 0.49 | 0.55 |
+| tropospheric z | 0.32 | 0.62 | 0.55 | 0.50 | 0.53 |
+| tropospheric q | 0.43 | 0.64 | 0.65 | 0.65 | 0.69 |
+| tropospheric u | 0.27 | 0.42 | 0.39 | 0.38 | 0.39 |
+| tropospheric v | 0.28 | 0.34 | 0.34 | 0.33 | 0.35 |
+| stratospheric T (5-100 hPa) | 3.40 | 0.63 | 0.46 | 0.40 | 0.42 |
+| stratospheric v | 1.44 | 0.54 | 0.47 | 0.48 | 0.48 |
+| stratospheric q | 1.81 | 13.2 | 13.8 | 14.4 | 16.8 |
+| first roll with tropospheric v below 0.7 | 34 | 44 | 46 | 38 | 37 |
+| anchor / emitted, same roll, rolls 100-365 | 0.95 | 0.88 | 0.89 | 0.87 | 0.88 |
+
+Per channel (emitted, rolls 28 / 50 / 100 / 200), shipped vs ft28: 2m
+temperature 0.95 / 0.75 / 0.40 / 0.37 vs 1.13 / 1.04 / 0.71 / 0.67; z@500 0.83 /
+0.59 / 0.37 / 0.31 vs 1.00 / 1.22 / 0.55 / 0.48; surface pressure 0.96 / 0.93 /
+0.71 / 0.71 vs 1.05 / 1.12 / 1.11 / 1.13; v@250 0.75 / 0.27 / 0.25 / 0.22 vs
+0.90 / 0.42 / 0.27 / 0.24; precipitation 1.06 / 0.28 / 0.25 / 0.30 vs 0.95 /
+0.40 / 0.29 / 0.36. The channel-mean |level change| of the emitted frame is
+0.06 (normalized units) at rolls 28-35 for ft28 against 0.16-0.19 for the
+shipped run, and the two meet at 0.20-0.22 after roll 100.
+
+Readings. (i) Four epochs of shrink 0.3 leave a plateau that is exactly flat
+(333-337 from day 100 to day 365) at 336, i.e. 50% of the excess over ERDM
+removed; the wider shrink range (0.4-1.0) at the same epoch count gives 345
+against 350, no gain, at a large short-range cost (surface RMSE-vs-clim 242
+vs 128 at day 30; 10-day validation step 10 of 139 vs 87-89). (ii) The level
+and the pattern respond differently to more epochs. The global-mean bias
+improves monotonically (t2m -3.65 -> -2.47 -> -1.40 -> -0.99 K; z500 -973 ->
+-668 -> -568 -> -478), but the pattern-shrinkage alpha bottomed after the
+first epoch and has crept back since (t2m 0.20 -> 0.26 -> 0.32, z 0.31 ->
+0.34 -> 0.41, u 0.48 -> 0.55; v flat at 0.68-0.70), so the bias-map RMSE,
+which combines both, is minimal at epoch 26 (z500 1030, t2m 4.81 K) and rises
+again at epoch 28 (1105, 5.39 K). The shrink-0.6 variant does not lower alpha
+either (t2m 0.31, z 0.42, v 0.75). The augmentation as designed has bought
+what it can for the pattern; the remaining alpha (~0.3 for the slow channels,
+~0.7 for the fast winds) is not reachable by more of it. (iii) The traces
+show why. The fine-tuned readout is now an amplifier (anchor/emitted 0.87-0.89
+against 0.95): the emitted amplitude holds at or above 1 to roll ~50 instead
+of ~28, and the late amplitude of the surface and slow upper-air channels is
+0.5-0.7 instead of 0.3-0.4 (surface pressure is now over-amplified at
+1.1-1.2). But the fast tropospheric winds still collapse to 0.33-0.39 (shipped
+0.27-0.28) and their onset moves only from roll 34 to 37-46: the fast-channel
+collapse is essentially untouched, which is the residual v alpha of ~0.7. The
+augmentation teaches the head to undo a uniform pattern shrink; the fast
+channels leave the manifold by decorrelating and smoothing, not by a uniform
+shrink, so the augmentation does not cover them. That is the case for the
+report's second training-side remedy, self-generated (rolled-out) anchors,
+which show the network the actual off-manifold structure. (iv) Side effect:
+stratospheric specific humidity (50-125 hPa, negligible physical variance) is
+over-amplified 5-70x by every fine-tuned head (shipped 2-6x), while the
+shipped run's stratospheric T and v blow-ups (3-7x) are cured. This is
+irrelevant to the tropospheric climate but shows that an un-shrinking readout
+amplifies wherever it cannot judge the amplitude; exclude channels with
+negligible increment scale from the augmentation (or cap the learned gain)
+before using it in production. The shrink-0.6 upper-air q alpha (0.31) is
+contaminated by this. (v) Best pattern-shrink checkpoint: epoch 25-26 at shrink
+0.3. The next lever is not more shrink epochs but self-generated anchors
+paired with the Layer A injection, plus a level-restoring term, as ranked in
+the report's section 5.
+
+**Status (2026-09-09 14:10 UTC): every run in this plan has been executed and
+logged** (Phase 0: Tests 6, 7; Phase 1: Tests 1, 2, 4; Phase 2: the 300-day
+sampler sweep; Phase 3: the five-year fan-out with a second seed; Phase 4:
+shrink-0.3 fine-tune epochs 25-28 and the shrink-0.6 variant to epoch 26,
+each scored over one year). Fetched artifacts live under the session
+scratchpad only; the `eval_suite.pt`, `trace_rank*.pt` and checkpoint files
+remain on Polaris under `$R/eval_bias*` and `$R/checkpoints_ft_shrink*_b40`.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show

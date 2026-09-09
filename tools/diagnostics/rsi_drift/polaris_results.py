@@ -13,6 +13,10 @@ anywhere the files have been copied to.
         --base eval_rsi_e24/eval_suite.pt --erdm eval_erdm_e24/eval_suite.pt \
         --variant k120=eval_sweep300_k120_e24/eval_suite.pt --variant k145=...
     python tools/diagnostics/rsi_drift/polaris_results.py probes --dir probes_e24
+    python tools/diagnostics/rsi_drift/polaris_results.py alpha --run ft25=eval_bias1yr_base_e25/eval_suite.pt
+    python tools/diagnostics/rsi_drift/polaris_results.py compare --run shipped=... --run ft28=...
+    python tools/diagnostics/rsi_drift/polaris_results.py trace --sigma sigma_c_sstpred153.pt \\
+        --names probes_e24/rsi/summary.json --run shipped=.../trace_rank0.pt --run ft28=...
 """
 
 from __future__ import annotations
@@ -189,6 +193,134 @@ def cmd_alpha(args):
             print("  headline scalars: " + ", ".join(f"{k}={v:.4g}" for k, v in list(flat.items())[:10]) if flat else "  headline: " + str({k: type(v).__name__ for k, v in list(h.items())[:6]}))
 
 
+# --------------------------------------------------------------------------- #
+# Side-by-side table of eval_suite.pt files (Phase 4 fine-tune comparison)
+# --------------------------------------------------------------------------- #
+def cmd_compare(args):
+    D = {}
+    for spec in args.run:
+        name, path = spec.split("=", 1)
+        if Path(path).exists():
+            D[name] = _load(path)
+        else:
+            print(f"(missing {path})")
+    names = list(D)
+    hi = args.horizon
+
+    def ra(d, k):
+        return d["rmse_acc"].get(k)
+
+    def f(v, nd=2):
+        return "-" if v is None else f"{v:.{nd}f}"
+
+    def mean_rng(d, g, lo=100):
+        v = [ra(d, f"rmse_step{s}_{g}") for s in range(lo, hi + 1)]
+        v = [x for x in v if x is not None]
+        return sum(v) / len(v) if v else None
+
+    def row(label, fn):
+        print(f"| {label} | " + " | ".join(fn(D[k]) for k in names) + " |")
+
+    print("| | " + " | ".join(names) + " |")
+    print("|---" * (len(names) + 1) + "|")
+    for key, nd in (("z500", 0), ("t2m", 2), ("t850", 2), ("u250", 2), ("u10m", 2), ("v10m", 2)):
+        row(f"{key} bias-map RMSE / mean bias",
+            lambda d, key=key, nd=nd: f"{f(d['headline'][key]['rmse_bias'], nd)} / {f(d['headline'][key]['mean_bias'], nd)}"
+            if key in (d.get("headline") or {}) else "-")
+    row(f"surface RMSE-vs-clim mean steps 100-{hi}", lambda d: f(mean_rng(d, "surface"), 0))
+    row(f"upper-air RMSE-vs-clim mean steps 100-{hi}", lambda d: f(mean_rng(d, "upper_air"), 0))
+    row("surface RMSE-vs-clim at 30/50/85/200/365", lambda d: " / ".join(f(ra(d, f"rmse_step{s}_surface"), 0) for s in (30, 50, 85, 200, 365)))
+    row("surface spread at 10/100/365", lambda d: " / ".join(f(ra(d, f"spread_step{s}_surface"), 3) for s in (10, 100, 365)))
+    A = {k: shrinkage_alpha(D[k]) for k in names}
+    print("| alpha skt/sp/t2m/q2m/u10/v10 | " + " | ".join(" / ".join(f"{float(A[k]['surface'][0][i]):.2f}" for i in range(6)) for k in names) + " |")
+    print("| alpha upper-air T/u/v/z/q (mean over levels) | " + " | ".join(" / ".join(f"{float(A[k]['upper_air'][0][v].mean()):.2f}" for v in range(5)) for k in names) + " |")
+    print("| alpha diagnostics mean | " + " | ".join(f"{float(A[k]['diagnostic'][0].mean()):.2f}" for k in names) + " |")
+    print("\nsurface RMSE-vs-clim trace (steps 25..365 by 25):")
+    for k in names:
+        print(f"  {k:18s} " + " ".join(f(ra(D[k], f"rmse_step{s}_surface"), 0) for s in range(25, 366, 25)))
+
+
+# --------------------------------------------------------------------------- #
+# Anchor / emitted amplitude traces (RSI_TRACE_PATH files written by rsi.py)
+# --------------------------------------------------------------------------- #
+STRAT = ("5", "7", "10", "20", "30", "50", "70", "100")
+TROP = ("125", "150", "175", "200", "250", "300", "400", "500", "600", "700", "800",
+        "850", "875", "900", "925", "950", "975", "1000")
+PICK = {"sp": "surface_pressure", "t2m": "2m_temperature", "v10": "10m_v_component_of_wind",
+        "prate": "PRATEsfc_24h", "hcc": "hcc_24h", "T850": "temperature@850",
+        "T500": "temperature@500", "z500": "geopotential@500", "u250": "u_component_of_wind@250",
+        "v250": "v_component_of_wind@250", "q850": "specific_humidity@850",
+        "q50": "specific_humidity@50", "T30": "temperature@30"}
+
+
+def cmd_trace(args):
+    T = {}
+    for spec in args.run:
+        name, path = spec.split("=", 1)
+        if Path(path).exists():
+            T[name] = _load(path)
+        else:
+            print(f"(missing {path})")
+    runs = list(T)
+    rolls = [1, 5, 10, 20, 28, 35, 50, 70, 85, 100, 150, 200, 300, 365]
+    lo, hi = args.late
+
+    def rel(r, key="emit_std"):
+        return T[r][key] / T[r]["emit_std"][0]
+
+    def line(r, x):
+        n = x.shape[0]
+        return f"{r:16s} " + " ".join(f"{x[k - 1].mean():5.2f}" if k <= n else "    -" for k in rolls)
+
+    C = T[runs[0]]["emit_std"].shape[1]
+    masks = {}
+    if args.sigma:
+        sig = _load(args.sigma)
+        sig = sig["sigma_c"] if isinstance(sig, dict) and "sigma_c" in sig else sig
+        sig = torch.as_tensor(sig).flatten().float()[:C]
+        q1, q2 = sig.quantile(1 / 3), sig.quantile(2 / 3)
+        masks = {"slow S_c": sig < q1, "mid": (sig >= q1) & (sig < q2), "fast S_c": sig >= q2}
+    for key in ("emit_std", "anchor_std"):
+        print(f"\n=== {key} relative to the roll-1 emitted std; mean over channels ===")
+        print(f"{'run':16s} " + " ".join(f"{k:>5}" for k in rolls))
+        for r in runs:
+            print(line(r, rel(r, key)))
+        for tn, m in masks.items():
+            print(f"  -- {tn} tercile")
+            for r in runs:
+                print("  " + line(r, rel(r, key)[:, m]))
+    print("\n=== anchor / emitted, same roll, mean over channels ===")
+    for r in runs:
+        print(line(r, T[r]["anchor_std"] / T[r]["emit_std"]))
+    print("\n=== mean over channels of |emitted spatial-mean change from roll 1| (normalized units) ===")
+    for r in runs:
+        print(line(r, (T[r]["emit_mean"] - T[r]["emit_mean"][0]).abs()))
+    if args.names:
+        names = json.loads(Path(args.names).read_text())
+        names = names["channel_names"] if isinstance(names, dict) else names
+        idx = {n: i for i, n in enumerate(names)}
+        print(f"\n=== emitted std rel. roll 1 at rolls 28/50/100/200/365 (where available) ===")
+        for k, n in PICK.items():
+            if n not in idx:
+                continue
+            i = idx[n]
+            print(f"  {k:6s} " + " | ".join(f"{r}: " + "/".join(f"{rel(r)[s - 1, i]:.2f}" for s in (28, 50, 100, 200, 365) if s <= rel(r).shape[0]) for r in runs))
+        for label, levs in (("troposphere 125-1000 hPa", TROP), ("stratosphere 5-100 hPa", STRAT)):
+            print(f"\n=== late (rolls {lo}-{hi}) emitted std rel. roll 1, {label}, per variable ===")
+            for var in ("temperature", "u_component_of_wind", "v_component_of_wind", "geopotential", "specific_humidity"):
+                ii = [idx[f"{var}@{p}"] for p in levs if f"{var}@{p}" in idx]
+                if ii:
+                    print(f"  {var:22s} " + "  ".join(f"{r}: {rel(r)[lo - 1:hi][:, ii].mean():.2f}" for r in runs))
+        print(f"\n=== late (rolls {lo}-{hi}) emitted std rel. roll 1, surface + diagnostic channels ===")
+        for r in runs:
+            print(f"  {r:16s} {rel(r)[lo - 1:hi][:, :21].mean():.2f}")
+        ii = [idx[f"v_component_of_wind@{p}"] for p in TROP if f"v_component_of_wind@{p}" in idx]
+        print("\n=== first roll where the tropospheric v-wind amplitude drops below 0.7 ===")
+        for r in runs:
+            x = rel(r)[:, ii].mean(1)
+            below = (x < 0.7).nonzero()
+            print(f"  {r:16s} roll {int(below[0]) + 1 if len(below) else '-'}")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -198,8 +330,17 @@ def main():
     b = sp.add_parser("probes"); b.add_argument("--dir", required=True)
     c = sp.add_parser("alpha"); c.add_argument("--run", action="append", required=True,
                                               help="name=path/to/eval_suite.pt (repeatable)")
+    d = sp.add_parser("compare"); d.add_argument("--run", action="append", required=True,
+                                                help="name=path/to/eval_suite.pt (repeatable)")
+    d.add_argument("--horizon", type=int, default=365)
+    e = sp.add_parser("trace"); e.add_argument("--run", action="append", required=True,
+                                              help="name=path/to/trace_rank0.pt (repeatable)")
+    e.add_argument("--sigma", help="sigma_c_sstpred153.pt for the S_c terciles")
+    e.add_argument("--names", help="probe summary.json (channel_names) for per-channel rows")
+    e.add_argument("--late", type=int, nargs=2, default=(100, 365), metavar=("LO", "HI"))
     args = ap.parse_args()
-    {"sweep": cmd_sweep, "probes": cmd_probes, "alpha": cmd_alpha}[args.cmd](args)
+    {"sweep": cmd_sweep, "probes": cmd_probes, "alpha": cmd_alpha,
+     "compare": cmd_compare, "trace": cmd_trace}[args.cmd](args)
 
 
 if __name__ == "__main__":

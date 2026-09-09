@@ -80,25 +80,41 @@ win.
   time-mean collapse with a reproducibility check (the re-run matches the
   original file to 3 decimals; seeds agree to 0.001).
 
-- **Phase 4 (training-side, first result):** one epoch of fine-tuning from
-  epoch 24 with the pattern-shrink anchor augmentation (`loss.anchor_shrink
-  0.3`, everything else the shipped recipe) roughly halves the one-year drift:
-  z500 bias-map RMSE 1029 vs ~1850-2059, t2m 4.98 K vs 9-10 K, surface
-  RMSE-vs-climatology plateau 397 vs 611 (ERDM 63); the shrinkage alpha falls
-  from 0.68 to 0.20 (2m temperature), 0.75 to 0.43 (upper-air T), 0.76 to
-  0.31 (geopotential) and surface pressure's collapse disappears, while the
-  fast v-winds improve least (0.87 to 0.6-0.7). Cost: step-1 surface RMSE 9.6
-  vs 2.3 (the head trusts its anchor less). The fresh-slot inflation on top
-  again changes the mean by nothing. The fine-tuned trace still creeps upward
-  after day 100, so more epochs, a wider shrink range and self-generated
-  anchors are the follow-ups (runs in progress; see the plan's results log).
+- **Phase 4 (training-side):** fine-tuning from epoch 24 with the
+  pattern-shrink anchor augmentation (`loss.anchor_shrink 0.3`, everything
+  else the shipped recipe) roughly halves the one-year drift and then
+  saturates. One epoch: z500 bias-map RMSE 1029 vs 2059, t2m 4.98 K vs 10.5 K,
+  surface RMSE-vs-climatology plateau 397 vs 611 (ERDM 63); the shrinkage
+  alpha falls from 0.68 to 0.20 (2m temperature), 0.75 to 0.43 (upper-air T),
+  0.76 to 0.31 (geopotential), surface pressure's collapse disappears, the
+  fast v-winds improve least (0.87 to 0.6-0.7). Four epochs: the plateau is
+  flat at 336 (half the excess over ERDM removed) and the global-mean bias
+  keeps improving (t2m -3.65 -> -0.99 K), but the pattern alpha bottomed
+  after the first epoch and creeps back (t2m 0.20 -> 0.32, z 0.31 -> 0.41),
+  so the bias-map RMSE is minimal at epoch 26 (z500 1030, t2m 4.81 K). A
+  wider shrink range (0.4-1.0) gains nothing (plateau 345 vs 350 at equal
+  epochs) and costs 10-day skill (validation step-10 surface RMSE 139 vs
+  87). The anchor traces explain the ceiling: the fine-tuned head amplifies
+  its anchor (anchor/emitted 0.88 vs 0.95) and holds the slow channels at
+  0.5-0.7 of their amplitude instead of 0.3-0.4, but the fast tropospheric
+  winds still collapse to 0.33-0.39 (shipped 0.27) with the onset moved only
+  from roll 34 to 37-46. The augmentation undoes a uniform pattern shrink;
+  the fast channels leave the manifold by decorrelating, which it does not
+  cover. Side effect: stratospheric specific humidity is over-amplified
+  5-70x by every fine-tuned head (exclude negligible-S_c channels from the
+  augmentation before production use). Cost: step-1 surface RMSE 6-11 vs
+  2.3. The fresh-slot inflation on top again changes the mean by nothing.
+  Best pattern-shrink checkpoint: epoch 25-26; the next lever is
+  self-generated anchors (section 5), not more shrink epochs.
 
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast
 channels' anchor chains go off-manifold at roll ~28, and it is a property of
 what the readout is asked to trust (the previous state) rather than of any
 per-roll bias; the training-side remedies in section 5 are the ones that
-address it.
+address it. Pattern-shrink augmentation alone removes half of the drift and
+plateaus; the fast-channel collapse that remains needs the network to see its
+own off-manifold anchors (self-generated-anchor fine-tuning).
 
 ---
 
@@ -417,9 +433,13 @@ Predictions are given so each test discriminates.
    pattern-shrink anchor augmentation `a <- <a> + s (a - <a>)`, s ~ U(0.7, 1),
    applied in `perturb_anchor` (best per compute in the toy; the only variant
    with a positive one-roll restoring force; the exact inference anchor law
-   is a shrink *plus* ~1 `S_c` of independent noise, so implement both legs);
+   is a shrink *plus* ~1 `S_c` of independent noise, so implement both legs)
+   -- run on Polaris: halves the drift within one epoch and then plateaus,
+   leaving the fast-wind collapse untouched (addendum, Phase 4);
    (b) self-generated-anchor fine-tune paired with the Layer A injection
-   (alone it introduced a -0.33 global-mean bias in the toy); (c) per-channel
+   (alone it introduced a -0.33 global-mean bias in the toy) -- the next run,
+   since it is the one that shows the network the decorrelated off-manifold
+   anchors the pattern-shrink augmentation cannot imitate; (c) per-channel
    preconditioning (A2 fix: evaluate `c_in`, `z_precond` and the H1 skip at
    `gamma * S_c`; reduces to the current code at `S_c = 1`, so the A1 parity
    tests still pass) - a retrain, never an inference swap; prediction:
