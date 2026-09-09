@@ -217,7 +217,71 @@ upper-air excess deserves a per-channel look in the cascade outputs.
 
 Inflating the fresh-slot latent by 1.2-1.8x leaves the 300-day collapse
 essentially unchanged (the trend with kappa is a few percent, within what
-member noise can do); `final_denoise` buys ~5%. Exactly the report's
-prediction for Layer A alone: the dispersion defect is not the time-mean
-drift. Trace-level comparison against the baseline's first 300 steps (spread,
-RMSE-vs-climatology) follows once the outputs are copied.
+member noise can do); `final_denoise` buys ~5% on the headline. Exactly the
+report's prediction for Layer A alone: the dispersion defect is not the
+time-mean drift.
+
+Trace-level comparison with the baseline's first 300 steps (`rmse_acc`,
+8 members; surface group, physical units, dominated by surface pressure):
+
+| step | base | ERDM | k120 | k145 | k180 | fd |
+|---|---|---|---|---|---|---|
+| spread 10 (surface / diagnostic) | 0.110 / 0.221 | 0.136 / 0.251 | 0.115 / 0.235 | 0.121 / 0.251 | 0.130 / 0.276 | 0.118 / 0.236 |
+| spread mean 100-300, ratio to base (sfc / ua / diag) | 1 | 1.22 / 0.65 / 1.04 | 1.00 / 0.97 / 0.99 | 1.00 / 0.97 / 0.99 | 1.04 / 1.03 / 1.04 | 1.02 / 0.94 / 0.98 |
+| RMSE-vs-clim, surface, step 30 | 219 | 75 | 202 | 190 | 149 | **402** |
+| step 50 | 487 | 70 | 479 | 471 | 426 | 517 |
+| step 85 | 619 | 53 | 621 | 611 | 596 | 616 |
+| step 100-300 mean, ratio to base | 1 | 0.10 | 1.00 | 1.00 | 0.99 | 1.04 |
+
+Readings. (i) The fresh-slot inflation does what Layer A says it does and
+nothing more: the day-10 spread deficit closes (at 1.45 the diagnostic
+spread equals ERDM's 0.251; at 1.8 the surface spread reaches ERDM's 0.13),
+while the long-lead spread (100-300) is unchanged, because the collapsed
+state sets it. (ii) The drift trace is untouched by kappa 1.2-1.45; kappa
+1.8 delays the run-away by ~5 days (day-30 149 vs 219) but reaches the same
+plateau (~600) by day 85. (iii) `final_denoise` makes the run-away arrive
+*earlier* (day-30 402 vs 219) and ends at a slightly higher plateau: reading
+the anchor at tau = 1/6, i.e. a cleaner conditional mean, accelerates the
+collapse, which is the direction the "chain of conditional means" mechanism
+predicts and the opposite of what would help. Layer A is confirmed as the
+dispersion defect and eliminated as the drift; the drift needs the
+training-side fix (Phase 4).
+
+**Test 2 from the sweep's anchor traces** (`RSI_TRACE_PATH`, 4 of the 8
+members of k120, 300 rolls; per-channel spatial-anomaly std relative to the
+roll-1 emitted frame, mean over the 151 state channels; k145/k180 agree to
+within 0.03):
+
+| roll | 1 | 5 | 10 | 20 | 28 | 35 | 50 | 70 | 85 | 100 | 200 | 300 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| emitted | 1.00 | 0.97 | 1.00 | 0.96 | 0.97 | 0.94 | 0.82 | 0.69 | 0.69 | 0.70 | 0.69 | 0.70 |
+| fresh-slot anchor | 0.98 | 0.97 | 0.93 | 0.92 | 0.91 | 0.86 | 0.69 | 0.64 | 0.64 | 0.63 | 0.64 | 0.64 |
+| anchor / emitted, same roll | 0.98 | 1.00 | 0.93 | 0.96 | 0.92 | 0.86 | 0.82 | 0.96 | 0.94 | 0.92 | 0.93 | 0.93 |
+
+By S_c tercile (low S < 0.058 / mid / high S > 0.15), emitted amplitude:
+roll 28: 0.95 / 1.07 / 0.90; roll 50: 0.99 / 1.03 / **0.44**; roll 100:
+0.87 / 0.83 / 0.41; roll 300: 0.88 / 0.80 / 0.41. Anchor at roll 28: 0.94 /
+1.02 / **0.77**. Per channel (emitted, rolls 28 / 50 / 100 / 300):
+precipitation 1.06 / 0.30 / 0.31 / 0.32; v@250 0.75 / 0.26 / 0.23 / 0.21;
+2m temperature 0.97 / 0.76 / 0.41 / 0.37; T@500 1.05 / 0.71 / 0.41 / 0.39;
+z@500 0.85 / 0.59 / 0.33 / 0.33; surface pressure 0.97 / 0.92 / 0.73 / 0.73.
+
+Readings. (i) The anchor chain does not decay geometrically from roll 1: it
+holds ~0.92 through roll 28 and then transitions in ~20 rolls, i.e. the
+latency-then-transition shape of the brief's trace, and the anchor leads the
+emitted frame by 10-15 rolls as predicted. (ii) The anchor/emitted ratio is
+flat at 0.92-0.96 on- and off-manifold: the readout does not shrink more per
+roll as the state collapses, so a compounding readout contraction (the skip
+mechanism) is ruled out directly. (iii) The transition starts in the fast
+channels: at roll 28 the anchors of v-wind, precipitation and cloud are
+already at 0.6-0.8 while their emitted frames are intact, and by roll 50
+those channels have lost 60-75% of their amplitude while the slow channels
+have lost nothing; the slow channels (T, z, surface pressure) follow between
+rolls 50 and 100 through the network's cross-channel response. This is the
+composite chain of the report: the Layer A anchor-chain deficit (timescale
+2/S_c^2 ~ 15-25 rolls for S_c 0.3-0.4) takes the fast channels off-manifold
+first, and off-manifold the network has no restoring force (Test 4), so the
+whole coupled state collapses. (iv) The instantaneous pattern amplitude
+plateaus at 0.70 (0.88 slow / 0.42 fast); the brief's time-mean amplitude of
+0.15-0.45 is lower because the time mean also loses the part of the pattern
+that the weather variance carries.
