@@ -125,11 +125,20 @@ partial saves every 100 frames, per-rank anchor traces every 10 rolls:
 | fd | `final_denoise true` | +5-9% amplitude, alpha at most ~15% lower; +33% cost |
 | ns4 | `num_steps 4` | little change (oracle: +3-8 pp spread) |
 
-## Phase 3: five-year run of the best variant (`polaris_rsi_drift_eval5yr_phase3.pbs`, `EVAL_CFG`)
+## Phase 3: five-year runs (`polaris_rsi_drift_eval5yr_fanout_phase3.pbs`)
 
-Full protocol; scored with `$R/drift_shrinkage.py` against `eval_bias5yr_e24`.
-Prediction under the report's verdict: alpha essentially unchanged for k145
-(Layer A alone is not the drift); a large drop would mean rectification.
+The 2-node `preemptable` submission (job 7600928) never scheduled ("Insufficient
+amount of resource: queue_tags": the preemptable node pool was fully allocated),
+so Phase 3 became a five-config fan-out on `prod` -> `small` (10 nodes, 2:59,
+job 7601013): k120 / k145 / k180 / base (shipped sampler, with the anchor
+trace, i.e. a 5-year baseline trace) / k145s1 (seed 1, to size the latent-noise
+scatter of a 5-year alpha). `final_denoise` and `num_steps 4` are 1.3-2x slower
+and would not finish 1827 frames in 3 h. Scored with `$R/drift_shrinkage.py`
+against `eval_bias5yr_e24`. Prediction under the report's verdict: alpha
+essentially unchanged for every kappa (Layer A alone is not the drift); a large
+drop would mean rectification. The single-variant script
+(`polaris_rsi_drift_eval5yr_phase3.pbs`, `EVAL_CFG`/`EVAL_CKPT_DIR`/`EVAL_EPOCH`/
+`EVAL_HORIZON`/`EVAL_TAG`) is kept for the fine-tune's 1-year scoring.
 
 ## Phase 4: training-side (conditional on Phase 1)
 
