@@ -75,6 +75,19 @@ win.
   Phase 4 (pattern-shrink anchor fine-tune from epoch 24, paired with 1.45 at
   inference) were launched on that basis.
 
+- **Phase 4 (training-side, first result):** one epoch of fine-tuning from
+  epoch 24 with the pattern-shrink anchor augmentation (`loss.anchor_shrink
+  0.3`, everything else the shipped recipe) roughly halves the one-year drift:
+  z500 bias-map RMSE 1029 vs ~1850-2059, t2m 4.98 K vs 9-10 K, surface
+  RMSE-vs-climatology plateau 397 vs 611 (ERDM 63); the shrinkage alpha falls
+  from 0.68 to 0.20 (2m temperature), 0.75 to 0.43 (upper-air T), 0.76 to
+  0.31 (geopotential) and surface pressure's collapse disappears, while the
+  fast v-winds improve least (0.87 to 0.6-0.7). Cost: step-1 surface RMSE 9.6
+  vs 2.3 (the head trusts its anchor less). The fresh-slot inflation on top
+  again changes the mean by nothing. The fine-tuned trace still creeps upward
+  after day 100, so more epochs, a wider shrink range and self-generated
+  anchors are the follow-ups (runs in progress; see the plan's results log).
+
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast
 channels' anchor chains go off-manifold at roll ~28, and it is a property of
