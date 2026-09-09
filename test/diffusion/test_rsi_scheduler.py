@@ -848,3 +848,105 @@ def test_h1_precond_denoised_is_the_readout():
     tau = sched.local_time(torch.rand(1))
     h1, zhat = sched.heads(model, x, tau, None, None)
     torch.testing.assert_close(sched.denoised(x, tau, h1, zhat), h1)
+
+
+# ---------------------------------------------------------------------------
+# Self-generated anchors (pushforward) and the shrink exclusion list
+# ---------------------------------------------------------------------------
+
+
+def test_pushforward_off_is_bit_identical_and_rejects_extra_frames():
+    """K = 0 is the shipped contract: W+1 frames, W+1+K frames rejected."""
+    sched = RSIScheduler(window_size=3, num_steps=2)
+    assert sched.history_frames == 0
+    y = torch.randn(1, 6, 3, 8, 16)          # W+1+2 frames
+    with pytest.raises(ValueError, match=r"W\+1\+K = 4"):
+        sched.compute_loss(_TwoHeadStub(3), None, None, y)
+
+
+def test_pushforward_expects_history_frames_and_matching_c_grid():
+    sched = RSIScheduler(window_size=3, num_steps=2, pushforward_rolls=2)
+    assert sched.history_frames == 2
+    y = torch.randn(1, 4, 3, 8, 16)          # plain W+1: too short now
+    with pytest.raises(ValueError, match=r"W\+1\+K = 6"):
+        sched.compute_loss(_TwoHeadStub(3), None, None, y)
+    y = torch.randn(1, 6, 3, 8, 16)
+    cg = torch.randn(1, 3, 1, 8, 16)         # W slots instead of W+K
+    with pytest.raises(ValueError, match="W\\+K = 5"):
+        sched.compute_loss(_TwoHeadStub(3), cg, None, y)
+
+
+def test_pushforward_k0_matches_plain_loss_on_the_last_window():
+    """With k = 0 rolls the loss is the shipped loss on frames K..K+W."""
+    K, W = 2, 3
+    sched = RSIScheduler(window_size=W, num_steps=2, pushforward_rolls=K)
+    sched._draw_pushforward_k = lambda: 0
+    plain = RSIScheduler(window_size=W, num_steps=2)
+    model = _TwoHeadStub(3)
+    y = torch.randn(1, W + 1 + K, 3, 8, 16)
+    cg = torch.randn(1, W + K, 2, 8, 16)
+    cs = torch.randn(1, W + K, 4)
+    torch.manual_seed(1)
+    a = sched.compute_loss(model, cg, cs, y)
+    torch.manual_seed(1)
+    b = plain.compute_loss(model, cg[:, K:], cs[:, K:], y[:, K:])
+    torch.testing.assert_close(a, b)
+
+
+def test_pushforward_rolls_replace_the_last_k_anchors_with_own_readouts():
+    """k rolls -> the last k anchors are the sampler's slot-W readouts; the
+    first W-k stay truth; the loss is finite and differentiable; the model
+    is left in the mode it came in."""
+    K, W, k = 2, 3, 2
+    sched = RSIScheduler(window_size=W, num_steps=2, pushforward_rolls=K,
+                         fresh_noise_scale=1.45)
+    sched._draw_pushforward_k = lambda: k
+    model = _TwoHeadStub(3)
+    model.train()
+    y = torch.randn(1, W + 1 + K, 3, 8, 16)
+    cg = torch.randn(1, W + K, 2, 8, 16)
+    cs = torch.randn(1, W + K, 4)
+
+    seen = {}
+    orig = sched.perturb_anchor
+
+    def spy(a):
+        seen["anchors"] = a.detach().clone()
+        return orig(a)
+    sched.perturb_anchor = spy
+
+    torch.manual_seed(3)
+    own = sched._pushforward_anchors(model, y, cg, cs, k)
+    assert own.shape == (1, k, 3, 8, 16)
+    torch.manual_seed(3)
+    loss = sched.compute_loss(model, cg, cs, y)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert model.h1.weight.grad is not None
+    assert model.training
+    a = seen["anchors"]
+    assert a.shape == (1, W, 3, 8, 16)
+    # truth anchors for the first W-k slots are frames K .. K+W-k-1
+    torch.testing.assert_close(a[:, : W - k], y[:, K : K + W - k])
+    # the last k are the own readouts (same seed -> same draw), not truth
+    torch.testing.assert_close(a[:, W - k:], own)
+    assert not torch.allclose(a[:, W - k:], y[:, K + W - k : K + W])
+
+
+def test_pushforward_k_sequence_is_seeded_and_bounded():
+    s1 = RSIScheduler(window_size=3, pushforward_rolls=3, pushforward_seed=7)
+    s2 = RSIScheduler(window_size=3, pushforward_rolls=3, pushforward_seed=7)
+    ks = [s1._draw_pushforward_k() for _ in range(50)]
+    assert ks == [s2._draw_pushforward_k() for _ in range(50)]
+    assert min(ks) >= 0 and max(ks) <= 3 and len(set(ks)) > 1
+
+
+def test_anchor_shrink_exclusion_leaves_listed_channels_untouched():
+    torch.manual_seed(0)
+    a = torch.randn(2, 3, 4, 8, 16)
+    sched = RSIScheduler(window_size=3, anchor_shrink=0.5, anchor_shrink_exclude=(1, 3))
+    out = sched.perturb_anchor(a)
+    torch.testing.assert_close(out[:, :, [1, 3]], a[:, :, [1, 3]])
+    assert not torch.allclose(out[:, :, [0, 2]], a[:, :, [0, 2]])
+    # the spatial mean is preserved on the shrunk channels
+    torch.testing.assert_close(out.mean(dim=(-2, -1)), a.mean(dim=(-2, -1)), atol=1e-5, rtol=0)

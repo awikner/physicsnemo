@@ -256,6 +256,7 @@ def _build_loader(
     emit_boundary_next: bool = False,
     anchor_frames: int = 0,
     step_stride: int = 1,
+    history_frames: int = 0,
 ) -> tuple[DataLoader, bool]:
     """Build the per-stage DataLoader.
 
@@ -275,6 +276,10 @@ def _build_loader(
     needs that frame emitted. It costs no extra read at ``forcing_lag >= 1``. ``step_stride`` is the model step in
     store rows (``resolve_step_stride``); the rolling window advances one model
     step per frame, which on the 6-hourly AMIP archives is 4 rows, not 1.
+    ``history_frames`` (``RSIScheduler.history_frames``, = ``pushforward_rolls``)
+    lengthens the read window by that many frames in FRONT of the anchor: the
+    scheduler rolls its own sampler over them to self-generate anchors and
+    trains on the last W+1 frames, so the model's window is unchanged.
     """
     window_mode = window_size > 1
     if window_mode:
@@ -282,7 +287,7 @@ def _build_loader(
 
         dataset = SequenceDataset(
             raw_ds,
-            unroll_steps=window_size - 1,
+            unroll_steps=window_size - 1 + int(history_frames or 0),
             forcing_lag=forcing_lag,
             emit_boundary_next=emit_boundary_next,
             emit_anchor=bool(anchor_frames),
@@ -929,6 +934,7 @@ def main(cfg: DictConfig) -> None:
     window_mode = False
     window_size = 0
     anchor_frames = 0
+    history_frames = 0
     validator: DiffusionRolloutValidator | None = None
     prior_stage_epochs = 0
     for stage_idx, stage in enumerate(stages):
@@ -958,13 +964,16 @@ def main(cfg: DictConfig) -> None:
             cfg, stage, dist.device, model=inner_model
         )
         stage_anchor_frames = int(getattr(scheduler_loss, "anchor_frames", 0) or 0)
+        stage_history_frames = int(getattr(scheduler_loss, "history_frames", 0) or 0)
 
         # (Re)build the DataLoader when the window size or the anchor contract
         # changes — and on the first stage where it has to be built from scratch.
         if (loader is None or stage_window_size != window_size
-                or stage_anchor_frames != anchor_frames):
+                or stage_anchor_frames != anchor_frames
+                or stage_history_frames != history_frames):
             window_size = stage_window_size
             anchor_frames = stage_anchor_frames
+            history_frames = stage_history_frames
             loader, window_mode = _build_loader(
                 cfg,
                 raw_ds,
@@ -978,8 +987,9 @@ def main(cfg: DictConfig) -> None:
                 emit_boundary_next=bool(
                     getattr(inner_model, "num_ocean", 0) or 0
                 ),
-                # …and this one from the scheduler's.
+                # …and these two from the scheduler's.
                 anchor_frames=anchor_frames,
+                history_frames=history_frames,
             )
 
         steps_per_epoch = max(1, len(loader))

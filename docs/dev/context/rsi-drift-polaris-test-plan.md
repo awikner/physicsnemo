@@ -350,6 +350,69 @@ each scored over one year). Fetched artifacts live under the session
 scratchpad only; the `eval_suite.pt`, `trace_rank*.pt` and checkpoint files
 remain on Polaris under `$R/eval_bias*` and `$R/checkpoints_ft_shrink*_b40`.
 
+## Phase 5: new base (bundle run) and self-generated anchors (2026-09-09)
+
+**Base change.** The batch-40 *bundle* production run
+(`checkpoints_prod24_bundle_b40`, `polaris_rsi_prod24_bundle_b40.pbs`: lr 5e-4
+linear scaling with 1-epoch warmup and cosine to 5e-5 over 24 epochs, Muon
+momentum 0.85, partial activation checkpointing; chain jobs 7599767-7599776,
+2 epochs per 3 h link) had reached epoch 19 (epoch 20 in progress) when it was
+checked, against the previous version `checkpoints_prod24_b40` (sqrt-scaled lr
+1.58e-4, StepLR 0.95) whose epoch-24 weights every earlier phase used.
+Per-epoch mean training loss (all 1315 batches):
+
+| epoch | 12 | 14 | 16 | 17 | 18 | 19 | 20 | 24 |
+|---|---|---|---|---|---|---|---|---|
+| previous (prod24_b40) | 248.0 | 243.6 | 233.6 | 231.5 | 229.6 | 228.2 | 226.5 | 220.4 |
+| bundle | 220.1 | 213.4 | 207.6 | 204.7 | 202.7 | 200.9 | | |
+
+The bundle run is 11-12% lower at equal epochs and at epoch 19 already below
+the previous run's final epoch. Ten-day validation (4 ICs x 10 members, every
+5 epochs; surface RMSE at steps 1 / 3 / 6 / 10 and ACC at step 10): bundle
+e15 2.10 / 3.28 / 18.7 / **188** / 0.67 vs previous e15 2.45 / 3.74 / 21.9 /
+86 / 0.83 and e20 2.28 / 3.58 / 19.5 / 81 / 0.85. The bundle model is better
+through day 6 and about **2x worse at day 10** on every group (upper air 206 vs
+119, diagnostics 20.3 vs 12.6), consistently at epochs 5, 10 and 15, i.e. a
+faster error growth between days 6 and 10 that the one-year baseline below has
+to place relative to the drift. The training-loss criterion is met, so the
+bundle checkpoint is the base for everything in this phase; epoch 20 was
+chosen (first epoch >= 16 that also carries a validation line, so its 10-day
+skill is directly comparable to the previous run's epoch 20).
+
+**Design.** All fine-tunes resume from the bundle epoch-20 pair with the
+bundle recipe's own optimizer and (continued cosine) schedule, so a fine-tune
+from epoch 20 to 22 is "the same run with the augmentation switched on" and
+the chain's own epoch 22 is the control (`polaris_rsi_ft_phase5.pbs`).
+Variants, each scored over one year (8 members, IC 1996-01-01,
+obs-climatology truth, per-rank anchor trace; `polaris_rsi_drift_eval_multi_phase5.pbs`):
+
+| id | checkpoint dir | loss knobs | sampler at eval | purpose |
+|---|---|---|---|---|
+| B20 | bundle e20 | (base) | base, k145 | new baseline; is the day-10 deficit a drift-onset difference? |
+| C22 | bundle e22 (chain) | (none) | base | control for the fine-tunes |
+| S22 | `checkpoints_ft5_shrink_b40` e22 | `anchor_shrink 0.3` | base | Phase 4 remedy re-done on the new base |
+| P22 | `checkpoints_ft5_pf_b40` e22 | `pushforward_rolls 2`, `fresh_noise_scale 1.45` | k145 (and base) | self-generated anchors paired with the Layer A injection |
+| PS22 | `checkpoints_ft5_pfshrink_b40` e22 | pushforward 2 + fresh 1.45 + shrink 0.3 with the 9 stratospheric-q channels (<= 125 hPa) excluded | k145 | both remedies; tests the exclusion fix for the q blow-up |
+
+**Self-generated anchors (`pushforward_rolls = K`, rsi.py).** The loader
+reads K extra history frames ahead of the anchor (`RSIScheduler.history_frames`
+-> `SequenceDataset(unroll_steps = W-1+K)`); per step the scheduler draws
+k ~ U{0..K} from a private generator (identical on every DDP rank, so no
+stragglers), initializes the window from truth k frames back
+(`warmup_window`), rolls its own sampler k times without grad
+(`sample_window` + `_fresh_slot`, forcings and own-time ocean boundary sliced
+from the W+K-slot stack, `fresh_noise_scale` applied exactly as at
+inference), and anchors the last k slots of the loss window on the sampler's
+slot-W readouts `y_hat[:, -1]` instead of on truth; the first W-k anchors and
+all targets stay truth, the anchor-time ocean block is kept from truth (it is
+imposed from truth at every roll top at inference). K = 0 is bit-identical to
+the shipped loss (109 scheduler/recipe tests pass, including a k = 0 equality
+test and an end-to-end train step with K = 2). This is the toy's
+`rsi_ft_selfanchor` (one preceding roll, slot W only) generalized to a chain
+of up to K links. Cost: one no-grad roll is ~3 head evaluations, about one
+forward+backward, so K = 2 doubles the step time (about 150 min per epoch on
+10 nodes; one epoch per 3 h link).
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show

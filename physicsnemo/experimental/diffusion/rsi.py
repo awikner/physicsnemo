@@ -138,6 +138,9 @@ class RSIScheduler(nn.Module):
                  # ── training ──────────────────────────────────────────────
                  anchor_noise=0.0,
                  anchor_shrink=0.0,
+                 anchor_shrink_exclude=(),
+                 pushforward_rolls=0,
+                 pushforward_seed=0,
                  weighting="snr_bump",
                  P_mean=2.0,
                  P_std=1.2,
@@ -228,6 +231,27 @@ class RSIScheduler(nn.Module):
         self.anchor_shrink = float(anchor_shrink)
         if not 0.0 <= self.anchor_shrink < 1.0:
             raise ValueError(f"anchor_shrink must be in [0, 1), got {anchor_shrink}")
+        # Channels (pack-order indices) the pattern shrink leaves untouched.
+        # Motivated by the Polaris fine-tunes (2026-09-09): a head trained to
+        # un-shrink its anchor over-amplified the stratospheric humidity
+        # channels 5-70x, fields whose spatial anomaly carries no climate
+        # signal and where the head cannot judge the amplitude it restores.
+        self.anchor_shrink_exclude = tuple(int(i) for i in (anchor_shrink_exclude or ()))
+        # Self-generated anchors (drift diagnosis, 2026-09-09). K > 0 makes
+        # compute_loss expect K extra history frames ahead of the W+1 stack
+        # and, per call, roll the window k ~ U{0..K} times with the model's
+        # OWN sampler (no grad) from an oracle init k frames back, so the last
+        # k slots of the loss window are anchored on the model's y_hat[:, -1]
+        # chain -- literally what _fresh_slot copies forward at inference,
+        # including fresh_noise_scale -- instead of on truth. k is drawn from
+        # a private generator so every DDP rank rolls the same number of
+        # times per step (no stragglers). 0 disables and is bit-identical.
+        self.pushforward_rolls = int(pushforward_rolls)
+        if self.pushforward_rolls < 0:
+            raise ValueError(f"pushforward_rolls must be >= 0, got {pushforward_rolls}")
+        self.history_frames = self.pushforward_rolls
+        self.pushforward_seed = int(pushforward_seed)
+        self._pf_gen = None
         self.weighting = weighting
         self.P_mean = P_mean
         self.P_std = P_std
@@ -326,10 +350,13 @@ class RSIScheduler(nn.Module):
             self.gamma_0, self.gamma_1, self.gamma_mode, self.integrator,
             self.solver, self.weighting, self.eps_scale, noise, self.reduce_to_erdm,
         )
-        if self.fresh_noise_scale != 1.0 or self.anchor_shrink > 0.0:
+        if (self.fresh_noise_scale != 1.0 or self.anchor_shrink > 0.0
+                or self.pushforward_rolls > 0):
             logger.info(
                 "RSIScheduler drift-diagnosis knobs: fresh_noise_scale=%s, "
-                "anchor_shrink=%s", self.fresh_noise_scale, self.anchor_shrink,
+                "anchor_shrink=%s (exclude %s), pushforward_rolls=%s",
+                self.fresh_noise_scale, self.anchor_shrink,
+                list(self.anchor_shrink_exclude), self.pushforward_rolls,
             )
 
     # ------------------------------------------------------------------
@@ -533,7 +560,13 @@ class RSIScheduler(nn.Module):
             s_fac = 1.0 - self.anchor_shrink * torch.rand(
                 s_shape, device=anchor.device, dtype=anchor.dtype
             )
-            anchor = mean_hw + s_fac * (anchor - mean_hw)
+            shrunk = mean_hw + s_fac * (anchor - mean_hw)
+            if self.anchor_shrink_exclude:
+                keep = torch.zeros(anchor.shape[2], dtype=torch.bool, device=anchor.device)
+                idx = [i for i in self.anchor_shrink_exclude if i < anchor.shape[2]]
+                keep[idx] = True
+                shrunk = torch.where(keep[None, None, :, None, None], anchor, shrunk)
+            anchor = shrunk
         if self.anchor_noise <= 0.0:
             return anchor
         zp = self.get_noise(anchor)
@@ -757,20 +790,54 @@ class RSIScheduler(nn.Module):
             targets y_w and is anchored on y_{w-1}; the leading frame is the
             anchor for slot 1 and is never itself a target. Ocean block
             included on all W+1 frames (see :meth:`append_ocean_target`).
-        c_grid   : (b, W, c_grid, H, W) per-slot forcings (slots 1..W)
-        c_scalar : (b, W, scalar_dim) or None
+            With ``pushforward_rolls = K > 0`` the stack carries K extra
+            HISTORY frames in front (``W+1+K`` frames, ``history_frames``);
+            the loss window is the last W+1 and the history seeds the
+            self-generated anchor rolls (see :meth:`_pushforward_anchors`).
+        c_grid   : (b, W, c_grid, H, W) per-slot forcings (slots 1..W);
+            ``(b, W+K, ...)`` under pushforward, aligned to the W+K targets.
+        c_scalar : (b, W, scalar_dim) or None (``W+K`` under pushforward)
         """
-        if y.shape[1] != self.W + 1:
+        K = self.history_frames
+        if y.shape[1] != self.W + 1 + K:
             raise ValueError(
-                f"RSI compute_loss expects W+1 = {self.W + 1} state frames "
-                f"(slot 1's anchor is the frame before the window), got "
-                f"{y.shape[1]}. The recipe supplies it via "
-                f"SequenceDataset(emit_anchor=True) + _pack_window(anchor_frames=1)."
+                f"RSI compute_loss expects W+1+K = {self.W + 1 + K} state frames "
+                f"(slot 1's anchor is the frame before the window; K = "
+                f"pushforward_rolls = {K} history frames ahead of it), got "
+                f"{y.shape[1]}. The recipe supplies them via "
+                f"SequenceDataset(emit_anchor=True, unroll_steps=W-1+K) + "
+                f"_pack_window(anchor_frames=1)."
             )
+        if K > 0:
+            if c_grid.shape[1] != self.W + K:
+                raise ValueError(
+                    f"pushforward needs c_grid with W+K = {self.W + K} slots, got "
+                    f"{c_grid.shape[1]}"
+                )
+            k = self._draw_pushforward_k()
+            y_win = y[:, K:]
+            anchors = y_win[:, :-1]
+            if k > 0:
+                own = self._pushforward_anchors(model, y, c_grid, c_scalar, k)
+                if self.nocean:
+                    # The anchor-time ocean block is imposed from truth at
+                    # every roll top at inference; keep the training anchors
+                    # on the same footing.
+                    own = torch.cat(
+                        [own[:, :, : own.shape[2] - self.nocean],
+                         anchors[:, self.W - k:, own.shape[2] - self.nocean:]],
+                        dim=2,
+                    )
+                anchors = torch.cat([anchors[:, : self.W - k], own], dim=1)
+            y = y_win
+            c_grid = c_grid[:, K:]
+            c_scalar = c_scalar[:, K:] if c_scalar is not None else None
+        else:
+            anchors = y[:, :-1]
         b = y.shape[0]
         device = y.device
 
-        anchors = self.perturb_anchor(y[:, :-1])     # (b, W, C, H, W)
+        anchors = self.perturb_anchor(anchors)        # (b, W, C, H, W)
         targets = y[:, 1:]                            # (b, W, C, H, W)
 
         t = torch.rand(b, device=device)              # global time, (b,)
@@ -854,6 +921,52 @@ class RSIScheduler(nn.Module):
             else loss.new_zeros(())
         )
         return loss, ocean_loss
+
+    # ------------------------------------------------------------------
+    # Self-generated anchors (pushforward) for training
+    # ------------------------------------------------------------------
+    def _draw_pushforward_k(self):
+        """Number of own-sampler rolls for this call, k ~ U{0..K}, from a
+        private CPU generator so all DDP ranks draw the same sequence."""
+        if self._pf_gen is None:
+            self._pf_gen = torch.Generator(device="cpu")
+            self._pf_gen.manual_seed(self.pushforward_seed)
+        return int(torch.randint(0, self.pushforward_rolls + 1, (1,),
+                                 generator=self._pf_gen))
+
+    @torch.no_grad()
+    def _pushforward_anchors(self, model, y, c_grid, c_scalar, k):
+        """Roll the model's own sampler k times and return its slot-W
+        readouts, ``(b, k, C, H, W)``: estimates of frames K+W-k .. K+W-1 of
+        the ``W+1+K`` stack, i.e. the anchors of the last k loss slots.
+
+        The window is initialized from truth k frames before the loss window
+        (``warmup_window`` on frames K-k .. K-k+W) and advanced with
+        :meth:`sample_window` + :meth:`_fresh_slot` exactly as ``stream_step``
+        does, forcings and own-time ocean boundary sliced from the W+K-slot
+        conditioning stack. Runs in eval mode without grad; the loss forward
+        that follows is untouched.
+        """
+        K = self.history_frames
+        j0 = K - k
+        was_training = model.training
+        model.eval()
+        try:
+            x = self.warmup_window(y[:, j0 : j0 + self.W + 1])
+            outs = []
+            for j in range(k):
+                s0 = j0 + j
+                cg = c_grid[:, s0 : s0 + self.W]
+                cs = c_scalar[:, s0 : s0 + self.W] if c_scalar is not None else None
+                ocean_win = (
+                    c_grid[:, s0 + 1 : s0 + 1 + self.W] if self.nocean else None
+                )
+                x, y_hat = self.sample_window(model, x, cg, cs, ocean_win=ocean_win)
+                outs.append(y_hat[:, -1])
+                x = torch.cat([x[:, 1:], self._fresh_slot(y_hat)], dim=1)
+        finally:
+            model.train(was_training)
+        return torch.stack(outs, dim=1).detach()
 
     # ------------------------------------------------------------------
     # Ocean channels (Phase 12f contract)

@@ -333,3 +333,46 @@ def test_non_finite_loss_aborts_instead_of_stepping():
     # and it must not have stepped
     for p, b in zip(model.parameters(), before):
         torch.testing.assert_close(p.detach(), b)
+
+
+# ---------------------------------------------------------------------------
+# History frames for the self-generated-anchor (pushforward) training
+# ---------------------------------------------------------------------------
+
+
+def test_history_frames_lengthen_the_read_window_in_front():
+    W, K = 3, 2
+    loader, _ = _build_loader(
+        _cfg(1), _SyntheticBase(), window_size=W, rank=0,
+        forcing_lag=1, anchor_frames=1, history_frames=K,
+    )
+    batch = next(iter(loader))
+    y, c_grid, c_scalar = _pack_window(_wrapper().eval(), batch, anchor_frames=1)
+    assert y.shape[1] == W + 1 + K and c_grid.shape[1] == W + K
+    times = [float(y[0, i].flatten()[0]) for i in range(y.shape[1])]
+    assert all(times[i + 1] - times[i] == pytest.approx(1.0) for i in range(len(times) - 1))
+    # the forcing of slot i conditions state frame i+1 (forcing_lag = 1): the
+    # varying-boundary channels (first in the v2 c_grid) encode 100 + t
+    vb = c_grid[0, :, :_VARY].flatten(1).mean(1) - 100.0
+    assert all(float(vb[i]) == pytest.approx(times[i]) for i in range(c_grid.shape[1]))
+
+
+def test_train_step_with_pushforward_anchors_runs_end_to_end():
+    W, K = 3, 2
+    loader, window_mode = _build_loader(
+        _cfg(1), _SyntheticBase(), window_size=W, rank=0,
+        forcing_lag=1, anchor_frames=1, history_frames=K,
+    )
+    batch = next(iter(loader))
+    model = _wrapper()
+    sched = RSIScheduler(window_size=W, num_steps=2, pushforward_rolls=K,
+                         fresh_noise_scale=1.45, anchor_shrink=0.3)
+    sched._draw_pushforward_k = lambda: K
+    opt = torch.optim.SGD(model.parameters(), lr=1e-4)
+    out = _train_step(
+        model=model, scheduler_loss=sched, sample=batch, optimizer=opt,
+        grad_scaler=None, amp_dtype=None, device=torch.device("cpu"),
+        window_mode=window_mode, anchor_frames=1,
+    )
+    assert torch.isfinite(torch.tensor(out["loss"]))
+    assert model.training
