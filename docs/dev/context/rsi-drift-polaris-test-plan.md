@@ -436,6 +436,16 @@ pair copied into `checkpoints_ft5_{shrink,pf,pfshrink}_b40`): S22 job
 PS22 follow with `polaris_rsi_drift_eval_multi_phase5.pbs` on 10 nodes once
 the checkpoints exist.
 
+*17:50 UTC:* the first links of P22 (7601532) and PS22 (7601534) both died
+before their first batch with `CUDA error: an illegal instruction was
+encountered` -- rank 18 of one and rank 2 of the other, i.e. the same
+device, **x3003c0s25b0n0 GPU 2** (recorded in `$R/bad_nodes_20260909.txt`;
+worth reporting to ALCF). S22 on x3014 nodes was unaffected. The fine-tune
+script now runs a GPU preflight (one matmul per rank) and resubmits itself on
+failure; the chains were extended so each variant still reaches epoch 22:
+P22 7601533 -> 7601656 -> 7601657, PS22 7601535 -> 7601658 -> 7601659 (every
+link resumes from whatever epoch exists and exits early at the target).
+
 ### Phase 5 results
 
 **B20, the bundle epoch-20 baseline (job 7601536, one year, 8 members,

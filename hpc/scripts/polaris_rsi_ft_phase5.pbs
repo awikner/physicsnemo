@@ -67,6 +67,38 @@ DONE=${DONE:-0}
 if [ "$DONE" -ge "$TARGET" ]; then echo "already at ${DONE}/${TARGET} -- nothing to do"; exit 0; fi
 NEPOCH=$((DONE + EPOCHS_PER_LINK)); [ "$NEPOCH" -gt "$TARGET" ] && NEPOCH=$TARGET
 echo "=== resume: ${DONE} epochs done -> running through epoch ${NEPOCH} of ${TARGET} ==="
+# GPU preflight: a tiny matmul on every rank. Jobs 7601532 and 7601534 both
+# died before their first batch with "CUDA error: an illegal instruction was
+# encountered" on the same GPU (x3003c0s25b0n0 device 2); a broken device
+# otherwise costs the whole 3 h link. On failure the bad hosts are appended to
+# $R/bad_nodes_<date>.txt and the job resubmits itself once or twice.
+preflight () {
+  local out nok
+  out=$(timeout 300 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" --cpu-bind depth -d 8 \
+        bash hpc/scripts/polaris_rank_env.sh \
+        python -c 'import os, socket, torch
+try:
+    x = torch.randn(2048, 2048, device="cuda"); y = (x @ x).sum().item(); torch.cuda.synchronize()
+    print("GPUOK", socket.gethostname(), os.environ.get("LOCAL_RANK"))
+except Exception as e:
+    print("GPUBAD", socket.gethostname(), os.environ.get("LOCAL_RANK"), repr(e)[:160])' 2>&1)
+  nok=$(grep -c "^GPUOK" <<< "$out")
+  if [ "$nok" -ne "$NRANKS" ]; then
+    echo "GPU preflight: only $nok/$NRANKS ranks ok"
+    grep -vE "^GPUOK|Warning|warn\(" <<< "$out" | head -12
+    grep "^GPUBAD" <<< "$out" | awk '{print $2, "gpu", $3}' | sort -u | tee -a "$R/bad_nodes_$(date +%Y%m%d).txt"
+    return 1
+  fi
+  echo "GPU preflight: all $NRANKS ranks ok"
+}
+if ! preflight; then
+  RETRY=${FT_RETRY:-0}
+  if [ "$RETRY" -lt 2 ]; then
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "FT_CKPT=$CKPT,FT_BASE=$BASE,FT_TARGET=$TARGET,FT_SHRINK=$SHRINK,FT_EXCLUDE=$EXCLUDE,FT_PF=$PF,FT_FRESH=$FRESH,EPOCHS_PER_LINK=$EPOCHS_PER_LINK,FT_NODES=$EXPECT_NODES,FT_RETRY=$((RETRY + 1))" "$R/polaris_rsi_ft_phase5.pbs" 2>&1)
+    echo "bad GPU in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
+  fi
+  exit 3
+fi
 EXCL_ARG=()
 if [ -n "$EXCLUDE" ]; then EXCL_ARG=("++loss.anchor_shrink_exclude=[${EXCLUDE//+/,}]"); fi
 LR=5.0e-4        # bundle recipe (linear scaling), continued cosine schedule
