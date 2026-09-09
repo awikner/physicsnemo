@@ -377,7 +377,13 @@ faster error growth between days 6 and 10 that the one-year baseline below has
 to place relative to the drift. The training-loss criterion is met, so the
 bundle checkpoint is the base for everything in this phase; epoch 20 was
 chosen (first epoch >= 16 that also carries a validation line, so its 10-day
-skill is directly comparable to the previous run's epoch 20).
+skill is directly comparable to the previous run's epoch 20). That line
+arrived at 15:50 UTC: bundle e20 surface RMSE 1.95 / 3.13 / 15.1 / **116**
+at steps 1 / 3 / 6 / 10 with step-10 ACC 0.82 (previous e20: 2.28 / 3.58 /
+19.5 / 81, ACC 0.85; upper air step 10: 137 vs 114; diagnostics 14.0 vs
+11.9). The day-10 deficit has narrowed from 2.2x at epoch 15 to 1.4x at
+epoch 20 as the cosine schedule anneals, while the short-range advantage
+grew; the one-year baseline (B20) settles what remains of it.
 
 **Design.** All fine-tunes resume from the bundle epoch-20 pair with the
 bundle recipe's own optimizer and (continued cosine) schedule, so a fine-tune
