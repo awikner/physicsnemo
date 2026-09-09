@@ -212,8 +212,17 @@ upper-air excess deserves a per-channel look in the cascade outputs.
 | k145 (1.45) | 1850 | 9.18 | -3.81 |
 | k180 (1.8) | 1824 | 8.97 | -3.71 |
 | fd (`final_denoise` true) | 1771 | 9.05 | -3.43 |
-| ns4 (`num_steps` 4) | (running) | | |
+| ns4 (`num_steps` 4) | killed at the 1 h wall after 200 scored frames (partial save valid to frame 200); trace below | | |
 | baseline, 5-year mean for scale | 2059 | 10.42 | -3.47 |
+
+ns4 trace (surface RMSE vs climatology / surface spread), base in
+parentheses: step 10: 162 (165) / 0.114 (0.110); step 20: 163 (154) / 0.237
+(0.232); step 30: **383 (219)** / 0.299 (0.313); step 50: 565 (487) / 0.271
+(0.291); step 85: 646 (619); step 100: 639 (620); step 200: 624 (614). Four
+solver steps accelerate the run-away like `final_denoise` does and change the
+spread by nothing measurable. Both variants make the head evaluations more
+numerous or cleaner; both speed the collapse up. Lesson for the job script:
+a 300-frame 4-step run needs ~1.3 h, more than debug-scaling allows.
 
 Inflating the fresh-slot latent by 1.2-1.8x leaves the 300-day collapse
 essentially unchanged (the trend with kappa is a few percent, within what
