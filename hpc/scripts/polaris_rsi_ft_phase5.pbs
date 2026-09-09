@@ -37,6 +37,11 @@ cd "$R"
 source "$R/polaris_env.sh"
 export HYDRA_FULL_ERROR=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# The forkserver DataLoader binds an AF_UNIX socket under TMPDIR; on a
+# debug-queue node the PBS-provided TMPDIR pushed that path past the 108-byte
+# limit (smoke job 7601485). A short node-local temp dir is always safe.
+echo "TMPDIR(job)=${TMPDIR:-unset}"
+export TMPDIR=/tmp
 J=${PBS_JOBID%%.*}
 CKPT=${FT_CKPT:?set FT_CKPT}
 BASE=${FT_BASE:-20}
@@ -54,7 +59,8 @@ export GPUS_PER_NODE=$PPN
 export MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
 export MASTER_PORT=29900
 echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | ckpt $CKPT | base $BASE target $TARGET | shrink $SHRINK exclude [$EXCLUDE] | pushforward $PF fresh $FRESH | gc_levels $GC_LEVELS ==="
-[ "$NNODES" -eq 10 ] || { echo "FATAL: expected 10 nodes, got $NNODES"; exit 1; }
+EXPECT_NODES=${FT_NODES:-10}   # FT_NODES=1 for a debug-queue smoke run
+[ "$NNODES" -eq "$EXPECT_NODES" ] || { echo "FATAL: expected $EXPECT_NODES nodes, got $NNODES"; exit 1; }
 DONE=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
 DONE=${DONE:-0}
 [ "$DONE" -ge "$BASE" ] || { echo "FATAL: $CKPT must be seeded with the epoch-$BASE pair (found epoch ${DONE})"; exit 1; }

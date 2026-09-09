@@ -409,9 +409,17 @@ imposed from truth at every roll top at inference). K = 0 is bit-identical to
 the shipped loss (109 scheduler/recipe tests pass, including a k = 0 equality
 test and an end-to-end train step with K = 2). This is the toy's
 `rsi_ft_selfanchor` (one preceding roll, slot W only) generalized to a chain
-of up to K links. Cost: one no-grad roll is ~3 head evaluations, about one
-forward+backward, so K = 2 doubles the step time (about 150 min per epoch on
-10 nodes; one epoch per 3 h link).
+of up to K links. Cost: one no-grad roll is ~3 head evaluations; the
+one-node smoke run (job 7601494, epoch-19 pair, K = 2 + shrink 0.3 +
+exclusion, 4 ranks) measured 5.5 s/step against the chain's 3.3 s, i.e.
+1.67x, so about 125 min per epoch on 10 nodes: one epoch per 3 h link. Its
+first batches behave like the Phase 4 fine-tune's (loss 4446 -> ~500 by batch
+40 with the ocean term at ~2, gnorm 5e4 -> 1e3; Phase 4: 2484 -> 399,
+ocean 2.4). Gotcha found on the way: the forkserver DataLoader binds an
+AF_UNIX socket under TMPDIR, and the debug node's PBS TMPDIR
+(`/var/tmp/pbs.<jobid>.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov/...`) pushed
+that path past the 108-byte limit; the Phase 5 fine-tune script pins
+`TMPDIR=/tmp`.
 
 ## Phase 4: training-side (conditional on Phase 1)
 
