@@ -526,7 +526,12 @@ exclusion.
 Consequence: a level-offset augmentation is added as a fourth variant, L22
 (`anchor_level_noise`, a spatially uniform per-channel offset of the anchor
 of s ~ N(0, 1) increment-std units, on top of shrink 0.3, so the difference
-to S22 is the level term alone).
+to S22 is the level term alone). Submitted 20:50 UTC as jobs 7601898 ->
+7601899 (`checkpoints_ft5_shrinklvl_b40`, two epochs per link). An
+epoch-21 three-way comparison (S21 / P21 / PS21, one augmented epoch each)
+is scored as soon as the pushforward chains write their first epoch, so the
+pushforward effect is visible before their second links get through the
+queue.
 
 ## Phase 4: training-side (conditional on Phase 1)
 
