@@ -193,6 +193,31 @@ next steps are more epochs, a wider shrink range (the real collapse reaches
 0.3-0.4 for the fast channels, while the augmentation only shows the network
 0.7-1.0), and pairing with self-generated anchors.
 
+**Epoch 26 (second fine-tune epoch), one year, seeds 0 and 1 (job 7601186):**
+
+| | shipped e24 | ft25 | ft26 seed 0 | ft26 seed 1 | ERDM |
+|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias | 2059 / -923 (5 yr) | 1029 / -668 | 1030 / -568 | 1026 / -564 | 46 / -5 |
+| t2m bias-map RMSE / mean bias (K) | 10.4 / -3.5 | 4.98 / -2.47 | 4.81 / **-1.40** | 4.79 / -1.39 | 0.22 / -0.01 |
+| surface RMSE-vs-clim, mean steps 100-365 | 611 | 397 | **350** | 350 | 63 |
+| surface RMSE-vs-clim at 30 / 50 / 85 / 200 / 365 | 219 / 487 / 619 / 614 / 609 | 139 / 270 / 337 / 408 / 413 | 128 / 326 / 328 / 347 / 358 | 128 / 320 / 328 / 347 / 357 | 75 / 70 / 53 / 76 / 86 |
+| alpha: skt / sp / t2m / q2m / u10 / v10 | 0.68 / 0.49 / 0.68 / 0.72 / 0.86 / 0.87 | 0.21 / -0.08 / 0.20 / 0.35 / 0.40 / 0.61 | 0.27 / -0.02 / 0.26 / 0.36 / 0.42 / 0.65 | 0.27 / -0.02 / 0.26 / 0.36 / 0.42 / 0.64 | ~0 |
+| alpha: upper-air T / u / v / z / q (mean) | 0.75 / 0.85 / 0.90 / 0.76 / 0.81 | 0.43 / 0.48 / 0.68 / 0.31 / 0.64 | 0.48 / 0.51 / 0.69 / 0.34 / 0.49 | 0.48 / 0.51 / 0.69 / 0.34 / 0.49 | ~0 |
+| 10-day validation, surface RMSE step 1 / 10 | 2.3 / 80.7 (e20) | 9.6 / 94.8 | 10.7 / 89.0 | | |
+
+Readings. (i) Two seeds agree to +-0.005 in alpha and +-4 in z500 RMSE: the
+latent-noise scatter of these one-year statistics is negligible, so
+epoch-to-epoch differences are real. (ii) The second epoch removes more of
+the level drift (t2m mean bias -2.47 -> -1.40 K; plateau 397 -> 350, i.e. 48%
+of the excess over ERDM gone) and flattens the late trace (347 -> 358 over
+days 200-365 vs 408 -> 413 for epoch 25), but the pattern-shrinkage alpha
+does not improve further (T 0.43 -> 0.48, z 0.31 -> 0.34, v 0.68 -> 0.69,
+q 0.64 -> 0.49). The augmentation as configured (shrink 0.7-1.0) appears to
+have bought what it can for the pattern; the wider-shrink variant (0.6, job
+7601155) and more epochs (link 2, job 7601154) test whether the remaining
+alpha is reachable this way. (iii) The short-range cost grows slightly with
+epochs (step-1 surface RMSE 9.6 -> 10.7).
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
