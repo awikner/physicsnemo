@@ -29,6 +29,9 @@ export AI_ROSSBY_AMIP_CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
 J=${PBS_JOBID%%.*}
 EP=${EVAL_EPOCH:-24}
 CFG=${EVAL_CFG:-k145}
+CKDIR=${EVAL_CKPT_DIR:-checkpoints_prod24_b40}
+HORIZON=${EVAL_HORIZON:-1827}
+TAG=${EVAL_TAG:-bias5yr}
 PPN=4
 export GPUS_PER_NODE=$PPN
 OBS=$AI_ROSSBY_DATA/norm_stats/obs_climatology_1996_2001
@@ -39,14 +42,14 @@ case "$CFG" in
 esac
 mapfile -t ALLNODES < <(sort -u "$PBS_NODEFILE")
 export MASTER_ADDR="${ALLNODES[0]}" MASTER_PORT=29650
-out="$R/eval_bias5yr_${CFG}_e${EP}"; mkdir -p "$out"
+out="$R/eval_${TAG}_${CFG}_e${EP}"; mkdir -p "$out"
 echo "=== $(date) | cfg $CFG sampler $SAMPLER steps $STEPS | epoch $EP | ${#ALLNODES[@]} nodes -> $out ==="
 mpiexec -n $((2 * PPN)) --ppn "$PPN" --hostfile "$PBS_NODEFILE" --cpu-bind depth -d 8 \
     bash hpc/scripts/polaris_rank_env.sh \
     bash -c 'export RSI_TRACE_PATH="$0/trace_rank${RANK}.pt"; export RSI_TRACE_EVERY=50; exec "$@"' "$out" \
     python examples/weather/ai_rossby/climate_eval_suite.py \
     --config-dir=examples/weather/ai_rossby/conf --config-name=config \
-    run_name=bias5yr_${CFG}_e${EP} \
+    run_name=${TAG}_${CFG}_e${EP} \
     model=amip_combined_rsi_sstpred "++model.forecaster.sampler=$SAMPLER" \
     loss=rsi loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear \
     validation=eval_suite seed=0 wandb.enabled=False \
@@ -57,11 +60,11 @@ mpiexec -n $((2 * PPN)) --ppn "$PPN" --hostfile "$PBS_NODEFILE" --cpu-bind depth
     ++dataset.sst_anomaly_channel=none ++dataset.scalar_forcing=none \
     ++dataset.normalize_constant_boundary=true ++dataset.constant_boundary_stats=spatial \
     ++dataset.smooth_constant_lsm=true \
-    "++model.forecaster.checkpoint=$R/checkpoints_prod24_b40/RollingDiTWrapper.0.${EP}.mdlus" \
-    "+eval_suite.checkpoint_dir=$R/checkpoints_prod24_b40" \
+    "++model.forecaster.checkpoint=$R/${CKDIR}/RollingDiTWrapper.0.${EP}.mdlus" \
+    "+eval_suite.checkpoint_dir=$R/${CKDIR}" \
     "+eval_suite.output_path=$out/eval_suite.pt" \
     ++eval_suite.checkpoint_epoch=${EP} ++eval_suite.use_ema=true \
-    ++eval_suite.horizon=1827 ++eval_suite.ic_date=1996-01-01 \
+    "++eval_suite.horizon=$HORIZON" ++eval_suite.ic_date=1996-01-01 \
     ++eval_suite.max_initial_conditions=1 ++eval_suite.batch_size=1 \
     ++eval_suite.ensemble_size=8 ++eval_suite.perturber=replicate_only \
     "++eval_suite.sampler_num_steps=$STEPS" ++eval_suite.downscaler_num_steps=5 \
@@ -70,8 +73,8 @@ mpiexec -n $((2 * PPN)) --ppn "$PPN" --hostfile "$PBS_NODEFILE" --cpu-bind depth
     ++eval_suite.headline.enabled=True ++eval_suite.climatology.enabled=False \
     ++eval_suite.bias.enabled=True ++eval_suite.bias.track_members=True \
     ++eval_suite.qbo.enabled=False ++eval_suite.global_mean.enabled=False \
-    > "$out/bias5yr_${CFG}_${J}.log" 2>&1
+    > "$out/${TAG}_${CFG}_${J}.log" 2>&1
 rc=$?; echo "$rc " > "$out/.rc"
-sed -n "/Headline climatological bias/,/^$/p" "$out/bias5yr_${CFG}_${J}.log" | head -12
+sed -n "/Headline climatological bias/,/^$/p" "$out/${TAG}_${CFG}_${J}.log" | head -12
 echo "=== $(date) done rc=$rc ==="
 exit $rc

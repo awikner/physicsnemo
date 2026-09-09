@@ -143,4 +143,27 @@ coefficients (not yet implemented; a retrain, never an inference swap).
 
 ## Results log
 
-(filled in as jobs complete)
+**2026-09-09, Phase 1 job 7600866 (debug).** First submission (7600839) died at
+config parsing (Hydra reads a comma list as a sweep; now passed as
+`[a,b]`). Second submission: readouts done; the cascade crashed on a wrapper
+method name (`pack_state` is not on the rolling wrapper; fixed to a one-frame
+`pack_window_state`) and was resubmitted as job 7600870
+(`polaris_rsi_drift_cascade_phase1b.pbs`); the flush probes were unaffected.
+
+**Test 1 (teacher-forced readout at global t = 0.5, 4 ICs, mean over 153
+channels), slot 1 .. 6:**
+
+| model | std(y_hat)/std(y) per slot |
+|---|---|
+| RSI e24 (EMA) | 1.0000, 0.9999, 0.9996, 0.9989, 0.9969, **0.9958** |
+| ERDM e24 | 1.0000, 1.0000, 0.9996, 0.9978, 0.9956, 0.9910 |
+
+The RSI anchor readout (slot 6, where `c_skip = 0.631`) passes 99.6% of the
+truth's anomaly amplitude through on-manifold, slightly *more* than ERDM's
+denoiser at its back slot and above the oracle's Bayes-floor expectation for
+the median channel (~0.99 at S_c ~0.1). There is no on-manifold amplitude
+contraction in the quantity RSI copies forward. Consequences: the mis-scaled
+skip is not producing a level bias on the training manifold (report Layer B,
+"on-manifold" branch: rejected); whatever drives the time-mean collapse
+switches on off-manifold (Tests 2 and 4 decide). Per-channel slot-6 values,
+level gain and shrink response follow when job 7600870 writes `summary.json`.

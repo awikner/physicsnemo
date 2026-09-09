@@ -15,7 +15,7 @@
 #PBS -l walltime=01:00:00
 #PBS -l filesystems=home:eagle
 #PBS -j oe
-#PBS -N rsi-drift-probes
+#PBS -N rsi-drift-cascade
 set -uo pipefail
 R=/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi
 cd "$R"
@@ -58,13 +58,11 @@ launch () {
   echo "$?" > "$OUT/${name}.rc"
 }
 echo "=== $(date) | epoch $EP | ICs $ICS | out $OUT ==="
-launch 0 rsi_readout_cascade  "${RSI[@]}"  "+probes.which=[readout,cascade]" "+probes.out=$OUT/rsi"        +probes.cascade_rolls=120 &
-launch 1 rsi_flush            "${RSI[@]}"  "+probes.which=[flush]"           "+probes.out=$OUT/rsi_flush"  +probes.flush_rolls=36 +probes.flush_k0=30 &
-launch 2 erdm_readout_cascade "${ERDM[@]}" "+probes.which=[readout,cascade]" "+probes.out=$OUT/erdm"       +probes.cascade_rolls=120 &
-launch 3 erdm_flush           "${ERDM[@]}" "+probes.which=[flush]"           "+probes.out=$OUT/erdm_flush" +probes.flush_rolls=36 +probes.flush_k0=30 &
+launch 0 rsi_readout_cascade  "${RSI[@]}"  "+probes.which=[readout,cascade]" "+probes.out=$OUT/rsi"  +probes.cascade_rolls=${PROBE_ROLLS:-120} &
+launch 1 erdm_readout_cascade "${ERDM[@]}" "+probes.which=[readout,cascade]" "+probes.out=$OUT/erdm" +probes.cascade_rolls=${PROBE_ROLLS:-120} &
 wait
 echo "=========================== RESULTS ==========================="
-for n in rsi_readout_cascade rsi_flush erdm_readout_cascade erdm_flush; do
+for n in rsi_readout_cascade erdm_readout_cascade; do
   echo "-- $n rc=$(cat "$OUT/$n.rc" 2>/dev/null)"
   L=$(ls -t "$OUT/${n}_"*.log | head -1)
   grep -aE "done in|Error|Traceback|out of memory" "$L" | head -6 | sed 's/^/     /'

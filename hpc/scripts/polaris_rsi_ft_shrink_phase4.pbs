@@ -1,0 +1,94 @@
+#!/bin/bash -l
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI drift diagnosis, PHASE 4a: fine-tune the prod24_b40 model from epoch 24
+# for EPOCHS_PER_LINK more epochs with the PATTERN-SHRINK anchor augmentation
+# (loss.anchor_shrink: a <- <a> + s (a - <a>), s ~ U(0.7, 1)), everything else
+# identical to polaris_rsi_prod24_b40.pbs (Muon lr 1.58e-4 x 0.95^epoch on
+# resume, wd 0.01, EMA 0.99, fp32+TF32, grad checkpointing, 10 nodes x 4 =
+# batch 40). The checkpoint dir must be seeded with the epoch-24 pair
+# (RollingDiTWrapper.0.24.mdlus + checkpoint.0.24.pt) before the first link;
+# the trainer resumes from the latest epoch it finds there.
+# Pair the result with fresh_noise_scale ~1.45 at inference (Layer A fix).
+#PBS -A lighthouse-uchicago
+#PBS -q prod
+#PBS -l select=10:system=polaris
+#PBS -l walltime=02:59:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -N rsi-ft-shrink
+set -uo pipefail
+R=/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi
+cd "$R"
+source "$R/polaris_env.sh"
+export HYDRA_FULL_ERROR=1
+J=${PBS_JOBID%%.*}
+CKPT=${FT_CKPT:-checkpoints_ft_shrink_b40}
+TARGET=${FT_TARGET:-26}
+SHRINK=${FT_SHRINK:-0.3}
+EPOCHS_PER_LINK=2
+PPN=4
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+NRANKS=$((NNODES * PPN))
+export GPUS_PER_NODE=$PPN
+export MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
+export MASTER_PORT=29500
+echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | ckpt $CKPT | anchor_shrink $SHRINK | target epoch $TARGET ==="
+[ "$NNODES" -eq 10 ] || { echo "FATAL: expected 10 nodes, got $NNODES"; exit 1; }
+DONE=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
+DONE=${DONE:-0}
+[ "$DONE" -ge 24 ] || { echo "FATAL: $CKPT must be seeded with the epoch-24 pair (found epoch ${DONE})"; exit 1; }
+if [ "$DONE" -ge "$TARGET" ]; then echo "already at ${DONE}/${TARGET} -- nothing to do"; exit 0; fi
+NEPOCH=$((DONE + EPOCHS_PER_LINK)); [ "$NEPOCH" -gt "$TARGET" ] && NEPOCH=$TARGET
+echo "=== resume: ${DONE} epochs done -> running through epoch ${NEPOCH} of ${TARGET} ==="
+LR=1.5811e-4
+timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
+    --cpu-bind depth -d 8 \
+    bash hpc/scripts/polaris_rank_env.sh \
+    python examples/weather/ai_rossby/train_diffusion.py \
+    --config-dir=examples/weather/ai_rossby/conf --config-name=config \
+    run_name=rsi_sstpred_ft_shrink_b40 \
+    model=amip_rsi_sst_pred loss=rsi loss.window_size=6 \
+    dataset=amip_dailyavg_coarse_multiyear \
+    training=amip_diffusion_bf16 validation=diffusion_rollout seed=0 \
+    wandb.enabled=False \
+    "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse_train7914" \
+    "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary_train7914" \
+    "++dataset.mean_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_mean_dailyavg.nc" \
+    "++dataset.std_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc" \
+    ++dataset.sst_anomaly_channel=none ++dataset.scalar_forcing=none \
+    ++dataset.normalize_constant_boundary=true \
+    ++dataset.constant_boundary_stats=spatial \
+    ++dataset.smooth_constant_lsm=true \
+    ++loss.h1_precond=edm \
+    "++loss.noise_scale_path=$AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153.pt" \
+    ++loss.gamma_0=1.0 ++loss.gamma_1=0.04 \
+    "++loss.anchor_shrink=$SHRINK" \
+    ++training.amp=none ++training.matmul_precision=high \
+    ++training.grad_checkpoint=true \
+    "++training.optimizer.lr=$LR" \
+    ++training.optimizer.weight_decay=0.01 \
+    ++training.optimizer.muon_lr_multiplier=10 \
+    ++training.ema.decay=0.99 \
+    ++training.stages.0.scheduler.type=StepLR \
+    ++training.stages.0.scheduler.sl_gamma=0.95 \
+    "++training.max_epochs=$NEPOCH" "++training.stages.0.num_epochs=$NEPOCH" \
+    ++validation.every_n_epochs=1 \
+    "++validation.rollout.climatology.surface_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_surface.pt" \
+    "++validation.rollout.climatology.upper_air_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_upper_air.pt" \
+    "++validation.rollout.climatology.diagnostic_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_diagnostic.pt" \
+    "++checkpoint_dir=$CKPT" \
+    > "ftshrink_${J}.log" 2>&1
+echo "train exit=$? (124 = hit the timeout) ; === $(date) ==="
+L="ftshrink_${J}.log"
+grep -am1 "world_size=" "$L"; grep -am1 "steps_per_epoch=" "$L"; grep -am1 "fast-forwarded" "$L"
+grep -am1 "drift-diagnosis knobs" "$L"
+grep -a -E "epoch [0-9]+ batch" "$L" | head -2; grep -a -E "epoch [0-9]+ batch" "$L" | tail -2
+grep -a "valid:" "$L" | tail -4
+grep -a -E "Error|Traceback|SIGSEGV|SIGABRT|out of memory|non-finite" "$L" | head -6
+NOW=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
+echo "=== epochs complete: ${NOW:-0} / ${TARGET} ==="

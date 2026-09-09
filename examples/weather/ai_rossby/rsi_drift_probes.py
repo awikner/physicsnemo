@@ -12,7 +12,7 @@ RSI's first window is rows ``t..t+W`` (anchor + W frames), ERDM's is
 ``t+1..t+W``; trajectory slot ``i`` is the forcing at row ``t+i``, so window
 slot ``w`` of roll ``k`` sees the lag-1 forcing ``traj[k+w]``).
 
-One process, one GPU. Select probes with ``+probes.which=readout,cascade,flush``:
+One process, one GPU. Select probes with ``+probes.which=[readout,cascade,flush]``:
 
 ``readout``
     Teacher-forced per-slot, per-channel readout statistics at the sampler's
@@ -48,8 +48,8 @@ Example::
         loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear \
         validation=eval_suite seed=0 wandb.enabled=False \
         ++model.forecaster.checkpoint=$R/checkpoints_prod24_b40/RollingDiTWrapper.0.24.mdlus \
-        +probes.which=readout,cascade +probes.use_ema=true \
-        +probes.ic_dates=1996-01-01,1996-04-01,1996-07-01,1996-10-01 \
+        +probes.which=[readout,cascade] +probes.use_ema=true \
+        '+probes.ic_dates=[1996-01-01,1996-04-01,1996-07-01,1996-10-01]' \
         +probes.out=$R/probes_e24/rsi
 
 Outputs ``<out>/<probe>.pt`` (all arrays) and ``<out>/summary.json``.
@@ -336,7 +336,7 @@ def probe_cascade(sched, model, wrapper, ds, ics, step, device, *, batch, family
                                                       horizon=rolls, num_steps=num_steps):
             k = k0 + 1
             em = sched.strip_ocean(x_k) if nocean else x_k
-            tr = wrapper.pack_state(_to(_stack_frames(ds, [t + k * step for t in bics]), device)).float()
+            tr = wrapper.pack_window_state(_to(_batch_windows(ds, bics, k, 1, step), device))[:, 0].float()
             e_std.append(_astd(em).mean(0).cpu()); e_mean.append(_amean(em).mean(0).cpu())
             t_std.append(_astd(tr).mean(0).cpu()); t_mean.append(_amean(tr).mean(0).cpu())
             r.append((em - tr).pow(2).mean(dim=(-2, -1)).sqrt().mean(0).cpu())
@@ -433,6 +433,13 @@ def probe_flush(sched, model, wrapper, ds, ics, step, device, *, batch, family, 
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
+def _as_list(v) -> list[str]:
+    """Accept a Hydra list (``[a,b]``), a quoted comma string, or a scalar."""
+    if isinstance(v, (list, tuple)) or type(v).__name__ == "ListConfig":
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [x.strip() for x in str(v).split(",") if x.strip()]
+
+
 def _resolve_ics(raw_ds, ic_dates: list[str], log) -> list[int]:
     from inference import _full_time_coord, resolve_init_schedule  # noqa: E402
 
@@ -508,7 +515,7 @@ def main(cfg: DictConfig) -> None:
     pcfg = cfg.get("probes", None)
     if pcfg is None:
         raise ValueError("pass +probes.which=... (readout,cascade,flush) and +probes.out=...")
-    which = [w.strip() for w in str(pcfg.which).split(",") if w.strip()]
+    which = _as_list(pcfg.which)
     out_dir = Path(_resolve_path(str(pcfg.out)))
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -545,7 +552,7 @@ def main(cfg: DictConfig) -> None:
              f"sampler={type(sched).__name__} knobs: fresh_noise_scale="
              f"{getattr(sched, 'fresh_noise_scale', None)} final_denoise={getattr(sched, 'final_denoise', None)}")
 
-    ic_dates = [d.strip() for d in str(pcfg.get("ic_dates", "1996-01-01")).split(",") if d.strip()]
+    ic_dates = _as_list(pcfg.get("ic_dates", "1996-01-01"))
     ics = _resolve_ics(raw_ds, ic_dates, log)
     batch = int(pcfg.get("batch", 2))
     num_steps = int(pcfg.get("num_steps", 2))
