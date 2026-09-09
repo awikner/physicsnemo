@@ -17,6 +17,8 @@
 #   FT_TARGET  last epoch to reach
 #   FT_SHRINK  loss.anchor_shrink (0 = off)
 #   FT_EXCLUDE plus-separated channel indices excluded from the shrink
+#   FT_LEVEL   loss.anchor_level_noise (0 = off): uniform per-channel level
+#              offset of the anchor, in increment-std units
 #   FT_PF      loss.pushforward_rolls K (0 = off): k ~ U{0..K} own-sampler
 #              rolls per step, last k anchors self-generated
 #   FT_FRESH   loss.fresh_noise_scale used by those rolls (pair with the
@@ -48,6 +50,7 @@ BASE=${FT_BASE:-20}
 TARGET=${FT_TARGET:-22}
 SHRINK=${FT_SHRINK:-0.0}
 EXCLUDE=${FT_EXCLUDE:-}
+LEVEL=${FT_LEVEL:-0.0}
 PF=${FT_PF:-0}
 FRESH=${FT_FRESH:-1.0}
 EPOCHS_PER_LINK=${EPOCHS_PER_LINK:-1}
@@ -58,7 +61,7 @@ NRANKS=$((NNODES * PPN))
 export GPUS_PER_NODE=$PPN
 export MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
 export MASTER_PORT=29900
-echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | ckpt $CKPT | base $BASE target $TARGET | shrink $SHRINK exclude [$EXCLUDE] | pushforward $PF fresh $FRESH | gc_levels $GC_LEVELS ==="
+echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | ckpt $CKPT | base $BASE target $TARGET | shrink $SHRINK exclude [$EXCLUDE] level $LEVEL | pushforward $PF fresh $FRESH | gc_levels $GC_LEVELS ==="
 EXPECT_NODES=${FT_NODES:-10}   # FT_NODES=1 for a debug-queue smoke run
 [ "$NNODES" -eq "$EXPECT_NODES" ] || { echo "FATAL: expected $EXPECT_NODES nodes, got $NNODES"; exit 1; }
 DONE=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
@@ -94,7 +97,7 @@ except Exception as e:
 if ! preflight; then
   RETRY=${FT_RETRY:-0}
   if [ "$RETRY" -lt 2 ]; then
-    NEW=$(qsub -N "$PBS_JOBNAME" -v "FT_CKPT=$CKPT,FT_BASE=$BASE,FT_TARGET=$TARGET,FT_SHRINK=$SHRINK,FT_EXCLUDE=$EXCLUDE,FT_PF=$PF,FT_FRESH=$FRESH,EPOCHS_PER_LINK=$EPOCHS_PER_LINK,FT_NODES=$EXPECT_NODES,FT_RETRY=$((RETRY + 1))" "$R/polaris_rsi_ft_phase5.pbs" 2>&1)
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "FT_CKPT=$CKPT,FT_BASE=$BASE,FT_TARGET=$TARGET,FT_SHRINK=$SHRINK,FT_EXCLUDE=$EXCLUDE,FT_LEVEL=$LEVEL,FT_PF=$PF,FT_FRESH=$FRESH,EPOCHS_PER_LINK=$EPOCHS_PER_LINK,FT_NODES=$EXPECT_NODES,FT_RETRY=$((RETRY + 1))" "$R/polaris_rsi_ft_phase5.pbs" 2>&1)
     echo "bad GPU in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
   exit 3
@@ -123,7 +126,7 @@ timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     ++loss.h1_precond=edm \
     "++loss.noise_scale_path=$AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153.pt" \
     ++loss.gamma_0=1.0 ++loss.gamma_1=0.04 \
-    "++loss.anchor_shrink=$SHRINK" "${EXCL_ARG[@]}" \
+    "++loss.anchor_shrink=$SHRINK" "${EXCL_ARG[@]}" "++loss.anchor_level_noise=$LEVEL" \
     "++loss.pushforward_rolls=$PF" "++loss.fresh_noise_scale=$FRESH" \
     ++training.amp=none ++training.matmul_precision=high \
     ++training.grad_checkpoint=true \

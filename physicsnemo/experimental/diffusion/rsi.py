@@ -139,6 +139,7 @@ class RSIScheduler(nn.Module):
                  anchor_noise=0.0,
                  anchor_shrink=0.0,
                  anchor_shrink_exclude=(),
+                 anchor_level_noise=0.0,
                  pushforward_rolls=0,
                  pushforward_seed=0,
                  weighting="snr_bump",
@@ -237,6 +238,16 @@ class RSIScheduler(nn.Module):
         # channels 5-70x, fields whose spatial anomaly carries no climate
         # signal and where the head cannot judge the amplitude it restores.
         self.anchor_shrink_exclude = tuple(int(i) for i in (anchor_shrink_exclude or ()))
+        # Level-offset augmentation (Phase 5, 2026-09-09): a <- a + s * S_c * e
+        # with e ~ N(0, 1) per (batch, slot, channel), CONSTANT over the grid.
+        # The pattern shrink keeps the spatial mean by construction, and on the
+        # bundle base the level drift (t2m -6 K, z500 falling) got worse under
+        # it; Test 1 showed RSI passes 77% of a uniform window offset where
+        # ERDM re-derives the level from context. Showing the head anchors with
+        # a wrong level and a target with the right one is the direct remedy.
+        self.anchor_level_noise = float(anchor_level_noise)
+        if self.anchor_level_noise < 0.0:
+            raise ValueError(f"anchor_level_noise must be >= 0, got {anchor_level_noise}")
         # Self-generated anchors (drift diagnosis, 2026-09-09). K > 0 makes
         # compute_loss expect K extra history frames ahead of the W+1 stack
         # and, per call, roll the window k ~ U{0..K} times with the model's
@@ -351,12 +362,14 @@ class RSIScheduler(nn.Module):
             self.solver, self.weighting, self.eps_scale, noise, self.reduce_to_erdm,
         )
         if (self.fresh_noise_scale != 1.0 or self.anchor_shrink > 0.0
-                or self.pushforward_rolls > 0):
+                or self.pushforward_rolls > 0 or self.anchor_level_noise > 0.0):
             logger.info(
                 "RSIScheduler drift-diagnosis knobs: fresh_noise_scale=%s, "
-                "anchor_shrink=%s (exclude %s), pushforward_rolls=%s",
+                "anchor_shrink=%s (exclude %s), anchor_level_noise=%s, "
+                "pushforward_rolls=%s",
                 self.fresh_noise_scale, self.anchor_shrink,
-                list(self.anchor_shrink_exclude), self.pushforward_rolls,
+                list(self.anchor_shrink_exclude), self.anchor_level_noise,
+                self.pushforward_rolls,
             )
 
     # ------------------------------------------------------------------
@@ -567,6 +580,12 @@ class RSIScheduler(nn.Module):
                 keep[idx] = True
                 shrunk = torch.where(keep[None, None, :, None, None], anchor, shrunk)
             anchor = shrunk
+        if self.anchor_level_noise > 0.0:
+            e = torch.randn(anchor.shape[:3], device=anchor.device, dtype=anchor.dtype)
+            s = self._scale(anchor)                       # (C,) or None
+            if s is not None:
+                e = e * s.reshape(1, 1, -1).to(anchor.dtype)
+            anchor = anchor + self.anchor_level_noise * e[..., None, None]
         if self.anchor_noise <= 0.0:
             return anchor
         zp = self.get_noise(anchor)

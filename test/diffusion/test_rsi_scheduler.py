@@ -950,3 +950,18 @@ def test_anchor_shrink_exclusion_leaves_listed_channels_untouched():
     assert not torch.allclose(out[:, :, [0, 2]], a[:, :, [0, 2]])
     # the spatial mean is preserved on the shrunk channels
     torch.testing.assert_close(out.mean(dim=(-2, -1)), a.mean(dim=(-2, -1)), atol=1e-5, rtol=0)
+
+
+def test_anchor_level_noise_is_a_spatially_uniform_per_channel_offset():
+    torch.manual_seed(0)
+    a = torch.randn(2, 3, 4, 8, 16)
+    sched = RSIScheduler(window_size=3, anchor_level_noise=0.5)
+    out = sched.perturb_anchor(a)
+    d = out - a
+    # constant over the grid for each (batch, slot, channel) ...
+    torch.testing.assert_close(d, d.mean(dim=(-2, -1), keepdim=True).expand_as(d))
+    # ... nonzero, of the requested magnitude, and the pattern is untouched
+    assert d.abs().mean() > 0.1
+    torch.testing.assert_close(out - out.mean(dim=(-2, -1), keepdim=True),
+                               a - a.mean(dim=(-2, -1), keepdim=True))
+    assert torch.equal(RSIScheduler(window_size=3).perturb_anchor(a), a)
