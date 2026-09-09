@@ -436,6 +436,39 @@ pair copied into `checkpoints_ft5_{shrink,pf,pfshrink}_b40`): S22 job
 PS22 follow with `polaris_rsi_drift_eval_multi_phase5.pbs` on 10 nodes once
 the checkpoints exist.
 
+### Phase 5 results
+
+**B20, the bundle epoch-20 baseline (job 7601536, one year, 8 members,
+shipped sampler and `fresh_noise_scale` 1.45):**
+
+| | shipped e24 (old base, 5 yr) | **bundle e20, base** | bundle e20, k145 | ft26 (0.3, old base) | ERDM e24 |
+|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias | 2059 / -973 | 2098 / -1127 | 2070 / -1134 | 1030 / -568 | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K) | 10.47 / -3.65 | 11.59 / -5.47 | 11.36 / -5.47 | 4.81 / -1.40 | 0.21 / -0.01 |
+| t850 bias-map RMSE / mean bias (K) | 8.88 / -3.36 | 9.19 / -3.66 | 9.03 / -3.75 | 4.90 / -2.14 | 0.18 / -0.03 |
+| surface RMSE-vs-clim, mean steps 100-365 | 611 | **794** | 792 | 350 | 63 |
+| upper-air RMSE-vs-clim, mean steps 100-365 | 519 | 552 | 555 | 395 | 453 |
+| surface RMSE-vs-clim at 30 / 50 / 85 / 200 / 365 | 219 / 487 / 619 / 614 / 609 | 214 / 611 / 776 / 778 / 796 | 255 / 454 / 713 / 789 / 816 | 128 / 326 / 328 / 347 / 358 | 75 / 70 / 53 / 76 / 86 |
+| surface spread at 10 / 100 / 365 | 0.110 / 0.255 / 0.241 | 0.106 / 0.254 / 0.244 | 0.115 / 0.265 / 0.248 | 0.126 / 0.249 / 0.208 | 0.136 / 0.310 / 0.312 |
+| alpha skt / sp / t2m / q2m / u10 / v10 | 0.68 / 0.49 / 0.68 / 0.72 / 0.86 / 0.87 | 0.71 / 0.60 / 0.72 / 0.75 / 0.83 / 0.85 | 0.69 / 0.58 / 0.70 / 0.74 / 0.83 / 0.85 | 0.27 / -0.02 / 0.26 / 0.36 / 0.42 / 0.65 | ~0 |
+| alpha upper-air T / u / v / z / q | 0.75 / 0.84 / 0.90 / 0.76 / 0.81 | 0.79 / 0.84 / 0.86 / 0.76 / 0.83 | 0.78 / 0.83 / 0.85 / 0.75 / 0.82 | 0.48 / 0.51 / 0.69 / 0.34 / 0.49 | ~0 |
+| anchor trace: first roll with tropospheric v below 0.7 | 34 | 32 | 32 | 46 | |
+| anchor trace: late amplitude, surface+diag / trop. T / trop. z / sp | 0.43 / 0.37 / 0.32 / 0.71 | 0.36 / 0.37 / 0.35 / 0.46 | 0.38 / 0.33 / 0.30 / 0.48 | 0.63 / 0.51 / 0.55 / 1.10 | |
+
+Reading. The bundle model, with 11% lower training loss and better 1-6 day
+skill, drifts **harder** than the old base: the plateau is 794 against 611,
+the one-year t2m level bias -5.5 K against -3.65 K, the onset two rolls
+earlier (roll 32) and surface pressure now collapses to 0.46 of its pattern
+amplitude (old base 0.71) -- the pattern alpha is the same 0.7-0.85 on every
+channel. The fresh-slot inflation again moves the mean by nothing (794 vs
+792) while adding day-10 spread. This is the strongest evidence so far that
+the drift is a property of the formulation and not of a particular training
+run's optimizer or schedule: a better-fit head trusts its anchor at least as
+much, and the day-10 validation deficit of the bundle (116 vs 81) was the
+first 10 rolls of this earlier onset. It also sets the bar for the Phase 5
+fine-tunes: the Phase 4 remedy has to be re-measured on this base (S22), and
+the control is the chain's own epoch 22 (C22), not the old base.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
