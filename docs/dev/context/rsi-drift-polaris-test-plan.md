@@ -485,6 +485,49 @@ change nothing -- plateau 792 (B20 794), z500 2094 / -1140, t2m 11.50 /
 onset roll 32, late tropospheric amplitude 0.35-0.38. The fine-tunes below
 are measured against 792.
 
+**S22, pattern-shrink 0.3 for two epochs from the bundle epoch 20 (job
+7601531 -> eval 7601830):**
+
+| | C22 control | **S22** | ft26 (0.3, old base, for reference) | ERDM |
+|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias | 2094 / -1140 | 1805 / **-1483** | 1030 / -568 | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K) | 11.50 / -5.41 | 7.99 / **-6.06** | 4.81 / -1.40 | 0.21 / -0.01 |
+| t850 bias-map RMSE / mean bias (K) | 9.12 / -3.67 | 7.21 / -5.18 | 4.90 / -2.14 | 0.18 / -0.03 |
+| u250 bias-map RMSE / mean bias | 10.45 / -2.74 | 9.35 / +2.54 | 8.06 / -2.23 | 0.70 / 0.21 |
+| surface RMSE-vs-clim, mean steps 100-365 | 792 | **455** | 350 | 63 |
+| upper-air RMSE-vs-clim, mean steps 100-365 | 550 | **693** | 395 | 453 |
+| surface RMSE-vs-clim at 30 / 50 / 85 / 200 / 365 | 201 / 549 / 764 / 804 / 808 | 146 / 166 / 349 / 453 / 470 | 128 / 326 / 328 / 347 / 358 | 75 / 70 / 53 / 76 / 86 |
+| surface spread at 10 / 100 / 365 | 0.101 / 0.268 / 0.256 | 0.099 / 0.301 / 0.255 | 0.126 / 0.249 / 0.208 | 0.136 / 0.310 / 0.312 |
+| alpha skt / sp / t2m / q2m / u10 / v10 | 0.71 / 0.59 / 0.71 / 0.75 / 0.83 / 0.85 | 0.31 / 0.23 / 0.32 / 0.47 / 0.62 / 0.71 | 0.27 / -0.02 / 0.26 / 0.36 / 0.42 / 0.65 | ~0 |
+| alpha upper-air T / u / v / z / q | 0.78 / 0.84 / 0.85 / 0.75 / 0.83 | 0.63 / 0.68 / 0.68 / 0.49 / 0.41 | 0.48 / 0.51 / 0.69 / 0.34 / 0.49 | ~0 |
+| anchor trace: onset (trop. v below 0.7) / late amplitude sfc+diag, trop. T, trop. z, sp | 32 / 0.38, 0.36, 0.35, 0.47 | **62** / 0.53, 0.50, 0.53, 0.92 | 46 / 0.63, 0.51, 0.55, 1.10 | |
+| 10-day validation, surface RMSE step 1 / 10 | 1.95 / 116 (e20) | 11.1 / 171 (ep21), 9.2 / 161 (ep22) | 10.7 / 89 | |
+
+Reading. (i) The pattern remedy transfers in direction and size: the plateau
+excess over ERDM drops by 46% ((792 - 455) / (792 - 63); Phase 4 at two
+epochs: 48%), the onset moves from roll 32 to 62, the late pattern amplitude
+of the slow channels rises from 0.35 to 0.5 (surface pressure 0.47 -> 0.92)
+and the surface alpha falls to 0.2-0.3 (winds 0.6-0.7 as before). (ii) The
+**level** goes the other way on this base: the one-year t2m mean bias is
+-6.06 K against the control's -5.41 K, z500 -1483 against -1140, T850 -5.18
+against -3.67, and the upper-air RMSE-vs-climatology plateau is *worse* (693
+vs 550) because it is dominated by the falling geopotential level. On the
+old base the same augmentation had improved the level with every epoch
+(t2m -3.65 -> -1.40 K), so the level response of the pattern shrink is not a
+robust effect of the augmentation -- it acts on the pattern only (by
+construction it preserves the spatial mean) and the level drift, which the
+bundle base has more of, is a separate failure that needs its own term. The
+report's Test 1 result (RSI passes 77% of a uniform window offset where ERDM
+re-derives the level) is the mechanism. (iii) The short-range cost is the
+same as before (step-1 surface RMSE 9-11 vs 2). (iv) The stratospheric
+humidity blow-up (q@50 up to 40x) is present again; PS22 carries the
+exclusion.
+
+Consequence: a level-offset augmentation is added as a fourth variant, L22
+(`anchor_level_noise`, a spatially uniform per-channel offset of the anchor
+of s ~ N(0, 1) increment-std units, on top of shrink 0.3, so the difference
+to S22 is the level term alone).
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
