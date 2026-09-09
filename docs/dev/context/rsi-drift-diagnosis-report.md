@@ -136,9 +136,16 @@ win.
   from the actual off-manifold structure of its own anchor chain, which a
   uniform shrink cannot imitate. Remaining after one epoch: a -1.2 K level, a
   +3.4 m/s u250 level, wind alphas 0.2-0.5 and a slight over-amplification
-  of tropospheric T and q (1.07-1.14). Two epochs, the unpaired sampler and
-  a five-year run are being measured; full tables in the plan's Phase 5
-  section.
+  of tropospheric T and q (1.07-1.14). The unpaired sampler gives the same
+  climate (plateau 141), so the injection is a spread knob only; the finished
+  plain epoch 24 drifts exactly like epoch 20 (795); the shrink with an
+  added level-offset augmentation recovers its level damage (t2m -6.1 ->
+  -3.8 K) but stays at 422; a second epoch of pushforward + shrink is worse
+  than the first (329 vs 290). Ranking by one-year plateau: pushforward 152
+  << pushforward + shrink 290-329 < shrink + level 422 < shrink 455 << plain
+  795, ERDM 63. Two pushforward epochs, the same fine-tune on the finished
+  epoch 24 (the deployable candidate) and five-year runs are in the queue;
+  full tables in the plan's Phase 5 section.
 
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast

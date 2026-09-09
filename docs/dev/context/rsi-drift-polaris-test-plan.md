@@ -636,6 +636,38 @@ is at its floor, base lr 5e-5 / Muon 5e-4), jobs 7602052 -> 7602053 ->
 (B24). Also queued: the first five-year wave (job 7602002: P21 paired and
 plain, C22, S22, PS21).
 
+**Wave 2a (job 7602113): PS22, L22 and the finished plain model B24, one year:**
+
+| | B24 plain e24 | S22 shrink | **L22 shrink + level** | PS21 pf+shrink (1 ep) | PS22 pf+shrink (2 ep) | P21 pf (1 ep) | ERDM |
+|---|---|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias | 2091 / -1137 | 1805 / -1483 | 994 / -497 | 999 / -951 | 1268 / -1147 | **542 / -230** | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K) | 11.49 / -5.43 | 7.99 / -6.06 | 6.08 / -3.82 | 4.18 / -3.51 | 4.78 / -4.11 | **1.59 / -1.19** | 0.21 / -0.01 |
+| t850 bias-map RMSE / mean bias (K) | 9.10 / -3.67 | 7.21 / -5.18 | 5.19 / -1.60 | 4.23 / -3.81 | 4.61 / -3.92 | **1.52 / -1.02** | 0.18 / -0.03 |
+| surface RMSE-vs-clim, mean steps 100-365 | 795 | 455 | 422 | 290 | 329 | **152** | 63 |
+| upper-air RMSE-vs-clim, mean steps 100-365 | 553 | 693 | 369 | 549 | 511 | **356** | 453 |
+| alpha skt / sp / t2m / q2m / u10 / v10 | 0.70 / 0.59 / 0.71 / 0.74 / 0.83 / 0.85 | 0.31 / 0.23 / 0.32 / 0.47 / 0.62 / 0.71 | 0.28 / 0.15 / 0.29 / 0.42 / 0.52 / 0.61 | -0.06 / -0.03 / -0.06 / 0.14 / 0.35 / 0.43 | 0.09 / 0.09 / 0.08 / 0.24 / 0.48 / 0.53 | **-0.02 / 0.03 / -0.03 / 0.01 / 0.39 / 0.29** | ~0 |
+| alpha upper-air T / u / v / z / q | 0.79 / 0.84 / 0.85 / 0.75 / 0.82 | 0.63 / 0.68 / 0.68 / 0.49 / 0.41 | 0.58 / 0.57 / 0.68 / 0.40 / 0.59 | 0.52 / 0.47 / 0.49 / 0.17 / 0.07 | 0.41 / 0.58 / 0.58 / 0.33 / 0.22 | **0.32 / 0.50 / 0.22 / 0.25 / 0.30** | ~0 |
+| anchor trace: onset roll / late amplitude sfc+diag, trop. T, z | 34 / 0.37, 0.34, 0.34 | 62 / 0.53, 0.50, 0.53 | 99 / 0.69, 0.59, 0.82 | 90 / 0.76, 0.91, 1.04 | 126 / 0.72, 0.86, 0.77 | **335 / 0.91, 1.07, 0.85** | |
+| 10-day validation, surface RMSE step 1 / 10 | 1.95 / 116 (e20) | 9.2 / 161 | 11.8 / 189 | 12.0 / 105 | 8.7 / 89 | **2.0 / 58** | |
+
+Readings. (i) The finished plain model (B24) drifts exactly like epochs 20
+and 22 (795 / 792 / 794): the production run's last four epochs changed
+nothing about the drift, so the P24 fine-tune below starts from the same
+place as P21 did. (ii) The level term does what it was added for: on top of
+the shrink it brings the one-year t2m level from -6.06 K to -3.82 K, T850
+from -5.18 to -1.60 K and z500 from -1483 to -497, and the upper-air
+RMSE-vs-climatology from 693 to 369 -- so the shrink's level damage was a
+level problem the network could unlearn once shown wrong-level anchors --
+but the pattern alpha barely moves (t2m 0.32 -> 0.29, sp 0.23 -> 0.15) and
+the plateau only from 455 to 422. (iii) A second epoch of pushforward +
+shrink is worse than the first (329 vs 290, level -4.1 vs -3.5 K): the two
+augmentations fight, and the shrink wins over time. (iv) Ranking after 1-2
+augmented epochs, by plateau: pushforward alone 152 << pushforward + shrink
+290-329 < shrink + level 422 < shrink 455 << plain 792-795, with ERDM at 63.
+Self-generated anchors are the fix; the shrink should be dropped from the
+recipe, and the level term is only worth re-testing on top of the
+pushforward if P22/P24 keep the residual -1.2 K level.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
