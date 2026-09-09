@@ -162,6 +162,20 @@ IC 1996-01-01, obs-climatology truth; `eval_bias1yr_{base,k145}_e25`):
 | surface RMSE-vs-clim at step 30 / 50 / 85 / 200 / 365 | 219 / 487 / 619 / 614 / 609 | 139 / 270 / 337 / 408 / 413 | 132 / 266 / 328 / 402 / 408 | 75 / 70 / 53 / 76 / 86 |
 | surface spread step 10 / 100 / 365 | 0.110 / 0.255 / 0.241 | 0.127 / 0.236 / 0.209 | 0.134 / 0.255 / 0.212 | 0.136 / 0.310 / 0.312 |
 
+Shrinkage alpha of the one-year time-mean bias map (`polaris_results.py alpha`,
+which reproduces the brief's 5-year numbers on the epoch-24 file to 3 decimals:
+skt 0.681, sp 0.490, t2m 0.683, q2m 0.718, u10 0.864, v10 0.871; ERDM 0.000):
+
+| channel / group | shipped e24 (5 yr) | ft25 (1 yr) | ft25 + 1.45 (1 yr) |
+|---|---|---|---|
+| skin temperature | 0.681 (R2 0.95) | 0.214 (0.41) | 0.221 |
+| surface pressure | 0.490 (0.87) | -0.081 (0.08) | -0.078 |
+| 2m temperature | 0.683 (0.95) | 0.201 (0.43) | 0.211 |
+| 2m specific humidity | 0.718 (0.97) | 0.345 (0.75) | 0.349 |
+| 10m u / v | 0.864 / 0.871 | 0.399 / 0.605 | 0.406 / 0.599 |
+| diagnostics, mean | 0.758 | 0.406 | 0.407 |
+| upper air T / u / v / z / q, mean over levels | 0.751 / 0.845 / 0.901 / 0.757 / 0.807 | 0.434 / 0.483 / 0.679 / 0.309 / 0.639 | 0.463 / 0.487 / 0.678 / 0.310 / 0.618 |
+
 Readings. (i) One epoch of pattern-shrink anchor augmentation removes ~40%
 of the drift plateau's excess over ERDM ((611 - 397) / (611 - 63)) and halves
 the one-year bias-map RMSE of z500 and t2m; the run-away is delayed and
@@ -170,7 +184,10 @@ after day 100 (333 -> 413), so this is a partial fix that may continue to
 drift over 5 years. (ii) The fresh-slot inflation on top adds nothing to the
 mean and only raises the spread, exactly as on the epoch-24 weights. (iii)
 The day-10 spread rose (0.110 -> 0.127) without any sampler change: a head
-that trusts its anchor less disperses more. (iv) This is the report's
+that trusts its anchor less disperses more. (iv) The alpha table shows the relief is largest for the slow channels
+(surface pressure's collapse is gone; T, z, skt down to 0.2-0.4) and smallest
+for the fast v-winds (0.6-0.7) whose anchor chains go off-manifold first, which
+is where the wider shrink range should help. (v) This is the report's
 training-side remedy confirmed in direction on the real model; the obvious
 next steps are more epochs, a wider shrink range (the real collapse reaches
 0.3-0.4 for the fast channels, while the augmentation only shows the network

@@ -134,14 +134,72 @@ def cmd_probes(args):
                     print(f"      {k:13s} {row}")
 
 
+
+# --------------------------------------------------------------------------- #
+# Shrinkage fit (the brief's section 3.5): bias = -alpha (obs - <obs>) + c
+# --------------------------------------------------------------------------- #
+def shrinkage_alpha(d, groups=("surface", "diagnostic", "upper_air")):
+    """Per-channel lat-weighted fit of the time-mean bias map on the obs
+    anomaly pattern; returns {group: (alpha[C(,L)], r2[C(,L)])}. Uses the
+    ``climatology.{group}_bias`` and ``{group}_truth_mean`` maps written by
+    climate_eval_suite (S->N, 180x360)."""
+    clim = d["climatology"]
+    out = {}
+    for g in groups:
+        b = clim.get(f"{g}_bias"); t = clim.get(f"{g}_truth_mean")
+        if b is None or t is None:
+            continue
+        b = b.float(); t = t.float()
+        H = b.shape[-2]
+        lat = torch.linspace(-90 + 90 / H, 90 - 90 / H, H)
+        w = torch.cos(torch.deg2rad(lat)).clamp_min(0)[:, None].expand(H, b.shape[-1])
+        w = w / w.sum()
+        def wmean(x): return (x * w).sum(dim=(-2, -1), keepdim=True)
+        ta = t - wmean(t); ba = b - wmean(b)
+        cov = (w * ta * ba).sum(dim=(-2, -1)); var = (w * ta * ta).sum(dim=(-2, -1))
+        alpha = -cov / var.clamp_min(1e-30)
+        resid = ba + alpha[..., None, None] * ta
+        r2 = 1 - (w * resid * resid).sum(dim=(-2, -1)) / (w * ba * ba).sum(dim=(-2, -1)).clamp_min(1e-30)
+        out[g] = (alpha, r2)
+    return out
+
+
+def cmd_alpha(args):
+    names = None
+    for spec in args.run:
+        name, path = spec.split("=", 1)
+        if not Path(path).exists():
+            print(f"(missing {path})"); continue
+        d = _load(path)
+        res = shrinkage_alpha(d)
+        print(f"\n=== {name}: shrinkage alpha (R2) per channel; mean over channels per group ===")
+        for g, (a, r2) in res.items():
+            af = a.flatten(); rf = r2.flatten()
+            print(f"  {g:>10}: mean alpha {af.mean():.3f}  median {af.median():.3f}  mean R2 {rf.mean():.2f}  n={af.numel()}")
+        if "surface" in res:
+            a, r2 = res["surface"]
+            sfc = ["skin_temperature", "surface_pressure", "2m_temperature", "2m_specific_humidity", "10m_u", "10m_v"]
+            print("  surface: " + ", ".join(f"{n} {float(a[i]):.3f} (R2 {float(r2[i]):.2f})" for i, n in enumerate(sfc[: a.numel()])))
+        if "upper_air" in res and res["upper_air"][0].dim() == 2:
+            a, r2 = res["upper_air"]
+            print("  upper air mean alpha per variable (T,u,v,z,q): " + " ".join(f"{float(a[v].mean()):.3f}" for v in range(a.shape[0])))
+        h = d.get("headline") or {}
+        if isinstance(h, dict):
+            flat = {k: v for k, v in h.items() if isinstance(v, (int, float))}
+            print("  headline scalars: " + ", ".join(f"{k}={v:.4g}" for k, v in list(flat.items())[:10]) if flat else "  headline: " + str({k: type(v).__name__ for k, v in list(h.items())[:6]}))
+
+
+
 def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
     a = sp.add_parser("sweep"); a.add_argument("--base", required=True); a.add_argument("--erdm")
     a.add_argument("--variant", action="append"); a.add_argument("--horizon", type=int, default=300)
     b = sp.add_parser("probes"); b.add_argument("--dir", required=True)
+    c = sp.add_parser("alpha"); c.add_argument("--run", action="append", required=True,
+                                              help="name=path/to/eval_suite.pt (repeatable)")
     args = ap.parse_args()
-    {"sweep": cmd_sweep, "probes": cmd_probes}[args.cmd](args)
+    {"sweep": cmd_sweep, "probes": cmd_probes, "alpha": cmd_alpha}[args.cmd](args)
 
 
 if __name__ == "__main__":
