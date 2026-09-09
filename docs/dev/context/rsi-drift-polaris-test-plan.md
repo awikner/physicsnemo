@@ -479,6 +479,12 @@ first 10 rolls of this earlier onset. It also sets the bar for the Phase 5
 fine-tunes: the Phase 4 remedy has to be re-measured on this base (S22), and
 the control is the chain's own epoch 22 (C22), not the old base.
 
+**C22, the bundle epoch-22 control (job 7601774):** two more plain epochs
+change nothing -- plateau 792 (B20 794), z500 2094 / -1140, t2m 11.50 /
+-5.41 K, alpha skt / sp / t2m 0.71 / 0.59 / 0.71, upper-air T / z 0.78 / 0.75,
+onset roll 32, late tropospheric amplitude 0.35-0.38. The fine-tunes below
+are measured against 792.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
