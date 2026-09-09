@@ -552,6 +552,65 @@ factor 5 at day 1 whether or not the pushforward is on, and the pushforward
 recovers most of the shrink's day-10 damage (171 -> 105). The one-year
 consequences are the E21 evaluation (job 7601945).
 
+**E21: one year after ONE augmented epoch (job 7601945; S21 with the shipped
+sampler, P21 and PS21 with `fresh_noise_scale` 1.45 as trained):**
+
+| | C22 control | S21 shrink | **P21 pushforward** | PS21 both | S22 shrink (2 ep) | ERDM e24 |
+|---|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias | 2094 / -1140 | 1888 / -1590 | **542 / -230** | 999 / -951 | 1805 / -1483 | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K) | 11.50 / -5.41 | 8.15 / -6.39 | **1.59 / -1.19** | 4.18 / -3.51 | 7.99 / -6.06 | 0.21 / -0.01 |
+| t850 bias-map RMSE / mean bias (K) | 9.12 / -3.67 | 7.55 / -5.73 | **1.52 / -1.02** | 4.23 / -3.81 | 7.21 / -5.18 | 0.18 / -0.03 |
+| u250 bias-map RMSE / mean bias | 10.45 / -2.74 | 9.73 / +2.85 | 9.53 / +3.35 | 7.87 / +4.50 | 9.35 / +2.54 | 0.70 / 0.21 |
+| v10m bias-map RMSE | 1.58 | 1.41 | **0.86** | 0.97 | 1.40 | 0.14 |
+| surface RMSE-vs-clim, mean steps 100-365 | 792 | 416 | **152** | 290 | 455 | 63 |
+| upper-air RMSE-vs-clim, mean steps 100-365 | 550 | 735 | **356** | 549 | 693 | 453 |
+| surface RMSE-vs-clim at 30 / 50 / 85 / 200 / 365 | 201 / 549 / 764 / 804 / 808 | 155 / 261 / 341 / 412 / 415 | 113 / 128 / 113 / 184 / 164 | 145 / 155 / 202 / 276 / 322 | 146 / 166 / 349 / 453 / 470 | 75 / 70 / 53 / 76 / 86 |
+| surface spread at 10 / 100 / 365 | 0.101 / 0.268 / 0.256 | 0.095 / 0.299 / 0.258 | **0.108 / 0.307 / 0.315** | 0.111 / 0.324 / 0.358 | 0.099 / 0.301 / 0.255 | 0.136 / 0.310 / 0.312 |
+| alpha skt / sp / t2m / q2m / u10 / v10 | 0.71 / 0.59 / 0.71 / 0.75 / 0.83 / 0.85 | 0.28 / 0.18 / 0.29 / 0.48 / 0.62 / 0.72 | **-0.02 / 0.03 / -0.03 / 0.01 / 0.39 / 0.29** | -0.06 / -0.03 / -0.06 / 0.14 / 0.35 / 0.43 | 0.31 / 0.23 / 0.32 / 0.47 / 0.62 / 0.71 | ~0 |
+| alpha upper-air T / u / v / z / q | 0.78 / 0.84 / 0.85 / 0.75 / 0.83 | 0.66 / 0.69 / 0.66 / 0.48 / 0.47 | **0.32 / 0.50 / 0.22 / 0.25 / 0.30** | 0.52 / 0.47 / 0.49 / 0.17 / 0.07 | 0.63 / 0.68 / 0.68 / 0.49 / 0.41 | ~0 |
+| alpha diagnostics, mean | 0.75 | 0.49 | **0.13** | 0.25 | 0.49 | ~0 |
+| anchor trace: first roll with trop. v below 0.7 | 32 | 59 | **335** | 90 | 62 | |
+| late (rolls 100-365) amplitude: sfc+diag / trop. T / z / u / v / q | 0.38 / 0.36 / 0.35 / 0.38 / 0.35 / 0.41 | 0.57 / 0.59 / 0.57 / 0.37 / 0.41 / 0.60 | **0.91 / 1.07 / 0.85 / 0.83 / 0.83 / 1.14** | 0.76 / 0.91 / 1.04 / 0.62 / 0.49 / 0.78 | 0.53 / 0.50 / 0.53 / 0.37 / 0.39 / 0.61 | |
+| stratospheric T / q late amplitude | 2.56 / 1.93 | 3.53 / 8.11 | **0.60 / 3.23** | 2.73 / 5.98 | 3.60 / 9.03 | |
+
+The 300-frame surface trace (steps 25..365 by 25): P21 `110 128 114 116 118
+145 187 184 168 153 126 128 155 150`; PS21 `138 155 188 215 239 269 283 276
+293 314 306 311 319 322`; S21 `169 261 320 366 438 441 438 412 412 428 392 393
+423 414`; control `204 549 756 763 764 791 777 804 799 813 793 794 805 795`;
+ERDM `80 70 59 45 59 55 64 76 69 62 61 55 60 73`.
+
+Readings. (i) **One epoch of self-generated anchors removes 88% of the
+drift excess over ERDM** ((792 - 152) / (792 - 63)) and takes the one-year
+bias-map RMSE of t2m from 11.5 K to 1.6 K and of z500 from 2094 to 542; the
+shrinkage alpha of every slow channel is zero to within 0.03 (surface
+pressure 0.03, 2m temperature -0.03, skin temperature -0.02), the diagnostics
+are at 0.13 and the winds at 0.2-0.5 -- the pattern collapse is gone. The
+anchor chain holds the fast tropospheric winds above 0.7 of their amplitude
+for 335 rolls instead of 32, the late tropospheric amplitudes sit at
+0.83-1.07 instead of 0.35-0.4, and the long-lead surface spread (0.315)
+matches ERDM's (0.312), i.e. the Layer A dispersion deficit is closed at the
+same time by the paired injection. The upper-air RMSE-vs-climatology (356)
+is below ERDM's own (453), and the day-10 skill improved (58 vs 116). This
+is the report's remedy (b) confirmed on the real model at full strength;
+it does what the pattern shrink could not because the head is trained on the
+actual off-manifold structure of its own anchor chain (smoothed AND
+decorrelated fields with their own level errors), not on a uniform pattern
+shrink. (ii) The shrink is now harmful: on top of the pushforward it costs a
+factor two in plateau (290 vs 152) and re-introduces level bias (t2m -3.5 K
+vs -1.2 K), and alone it leaves 416; the reason is visible in the traces --
+the shrink trains an amplifier (PS21 late amplitude of z 1.04 with the
+surface at 0.76, an inconsistent state), whereas the pushforward trains a
+restorer. The stratospheric-q exclusion did its job (PS21 q 6.0x vs S21
+8.1x) but is moot. (iii) What remains in P21: a residual cold level (t2m
+-1.2 K, z500 -230 m2/s2), a zonal-wind level (u250 +3.4 m/s, the sign flipped
+from the control's -2.7), wind alphas of 0.2-0.5 and a slight
+over-amplification of tropospheric T and q (1.07, 1.14). Two epochs (P22)
+and the paired-versus-unpaired sampler (P21 with `fresh_noise_scale` 1.0)
+are the next measurements, plus a five-year run to see whether 152 is a
+plateau or a slow creep. (iv) The level-offset variant L22 becomes a
+secondary check (does an explicit level term remove P21's residual -1.2 K?)
+rather than the fix.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
