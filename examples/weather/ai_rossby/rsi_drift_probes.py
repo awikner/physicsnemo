@@ -411,7 +411,10 @@ def probe_flush(sched, model, wrapper, ds, ics, step, device, *, batch, family, 
         ref2, _ = st.run(state40, k0, rolls, seed + 12)
         psh, _ = st.run(sh40, k0, rolls, seed + 11)
         pof, _ = st.run(of40, k0, rolls, seed + 11)
-        d_sh = denom((sh40[0] - x40)[:, -1, :n_state]); d_of = denom((of40[0] - x40)[:, -1, :n_state])
+        # Normalize by the perturbation applied to the FRONT slot (the most
+        # resolved one): ERDM's back slot is pure sigma_max noise, so its
+        # perturbation rms would be meaningless as a denominator.
+        d_sh = denom((sh40[0] - x40)[:, 0, :n_state]); d_of = denom((of40[0] - x40)[:, 0, :n_state])
         case["free"] = {
             "shrink": grp_rms(strip(psh - ref)) / d_sh, "offset": grp_rms(strip(pof - ref)) / d_of,
             "floor_shrink": grp_rms(strip(ref2 - ref)) / d_sh, "floor_offset": grp_rms(strip(ref2 - ref)) / d_of,

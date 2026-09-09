@@ -167,3 +167,57 @@ skip is not producing a level bias on the training manifold (report Layer B,
 "on-manifold" branch: rejected); whatever drives the time-mean collapse
 switches on off-manifold (Tests 2 and 4 decide). Per-channel slot-6 values,
 level gain and shrink response follow when job 7600870 writes `summary.json`.
+
+**Test 4 (multi-roll flush, 4 ICs x 2, 36 rolls; job 7600866).** Metric:
+`rms(perturbed - reference) / rms(perturbation)` per group, divided by the
+model's own two-seed floor `rms(ref2 - ref) / rms(perturbation)`; a ratio of
+1 means the perturbation has dissolved into weather chaos, > 1 means part of
+it persists coherently.
+
+*From the true IC window* (anomaly x0.7 / uniform -0.3, surface group, ratio
+to floor at rolls 6 / 12 / 18 / 24 / 36):
+
+| model | shrink | offset |
+|---|---|---|
+| RSI | 2.2 / 1.6 / 1.2 / 1.1 / 0.96 | 2.2 / 1.4 / 1.2 / 1.1 / 1.0 |
+| ERDM | 2.0 / 1.2 / 1.0 / 0.9 / 1.0 | 1.5 / 1.1 / 1.0 / 1.0 / 1.1 |
+
+Both models flush an on-manifold perturbation within ~24 rolls; RSI holds it
+about 1.5x longer at rolls 6-18.
+
+*From the free-run window at roll 30* (the off-manifold case; the RSI window's
+anomaly amplitude there is still 1.00-1.03 of truth, so the drift has not yet
+set in):
+
+| model | offset, surface (ratio at 12 / 18 / 24 / 30 / 36) | offset, diagnostic | shrink, surface |
+|---|---|---|---|
+| RSI | 1.74 / 1.55 / 1.35 / 1.22 / 1.20 | 1.22 / 1.23 / 1.26 / 1.23 / 1.18 | 2.31 / 1.84 / 1.56 / 1.34 / 1.28 |
+| ERDM | 1.47 / 1.02 / 1.04 / 1.03 / 1.01 | 1.29 / 1.03 / 0.99 / 0.97 / 1.00 | (denominator invalid: the back slot is sigma_max noise; fixed for the next run) |
+
+ERDM erases a uniform offset applied to its rolling window by roll 18. RSI
+still carries ~1/3 of the offset (surface: excess `sqrt(0.60^2 - 0.50^2) =
+0.33` of the applied -0.3) and ~45% of the pattern shrink at roll 36, and for
+the upper air the perturbed trajectory departs from the reference far beyond
+the chaotic floor (4.7 vs 2.7 at roll 36). This is the "no restoring force
+once the window is the model's own" signature on the real model, and it is
+RSI-specific. Caveat: 4 ICs, floors are noisy at the +-10% level; the
+upper-air excess deserves a per-channel look in the cascade outputs.
+
+**Phase 2 sweep, 300 days (job 7600840), headline bias-map RMSE
+(180x360, 8 members, obs-climatology truth):**
+
+| variant | z500 RMSE (m2/s2) | t2m RMSE (K) | t2m mean bias (K) |
+|---|---|---|---|
+| k120 (`fresh_noise_scale` 1.2) | 1858 | 9.28 | -3.79 |
+| k145 (1.45) | 1850 | 9.18 | -3.81 |
+| k180 (1.8) | 1824 | 8.97 | -3.71 |
+| fd (`final_denoise` true) | 1771 | 9.05 | -3.43 |
+| ns4 (`num_steps` 4) | (running) | | |
+| baseline, 5-year mean for scale | 2059 | 10.42 | -3.47 |
+
+Inflating the fresh-slot latent by 1.2-1.8x leaves the 300-day collapse
+essentially unchanged (the trend with kappa is a few percent, within what
+member noise can do); `final_denoise` buys ~5%. Exactly the report's
+prediction for Layer A alone: the dispersion defect is not the time-mean
+drift. Trace-level comparison against the baseline's first 300 steps (spread,
+RMSE-vs-climatology) follows once the outputs are copied.
