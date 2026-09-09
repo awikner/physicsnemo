@@ -137,6 +137,7 @@ class RSIScheduler(nn.Module):
                  label_mode="tau",
                  # ── training ──────────────────────────────────────────────
                  anchor_noise=0.0,
+                 anchor_shrink=0.0,
                  weighting="snr_bump",
                  P_mean=2.0,
                  P_std=1.2,
@@ -144,6 +145,7 @@ class RSIScheduler(nn.Module):
                  w_z=1.0,
                  # ── sampling stochasticity (eps-family; 0 => PF-ODE) ──────
                  eps_scale=0.0,
+                 fresh_noise_scale=1.0,
                  eps_tmin=0.0,
                  eps_tmax=1.0,
                  # ── noise machinery ───────────────────────────────────────
@@ -216,6 +218,16 @@ class RSIScheduler(nn.Module):
         self.label_mode = label_mode
 
         self.anchor_noise = float(anchor_noise)
+        # Pattern-shrink anchor augmentation (drift diagnosis, 2026-09-08):
+        # the inference-time anchor is a conditional MEAN, i.e. a spatially
+        # SMOOTHER field than any true frame, not a noisier one. White
+        # anchor_noise models the wrong mismatch (both local probes show it
+        # lowers dispersion further); shrinking the anomaly pattern by
+        # s ~ U(1 - anchor_shrink, 1) shows the network the damped windows a
+        # free run actually produces. 0 disables.
+        self.anchor_shrink = float(anchor_shrink)
+        if not 0.0 <= self.anchor_shrink < 1.0:
+            raise ValueError(f"anchor_shrink must be in [0, 1), got {anchor_shrink}")
         self.weighting = weighting
         self.P_mean = P_mean
         self.P_std = P_std
@@ -223,6 +235,15 @@ class RSIScheduler(nn.Module):
         self.w_z = float(w_z)
 
         self.eps_scale = float(eps_scale)
+        # Inference-only knob (drift diagnosis, 2026-09-08): multiplies the
+        # latent injected into the fresh back slot. The anchor is the slot-W
+        # conditional mean, short of the training law by its own posterior
+        # variance (~ (0.93-1.11 S_c)^2), so Gamma(0) = 1.0 S_c under-injects;
+        # a scale of ~1.4-1.55 restores the exact-oracle amplitude. 1.0 is the
+        # shipped behaviour, bit-identical.
+        self.fresh_noise_scale = float(fresh_noise_scale)
+        if self.fresh_noise_scale <= 0.0:
+            raise ValueError(f"fresh_noise_scale must be > 0, got {fresh_noise_scale}")
         self.eps_tmin = float(eps_tmin)
         self.eps_tmax = float(eps_tmax)
 
@@ -305,6 +326,11 @@ class RSIScheduler(nn.Module):
             self.gamma_0, self.gamma_1, self.gamma_mode, self.integrator,
             self.solver, self.weighting, self.eps_scale, noise, self.reduce_to_erdm,
         )
+        if self.fresh_noise_scale != 1.0 or self.anchor_shrink > 0.0:
+            logger.info(
+                "RSIScheduler drift-diagnosis knobs: fresh_noise_scale=%s, "
+                "anchor_shrink=%s", self.fresh_noise_scale, self.anchor_shrink,
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -499,6 +525,15 @@ class RSIScheduler(nn.Module):
         (exposure-bias control). Still a valid data-dependent coupling: the
         perturbation is part of the joint, and z stays independent of it.
         """
+        if self.anchor_shrink > 0.0:
+            # a <- <a>_hw + s (a - <a>_hw), s ~ U(1 - anchor_shrink, 1) per
+            # (batch, slot); the spatial mean is kept so the level is intact.
+            mean_hw = anchor.mean(dim=(-2, -1), keepdim=True)
+            s_shape = (anchor.shape[0], anchor.shape[1], 1, 1, 1)
+            s_fac = 1.0 - self.anchor_shrink * torch.rand(
+                s_shape, device=anchor.device, dtype=anchor.dtype
+            )
+            anchor = mean_hw + s_fac * (anchor - mean_hw)
         if self.anchor_noise <= 0.0:
             return anchor
         zp = self.get_noise(anchor)
@@ -1070,7 +1105,40 @@ class RSIScheduler(nn.Module):
         z = self.get_noise(anchor)
         if self.reduce_to_erdm:
             return self.gamma_apply(z, tau0)
-        return anchor + self.gamma_apply(z, tau0)
+        return anchor + self.fresh_noise_scale * self.gamma_apply(z, tau0)
+
+    # ------------------------------------------------------------------
+    # Rollout trace (drift diagnosis). Export RSI_TRACE_PATH=<file.pt> to
+    # record, once per roll, the per-channel spatial-anomaly std and spatial
+    # mean of the emitted frame (y_hat[:, 0]), of the fresh-slot anchor
+    # (y_hat[:, -1]) and of every window slot's ODE state. Off unless the
+    # variable is set; costs a few reductions per roll.
+    # ------------------------------------------------------------------
+    def _trace(self, y_hat, x):
+        path = os.environ.get("RSI_TRACE_PATH")
+        if not path:
+            return
+        if getattr(self, "_trace_buf", None) is None:
+            self._trace_buf = {"emit_std": [], "emit_mean": [], "anchor_std": [],
+                               "anchor_mean": [], "slot_std": [], "slot_mean": []}
+
+        def _stats(v):                       # v: (b, C, H, W) -> (C,), (C,)
+            v = v.float()
+            m = v.mean(dim=(-2, -1))
+            a = (v - m[..., None, None]).pow(2).mean(dim=(-2, -1)).sqrt()
+            return a.mean(0).cpu(), m.mean(0).cpu()
+
+        es, em = _stats(y_hat[:, 0])
+        as_, am = _stats(y_hat[:, -1])
+        ss, sm = zip(*[_stats(x[:, w]) for w in range(x.shape[1])])
+        b = self._trace_buf
+        b["emit_std"].append(es); b["emit_mean"].append(em)
+        b["anchor_std"].append(as_); b["anchor_mean"].append(am)
+        b["slot_std"].append(torch.stack(ss)); b["slot_mean"].append(torch.stack(sm))
+        n = len(b["emit_std"])
+        every = int(os.environ.get("RSI_TRACE_EVERY", "1") or 1)
+        if n % every == 0:
+            torch.save({k: torch.stack(v) for k, v in b.items()}, path)
 
     @torch.no_grad()
     def sample_rollout(self, model, init_window, c_grid_traj, c_scalar_traj,
@@ -1108,6 +1176,7 @@ class RSIScheduler(nn.Module):
             step_k = num_steps[k] if isinstance(num_steps, (list, tuple)) else num_steps
             x, y_hat = self.sample_window(
                 model, x, c_grid_win, c_scalar_win, step_k, ocean_win=ocean_win)
+            self._trace(y_hat, x)
 
             outputs.append(y_hat[:, 0])
             x = torch.cat([x[:, 1:], self._fresh_slot(y_hat)], dim=1)
@@ -1155,6 +1224,7 @@ class RSIScheduler(nn.Module):
             step_k = num_steps[k] if isinstance(num_steps, (list, tuple)) else num_steps
             x, y_hat = self.sample_window(
                 model, x, c_grid_win, c_scalar_win, step_k, ocean_win=ocean_win)
+            self._trace(y_hat, x)
 
             yield k, y_hat[:, 0]
 
@@ -1180,6 +1250,7 @@ class RSIScheduler(nn.Module):
         x = state[0]
         x, y_hat = self.sample_window(
             model, x, c_grid_win, c_scalar_win, num_steps, ocean_win=ocean_win)
+        self._trace(y_hat, x)
         emitted = y_hat[:, 0]
         x = torch.cat([x[:, 1:], self._fresh_slot(y_hat)], dim=1)
         return emitted, (x, None)

@@ -1,0 +1,77 @@
+#!/bin/bash -l
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI drift diagnosis, PHASE 3: the full 5-year, 8-member bias protocol
+# (identical to eval_bias_fanout_polaris.pbs) for ONE inference-only sampler
+# variant, chosen from the Phase 2 sweep. 2 nodes / 8 GPUs, ~2.9 h, on
+# preemptable (the 10-node `prod`->`small` route has a 3 h cap and a 10-node
+# minimum). Select with EVAL_CFG in {k120,k145,k180,fd,ns4,base}.
+#PBS -A lighthouse-uchicago
+#PBS -q preemptable
+#PBS -l select=2:system=polaris
+#PBS -l walltime=03:30:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -N rsi-drift-eval5yr
+set -uo pipefail
+R=/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi
+cd "$R"
+source "$R/polaris_env.sh"
+export HYDRA_FULL_ERROR=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_JIT=0
+export PYTORCH_TENSOREXPR_FALLBACK=2
+export AI_ROSSBY_AMIP_CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
+J=${PBS_JOBID%%.*}
+EP=${EVAL_EPOCH:-24}
+CFG=${EVAL_CFG:-k145}
+PPN=4
+export GPUS_PER_NODE=$PPN
+OBS=$AI_ROSSBY_DATA/norm_stats/obs_climatology_1996_2001
+case "$CFG" in
+  k120) SAMPLER=rsi_sstpred_e1_k120; STEPS=2 ;; k145) SAMPLER=rsi_sstpred_e1_k145; STEPS=2 ;;
+  k180) SAMPLER=rsi_sstpred_e1_k180; STEPS=2 ;; fd) SAMPLER=rsi_sstpred_e1_fd; STEPS=2 ;;
+  ns4)  SAMPLER=rsi_sstpred_e1; STEPS=4 ;;      *)  SAMPLER=rsi_sstpred_e1; STEPS=2 ;;
+esac
+mapfile -t ALLNODES < <(sort -u "$PBS_NODEFILE")
+export MASTER_ADDR="${ALLNODES[0]}" MASTER_PORT=29650
+out="$R/eval_bias5yr_${CFG}_e${EP}"; mkdir -p "$out"
+echo "=== $(date) | cfg $CFG sampler $SAMPLER steps $STEPS | epoch $EP | ${#ALLNODES[@]} nodes -> $out ==="
+mpiexec -n $((2 * PPN)) --ppn "$PPN" --hostfile "$PBS_NODEFILE" --cpu-bind depth -d 8 \
+    bash hpc/scripts/polaris_rank_env.sh \
+    bash -c 'export RSI_TRACE_PATH="$0/trace_rank${RANK}.pt"; export RSI_TRACE_EVERY=50; exec "$@"' "$out" \
+    python examples/weather/ai_rossby/climate_eval_suite.py \
+    --config-dir=examples/weather/ai_rossby/conf --config-name=config \
+    run_name=bias5yr_${CFG}_e${EP} \
+    model=amip_combined_rsi_sstpred "++model.forecaster.sampler=$SAMPLER" \
+    loss=rsi loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear \
+    validation=eval_suite seed=0 wandb.enabled=False \
+    "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse" \
+    "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary" \
+    "++dataset.mean_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_mean_dailyavg.nc" \
+    "++dataset.std_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc" \
+    ++dataset.sst_anomaly_channel=none ++dataset.scalar_forcing=none \
+    ++dataset.normalize_constant_boundary=true ++dataset.constant_boundary_stats=spatial \
+    ++dataset.smooth_constant_lsm=true \
+    "++model.forecaster.checkpoint=$R/checkpoints_prod24_b40/RollingDiTWrapper.0.${EP}.mdlus" \
+    "+eval_suite.checkpoint_dir=$R/checkpoints_prod24_b40" \
+    "+eval_suite.output_path=$out/eval_suite.pt" \
+    ++eval_suite.checkpoint_epoch=${EP} ++eval_suite.use_ema=true \
+    ++eval_suite.horizon=1827 ++eval_suite.ic_date=1996-01-01 \
+    ++eval_suite.max_initial_conditions=1 ++eval_suite.batch_size=1 \
+    ++eval_suite.ensemble_size=8 ++eval_suite.perturber=replicate_only \
+    "++eval_suite.sampler_num_steps=$STEPS" ++eval_suite.downscaler_num_steps=5 \
+    ++eval_suite.truth_source=obs_climatology "++eval_suite.obs_climatology_dir=$OBS" \
+    ++eval_suite.stream=true ++eval_suite.partial_save_every_frames=200 \
+    ++eval_suite.headline.enabled=True ++eval_suite.climatology.enabled=False \
+    ++eval_suite.bias.enabled=True ++eval_suite.bias.track_members=True \
+    ++eval_suite.qbo.enabled=False ++eval_suite.global_mean.enabled=False \
+    > "$out/bias5yr_${CFG}_${J}.log" 2>&1
+rc=$?; echo "$rc " > "$out/.rc"
+sed -n "/Headline climatological bias/,/^$/p" "$out/bias5yr_${CFG}_${J}.log" | head -12
+echo "=== $(date) done rc=$rc ==="
+exit $rc

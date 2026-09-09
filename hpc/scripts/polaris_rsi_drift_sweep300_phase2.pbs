@@ -1,0 +1,130 @@
+#!/bin/bash -l
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI drift diagnosis, PHASE 2 (Tests 3 and 5): 300-day, 8-member rollouts of
+# the RSI epoch-24 checkpoint under five INFERENCE-ONLY sampler variants,
+# scored exactly like the 5-year bias fan-out (climate_eval_suite, combined
+# RSI -> x_DDC, obs-climatology truth), one variant per 2-node group:
+#   k120 / k145 / k180 : fresh_noise_scale 1.2 / 1.45 / 1.8 (Layer A fix)
+#   fd                 : final_denoise true
+#   ns4                : num_steps 4
+# The kappa = 1 baseline is the first 300 steps of eval_bias5yr_e24.
+# 10 nodes on debug-scaling (1 h cap): 300 frames x 5.6 s ~ 28 min.
+#PBS -A lighthouse-uchicago
+#PBS -q debug-scaling
+#PBS -l select=10:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -N rsi-drift-sweep300
+set -uo pipefail
+R=/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi
+cd "$R"
+source "$R/polaris_env.sh"
+export HYDRA_FULL_ERROR=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_JIT=0
+export PYTORCH_TENSOREXPR_FALLBACK=2
+export AI_ROSSBY_AMIP_CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
+J=${PBS_JOBID%%.*}
+EP=${SWEEP_EPOCH:-24}
+HORIZON=${SWEEP_HORIZON:-300}
+CONFIGS=(${SWEEP_CONFIGS:-k120 k145 k180 fd ns4})
+NODES_PER_JOB=2
+PPN=4
+RANKS_PER_JOB=$((NODES_PER_JOB * PPN))
+OBS=$AI_ROSSBY_DATA/norm_stats/obs_climatology_1996_2001
+export GPUS_PER_NODE=$PPN
+
+mapfile -t ALLNODES < <(sort -u "$PBS_NODEFILE")
+NNODES=${#ALLNODES[@]}
+NEED=$(( ${#CONFIGS[@]} * NODES_PER_JOB ))
+echo "=== $(date) | ${NNODES} nodes | ${#CONFIGS[@]} configs x ${RANKS_PER_JOB} ranks ==="
+if [ "$NNODES" -lt "$NEED" ]; then echo "FATAL: need $NEED nodes, have $NNODES"; exit 1; fi
+
+sampler_for () {
+  case "$1" in
+    k120) echo rsi_sstpred_e1_k120 ;; k145) echo rsi_sstpred_e1_k145 ;; k180) echo rsi_sstpred_e1_k180 ;;
+    fd)   echo rsi_sstpred_e1_fd ;;   *)    echo rsi_sstpred_e1 ;;
+  esac
+}
+steps_for () { case "$1" in ns4) echo 4 ;; *) echo 2 ;; esac; }
+
+launch_cfg () {
+  local cfg="$1" hosts="$2" out="$3"
+  mkdir -p "$out"
+  mpiexec -n "$RANKS_PER_JOB" --ppn "$PPN" --hosts "$hosts" \
+      --cpu-bind depth -d 8 \
+      bash hpc/scripts/polaris_rank_env.sh \
+      bash -c 'export RSI_TRACE_PATH="$0/trace_rank${RANK}.pt"; export RSI_TRACE_EVERY=10; exec "$@"' "$out" \
+      python examples/weather/ai_rossby/climate_eval_suite.py \
+      --config-dir=examples/weather/ai_rossby/conf --config-name=config \
+      run_name=sweep300_${cfg}_e${EP} \
+      model=amip_combined_rsi_sstpred \
+      "++model.forecaster.sampler=$(sampler_for "$cfg")" \
+      loss=rsi loss.window_size=6 \
+      dataset=amip_dailyavg_coarse_multiyear \
+      validation=eval_suite seed=0 \
+      wandb.enabled=False \
+      "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse" \
+      "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary" \
+      "++dataset.mean_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_mean_dailyavg.nc" \
+      "++dataset.std_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc" \
+      ++dataset.sst_anomaly_channel=none ++dataset.scalar_forcing=none \
+      ++dataset.normalize_constant_boundary=true \
+      ++dataset.constant_boundary_stats=spatial \
+      ++dataset.smooth_constant_lsm=true \
+      "++model.forecaster.checkpoint=$R/checkpoints_prod24_b40/RollingDiTWrapper.0.${EP}.mdlus" \
+      "+eval_suite.checkpoint_dir=$R/checkpoints_prod24_b40" \
+      "+eval_suite.output_path=$out/eval_suite.pt" \
+      ++eval_suite.checkpoint_epoch=${EP} \
+      ++eval_suite.use_ema=true \
+      ++eval_suite.horizon=${HORIZON} \
+      ++eval_suite.ic_date=1996-01-01 \
+      ++eval_suite.max_initial_conditions=1 \
+      ++eval_suite.batch_size=1 \
+      ++eval_suite.ensemble_size=8 \
+      ++eval_suite.perturber=replicate_only \
+      "++eval_suite.sampler_num_steps=$(steps_for "$cfg")" \
+      ++eval_suite.downscaler_num_steps=5 \
+      ++eval_suite.truth_source=obs_climatology \
+      "++eval_suite.obs_climatology_dir=$OBS" \
+      ++eval_suite.stream=true \
+      ++eval_suite.partial_save_every_frames=100 \
+      ++eval_suite.headline.enabled=True \
+      ++eval_suite.climatology.enabled=False \
+      ++eval_suite.bias.enabled=True \
+      ++eval_suite.bias.track_members=True \
+      ++eval_suite.qbo.enabled=False \
+      ++eval_suite.global_mean.enabled=False \
+      > "$out/sweep300_${cfg}_${J}.log" 2>&1
+  echo "$? " > "$out/.rc"
+}
+
+declare -a PIDS=() TAGS=()
+i=0
+for cfg in "${CONFIGS[@]}"; do
+  h=$(( i * NODES_PER_JOB ))
+  hosts="${ALLNODES[$h]},${ALLNODES[$((h+1))]}"
+  out="$R/eval_sweep${HORIZON}_${cfg}_e${EP}"
+  echo "  config ${cfg}: hosts ${hosts} port $((29600 + i)) -> ${out}"
+  MASTER_ADDR="${ALLNODES[$h]}" MASTER_PORT=$((29600 + i)) launch_cfg "$cfg" "$hosts" "$out" &
+  PIDS+=($!); TAGS+=("$cfg"); i=$((i+1))
+done
+echo "=== $(date) all ${#PIDS[@]} launched; waiting ==="
+fail=0
+for idx in "${!PIDS[@]}"; do wait "${PIDS[$idx]}" || fail=$((fail+1)); echo "  ${TAGS[$idx]} finished ($(date +%H:%M:%S))"; done
+echo "=========================== RESULTS ==========================="
+for cfg in "${CONFIGS[@]}"; do
+  out="$R/eval_sweep${HORIZON}_${cfg}_e${EP}"
+  L=$(ls -t "$out"/sweep300_${cfg}_*.log 2>/dev/null | head -1)
+  echo "-- ${cfg}: rc=$(cat "$out/.rc" 2>/dev/null | tr -d ' ')"
+  [ -n "$L" ] && sed -n "/Headline climatological bias/,/^$/p" "$L" | sed -E "s/^\[[^]]+\]\[[^]]+\]\[[^]]+\] - /     /" | head -11
+  [ -n "$L" ] && grep -aE "Error|Traceback|out of memory" "$L" | head -2 | sed "s/^/     /"
+done
+echo "=== $(date) done; ${fail} FAILED ==="
+[ "$fail" -eq 0 ]

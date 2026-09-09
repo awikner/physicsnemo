@@ -1,0 +1,72 @@
+#!/bin/bash -l
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RSI drift diagnosis, PHASE 1 (Tests 1, 2, 4 of
+# docs/dev/context/rsi-drift-diagnosis-report.md): teacher-forced readout
+# statistics, the 120-roll cascade with the anchor trace, and the multi-roll
+# flush probe, for the RSI epoch-24 checkpoint and the ERDM epoch-24 control.
+# One node, one probe process per GPU, all four in parallel; ~40 min.
+#PBS -A lighthouse-uchicago
+#PBS -q debug
+#PBS -l select=1:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+#PBS -N rsi-drift-probes
+set -uo pipefail
+R=/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi
+cd "$R"
+source "$R/polaris_env.sh"
+export HYDRA_FULL_ERROR=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_JIT=0
+export PYTORCH_TENSOREXPR_FALLBACK=2
+export AI_ROSSBY_AMIP_CKPT=/eagle/lighthouse-uchicago/amip-checkpoints
+J=${PBS_JOBID%%.*}
+OUT=${PROBE_OUT:-$R/probes_e24}
+mkdir -p "$OUT"
+EP=${PROBE_EPOCH:-24}
+ICS=${PROBE_ICS:-1996-01-01,1996-04-01,1996-07-01,1996-10-01}
+
+COMMON=(--config-dir=examples/weather/ai_rossby/conf --config-name=config
+  loss=rsi loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear
+  validation=eval_suite seed=0 wandb.enabled=False
+  "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse"
+  "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary"
+  "++dataset.mean_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_mean_dailyavg.nc"
+  "++dataset.std_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc"
+  ++dataset.sst_anomaly_channel=none ++dataset.scalar_forcing=none
+  ++dataset.normalize_constant_boundary=true ++dataset.constant_boundary_stats=spatial
+  ++dataset.smooth_constant_lsm=true
+  "+probes.ic_dates=$ICS" +probes.batch=2 +probes.num_steps=2)
+RSI=(model=amip_combined_rsi_sstpred
+  "++model.forecaster.checkpoint=$R/checkpoints_prod24_b40/RollingDiTWrapper.0.${EP}.mdlus"
+  +probes.use_ema=true)
+ERDM=(model=amip_combined_sst_pred ++model.forecaster.sampler=erdm_v2_nochurn
+  "++model.forecaster.checkpoint=/eagle/lighthouse-uchicago/amip-checkpoints/sstpred_epochs/erdm_sstpred_ep${EP}.mdlus"
+  +probes.use_ema=false)
+
+launch () {
+  local gpu="$1" name="$2"; shift 2
+  CUDA_VISIBLE_DEVICES="$gpu" RANK=0 WORLD_SIZE=1 LOCAL_RANK=0 \
+  MASTER_ADDR=127.0.0.1 MASTER_PORT=$((29700 + gpu)) \
+    python examples/weather/ai_rossby/rsi_drift_probes.py "${COMMON[@]}" \
+      run_name="probe_${name}_e${EP}" "$@" > "$OUT/${name}_${J}.log" 2>&1
+  echo "$?" > "$OUT/${name}.rc"
+}
+echo "=== $(date) | epoch $EP | ICs $ICS | out $OUT ==="
+launch 0 rsi_readout_cascade  "${RSI[@]}"  +probes.which=readout,cascade "+probes.out=$OUT/rsi"        +probes.cascade_rolls=120 &
+launch 1 rsi_flush            "${RSI[@]}"  +probes.which=flush           "+probes.out=$OUT/rsi_flush"  +probes.flush_rolls=36 +probes.flush_k0=30 &
+launch 2 erdm_readout_cascade "${ERDM[@]}" +probes.which=readout,cascade "+probes.out=$OUT/erdm"       +probes.cascade_rolls=120 &
+launch 3 erdm_flush           "${ERDM[@]}" +probes.which=flush           "+probes.out=$OUT/erdm_flush" +probes.flush_rolls=36 +probes.flush_k0=30 &
+wait
+echo "=========================== RESULTS ==========================="
+for n in rsi_readout_cascade rsi_flush erdm_readout_cascade erdm_flush; do
+  echo "-- $n rc=$(cat "$OUT/$n.rc" 2>/dev/null)"
+  L=$(ls -t "$OUT/${n}_"*.log | head -1)
+  grep -aE "done in|Error|Traceback|out of memory" "$L" | head -6 | sed 's/^/     /'
+done
+echo "=== $(date) done ==="
