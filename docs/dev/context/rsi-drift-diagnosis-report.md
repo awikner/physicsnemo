@@ -107,6 +107,24 @@ win.
   Best pattern-shrink checkpoint: epoch 25-26; the next lever is
   self-generated anchors (section 5), not more shrink epochs.
 
+- **Phase 5 (new base, 2026-09-09, in progress):** the batch-40 *bundle*
+  production run (linear-scaled lr with warmup and cosine, Muon momentum
+  0.85) reached epoch 20 with a training loss 11% below the previous run at
+  equal epochs and better 1-6 day skill, and became the base for the
+  remaining fine-tunes. Its one-year baseline drifts **harder** than the old
+  base: surface RMSE-vs-climatology plateau 794 vs 611, t2m level bias
+  -5.5 K vs -3.65 K, onset at roll 32 vs 34, surface pressure's pattern
+  amplitude down to 0.46 (old base 0.71), with the same shrinkage alpha
+  (0.7-0.85 on every channel) and, once more, no change from the fresh-slot
+  inflation. A better-fit head trusts its anchor at least as much: the drift
+  is a property of the formulation, not of a training recipe. Running from
+  that base, each to epoch 22 and scored over one year against the chain's
+  own epoch 22: the pattern-shrink augmentation alone; self-generated
+  anchors (`pushforward_rolls 2`, the model's own sampler rolled with the
+  Layer A injection so the last k slots are anchored on its y_hat chain);
+  and both together with the stratospheric-humidity channels excluded from
+  the shrink. Results go to the plan's Phase 5 section.
+
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast
 channels' anchor chains go off-manifold at roll ~28, and it is a property of
