@@ -123,7 +123,22 @@ win.
   anchors (`pushforward_rolls 2`, the model's own sampler rolled with the
   Layer A injection so the last k slots are anchored on its y_hat chain);
   and both together with the stratospheric-humidity channels excluded from
-  the shrink. Results go to the plan's Phase 5 section.
+  the shrink. **First result (one augmented epoch, one year, 8 members):**
+  self-generated anchors alone take the surface RMSE-vs-climatology plateau
+  from 792 to **152** (ERDM 63), i.e. 88% of the excess is gone; t2m
+  bias-map RMSE 11.5 -> 1.6 K, z500 2094 -> 542; the shrinkage alpha of
+  every slow channel is zero to within 0.03 and the winds are at 0.2-0.5;
+  the anchor chain holds the fast winds above 0.7 of their amplitude for
+  335 rolls instead of 32; the long-lead spread equals ERDM's; and the
+  day-10 skill improves (58 vs 116) at no day-1 cost. The pattern shrink is
+  inferior alone (416) and harmful on top (290, with the level bias back).
+  This is remedy (b) at full strength: the head learns a restoring force
+  from the actual off-manifold structure of its own anchor chain, which a
+  uniform shrink cannot imitate. Remaining after one epoch: a -1.2 K level, a
+  +3.4 m/s u250 level, wind alphas 0.2-0.5 and a slight over-amplification
+  of tropospheric T and q (1.07-1.14). Two epochs, the unpaired sampler and
+  a five-year run are being measured; full tables in the plan's Phase 5
+  section.
 
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast
@@ -132,7 +147,9 @@ what the readout is asked to trust (the previous state) rather than of any
 per-roll bias; the training-side remedies in section 5 are the ones that
 address it. Pattern-shrink augmentation alone removes half of the drift and
 plateaus; the fast-channel collapse that remains needs the network to see its
-own off-manifold anchors (self-generated-anchor fine-tuning).
+own off-manifold anchors -- and one epoch of exactly that (self-generated
+anchors with the Layer A injection, Phase 5) removes 88% of the drift excess
+and closes the dispersion gap at the same time.
 
 ---
 
