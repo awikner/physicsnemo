@@ -626,6 +626,16 @@ independent. Recommended pairing for production: train with
 matches the spread-skill target), knowing the climate does not depend on the
 latter.
 
+*22:20 UTC:* the bundle production chain reached its target (epoch 24
+written 22:0x UTC). Because P21/P22 start from a mid-schedule epoch, the
+deployable candidate is the same fine-tune applied to the finished model:
+**P24 = `checkpoints_ft5_pf24_b40`**, `pushforward_rolls 2` +
+`fresh_noise_scale 1.45` for two epochs from epoch 24 (the cosine schedule
+is at its floor, base lr 5e-5 / Muon 5e-4), jobs 7602052 -> 7602053 ->
+7602054, to be scored over one and five years against the plain epoch 24
+(B24). Also queued: the first five-year wave (job 7602002: P21 paired and
+plain, C22, S22, PS21).
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
