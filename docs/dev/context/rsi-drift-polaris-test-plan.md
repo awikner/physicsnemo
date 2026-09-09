@@ -611,6 +611,21 @@ plateau or a slow creep. (iv) The level-offset variant L22 becomes a
 secondary check (does an explicit level term remove P21's residual -1.2 K?)
 rather than the fix.
 
+**P21 under the plain sampler (job 7602000, `fresh_noise_scale` 1.0):**
+plateau 141 (paired 152), z500 541 / -287, t2m 1.84 / -1.42 K, alpha
+identical to three decimals on every group, late tropospheric amplitude
+1.07 / 0.79 (T / v; paired 1.07 / 0.83); the only difference is the
+short-lead spread -- surface / upper-air / diagnostic 0.098 / 0.122 / 0.186
+at day 10 unpaired against 0.108 / 0.137 / 0.213 paired (ERDM 0.136 /
+0.146 / 0.209) -- and at one year the two agree (0.314 vs 0.315). So the
+mean-state repair comes entirely from the training-side self-generated
+anchors; the fresh-slot injection remains what Phase 2/3 found it to be, a
+dispersion knob that brings the day-10 spread to ERDM's, and the two are
+independent. Recommended pairing for production: train with
+`pushforward_rolls` and sample with `fresh_noise_scale` 1.45 (or whatever
+matches the spread-skill target), knowing the climate does not depend on the
+latter.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
