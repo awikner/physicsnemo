@@ -36,6 +36,7 @@ EP=${EVAL_EPOCH:-24}
 CKDIR=${EVAL_CKPT_DIR:-checkpoints_prod24_b40}
 HORIZON=${EVAL_HORIZON:-1827}
 TAG=${EVAL_TAG:-bias5yr}
+IC=${EVAL_IC:-1996-01-01}
 EVAL_CONFIGS=${EVAL_CONFIGS:-k120,k145,k180,base,k145s1}
 CONFIGS=(${EVAL_CONFIGS//[,+]/ })   # comma or plus separated (qsub -v cannot carry commas)
 NODES_PER_JOB=2
@@ -74,7 +75,7 @@ launch_cfg () {
       "+eval_suite.checkpoint_dir=$R/${CKDIR}" \
       "+eval_suite.output_path=$out/eval_suite.pt" \
       ++eval_suite.checkpoint_epoch=${EP} ++eval_suite.use_ema=true \
-      "++eval_suite.horizon=$HORIZON" ++eval_suite.ic_date=1996-01-01 \
+      "++eval_suite.horizon=$HORIZON" "++eval_suite.ic_date=$IC" \
       ++eval_suite.max_initial_conditions=1 ++eval_suite.batch_size=1 \
       ++eval_suite.ensemble_size=8 ++eval_suite.perturber=replicate_only \
       "++eval_suite.sampler_num_steps=$(steps_for "$cfg")" ++eval_suite.downscaler_num_steps=5 \

@@ -34,7 +34,7 @@ bit for bit (88 scheduler tests pass).
 | 1 probes | `debug` | 1 | 1 h | one process per GPU; 1 running job per user |
 | 2 sweep | `debug-scaling` | 10 | 1 h | five 2-node member-split configs; 1 queued per user |
 | 3 five-year | `preemptable` | 2 | 3.5 h | `prod` routes 10-24 nodes only; `capacity` is held by the bundle chain |
-| 4 fine-tunes | `prod` -> `small` or `preemptable` | 10 | 3 h links | conditional on Phase 1 |
+| 4 fine-tunes | `prod` -> `small` | 10 | 3 h links (2 epochs each) | Test 1 showed no on-manifold bias, so the off-manifold remedy was launched |
 
 The bundle-recipe retrain chain (jobs 7599770-7599776, `small`, 10 nodes) and
 its `capacity` sibling (7599793) were running/held when this started; nothing
@@ -139,6 +139,42 @@ essentially unchanged for every kappa (Layer A alone is not the drift); a large
 drop would mean rectification. The single-variant script
 (`polaris_rsi_drift_eval5yr_phase3.pbs`, `EVAL_CFG`/`EVAL_CKPT_DIR`/`EVAL_EPOCH`/
 `EVAL_HORIZON`/`EVAL_TAG`) is kept for the fine-tune's 1-year scoring.
+
+## Phase 4 results (2026-09-09)
+
+Fine-tune job 7600874 (`polaris_rsi_ft_shrink_phase4.pbs`, `loss.anchor_shrink 0.3`,
+resume from epoch 24, Muon lr fast-forwarded to 4.6e-4 Muon-group / 4.6e-5
+base): the first augmented batch has loss 2484, back to ~215 by batch 500
+(the shipped run's epoch-24 level is 220). Epoch-25 10-day validation:
+surface RMSE step 1 = 9.57, step 10 = 94.8, upper air step 10 = 108.9
+(shipped epoch 20: 2.28 / 80.7 / 114.4) -- the augmentation costs short-range
+surface skill, mostly at step 1, as the trained toy predicted.
+
+**One-year evaluation of the epoch-25 weights** (job 7601120; 8 members,
+IC 1996-01-01, obs-climatology truth; `eval_bias1yr_{base,k145}_e25`):
+
+| | shipped e24 (5-yr / 300-d) | ft25, shipped sampler | ft25 + `fresh_noise_scale` 1.45 | ERDM e24 |
+|---|---|---|---|---|
+| z500 bias-map RMSE (m2/s2), 1 yr | 2059 (5 yr) / ~1850 (300 d) | **1029** | 1037 | 46 (5 yr) |
+| t2m bias-map RMSE (K) | 10.4 / ~9.2 | **4.98** | 5.00 | 0.22 |
+| t2m global-mean bias (K) | -3.5 / -3.8 | -2.47 | -2.47 | -0.01 |
+| surface RMSE-vs-clim, steps 100-365 mean | 611 | **397** | 393 | 63 |
+| surface RMSE-vs-clim at step 30 / 50 / 85 / 200 / 365 | 219 / 487 / 619 / 614 / 609 | 139 / 270 / 337 / 408 / 413 | 132 / 266 / 328 / 402 / 408 | 75 / 70 / 53 / 76 / 86 |
+| surface spread step 10 / 100 / 365 | 0.110 / 0.255 / 0.241 | 0.127 / 0.236 / 0.209 | 0.134 / 0.255 / 0.212 | 0.136 / 0.310 / 0.312 |
+
+Readings. (i) One epoch of pattern-shrink anchor augmentation removes ~40%
+of the drift plateau's excess over ERDM ((611 - 397) / (611 - 63)) and halves
+the one-year bias-map RMSE of z500 and t2m; the run-away is delayed and
+slowed (step 50: 270 vs 487) but the fine-tuned trace keeps creeping upward
+after day 100 (333 -> 413), so this is a partial fix that may continue to
+drift over 5 years. (ii) The fresh-slot inflation on top adds nothing to the
+mean and only raises the spread, exactly as on the epoch-24 weights. (iii)
+The day-10 spread rose (0.110 -> 0.127) without any sampler change: a head
+that trusts its anchor less disperses more. (iv) This is the report's
+training-side remedy confirmed in direction on the real model; the obvious
+next steps are more epochs, a wider shrink range (the real collapse reaches
+0.3-0.4 for the fast channels, while the augmentation only shows the network
+0.7-1.0), and pairing with self-generated anchors.
 
 ## Phase 4: training-side (conditional on Phase 1)
 
