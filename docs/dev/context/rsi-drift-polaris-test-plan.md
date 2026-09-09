@@ -533,6 +533,25 @@ is scored as soon as the pushforward chains write their first epoch, so the
 pushforward effect is visible before their second links get through the
 queue.
 
+**Ten-day validation after one augmented epoch (epoch 21; 4 ICs x 10
+members; surface RMSE at steps 1 / 3 / 6 / 10, upper-air RMSE at step 10,
+surface ACC at step 10):**
+
+| model | 1 | 3 | 6 | 10 | UA 10 | ACC 10 |
+|---|---|---|---|---|---|---|
+| bundle e20 (base) | 1.95 | 3.13 | 15.1 | 116 | 137 | 0.82 |
+| previous run e20 | 2.28 | 3.58 | 19.5 | 81 | 114 | 0.85 |
+| S21 shrink 0.3 | 11.1 | 17.0 | 35.2 | 171 | | 0.82 |
+| **P21 pushforward 2 + fresh 1.45** | **1.99** | **3.17** | **13.4** | **58** | **67** | **0.90** |
+| PS21 pushforward + shrink (q excluded) | 12.0 | 18.5 | 34.3 | 105 | 81 | 0.87 |
+
+One epoch of self-generated anchors leaves the day-1 skill untouched and
+halves the day-10 error of the base (58 vs 116; the previous production
+model: 81), the best 10-day RSI score of this project; the shrink costs a
+factor 5 at day 1 whether or not the pushforward is on, and the pushforward
+recovers most of the shrink's day-10 damage (171 -> 105). The one-year
+consequences are the E21 evaluation (job 7601945).
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
