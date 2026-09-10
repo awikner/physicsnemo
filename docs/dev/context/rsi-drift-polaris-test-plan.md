@@ -748,6 +748,14 @@ costs what k up to 2 did) + `fresh_noise_scale` 1.45, two epochs from the
 finished epoch 24 (`checkpoints_ft5_pf24k6_b40`, jobs 7602472 -> 7602473 ->
 7602474), alongside P24 (K = 2, Heun; 7602052 -> 7602053 -> 7602054).
 
+*11:25 UTC:* the P24 first link (7602052) landed on x3003c0s25b0n0 again,
+passed the one-matmul GPU preflight and died in the model forward with the
+same illegal-instruction error on GPU 2 (rank 18), then hung; it was killed.
+Both job scripts now also check the allocation against `$R/bad_nodes.txt`
+(hostnames) and resubmit themselves if it contains a listed host; the P24 and
+P24K6 chains were extended by two blacklist-aware links each so both still
+reach epoch 26 whichever link draws the bad node.
+
 **Queued at hand-off (2026-09-10 00:30 UTC; the `small` queue is blocked by
 a 10-hour reservation until about 05:35 UTC):** P22 second epoch (jobs
 7601656 -> 7601657, `checkpoints_ft5_pf_b40` epoch 22); P24 (7602052 ->
