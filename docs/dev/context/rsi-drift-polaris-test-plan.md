@@ -668,6 +668,25 @@ Self-generated anchors are the fix; the shrink should be dropped from the
 recipe, and the level term is only worth re-testing on top of the
 pushforward if P22/P24 keep the residual -1.2 K level.
 
+**Queued at hand-off (2026-09-10 00:30 UTC; the `small` queue is blocked by
+a 10-hour reservation until about 05:35 UTC):** P22 second epoch (jobs
+7601656 -> 7601657, `checkpoints_ft5_pf_b40` epoch 22); P24 (7602052 ->
+7602053 -> 7602054, `checkpoints_ft5_pf24_b40` epochs 25-26); the five-year
+wave (7602002: `eval_bias5yr_{p21_k145,p21_base,c22_base,s22_base,ps21_k145}`).
+To finish: once the P22 / P24 checkpoints exist, score them with
+
+    qsub -q debug-scaling -l select=8:system=polaris -l walltime=01:00:00 \
+      -v EVAL_TAG=bias1yr,EVAL_JOBS=p22_k145:checkpoints_ft5_pf_b40:22:k145+p22_base:checkpoints_ft5_pf_b40:22:base+p26_k145:checkpoints_ft5_pf24_b40:26:k145+p26_base:checkpoints_ft5_pf24_b40:26:base \
+      polaris_rsi_drift_eval_multi_phase5.pbs
+
+(and a five-year wave for P26 with `EVAL_TAG=bias5yr EVAL_HORIZON=1827` on
+10 nodes), then fetch each `eval_suite.pt` and `trace_rank0.pt` and run
+`polaris_results.py compare` / `trace` as in the tables above. If the
+five-year P21 plateau stays near its one-year value (152), the recipe change
+for production is: keep `loss.anchor_shrink 0`, set `loss.pushforward_rolls
+2` (with `fresh_noise_scale 1.45` in the loss config so the training rolls
+match the sampler), and sample with `rsi_sstpred_e1_k145`.
+
 ## Phase 4: training-side (conditional on Phase 1)
 
 Only if Test 1 shows the head at its Bayes floor on-manifold and Test 2/4 show
