@@ -1,0 +1,162 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation ladder rungs A0 and A1 on the sst_pred contract, batch 40 on
+# Polaris (10 nodes x 4 ranks, per-rank batch 1), in-harness, with the SAME
+# optimizer / schedule / precision recipe as the A2 bundle run
+# (polaris_rsi_prod24_bundle_b40.pbs) so that A0, A1 and A2 differ only in the
+# scheduler:
+#
+#   ABL=a0   ERDM v2 loss (loss/erdm_v2.yaml, byte-mirror of upstream's
+#            ERDM_sst_pred scheduler) on model/amip_erdm_sst_pred (single head)
+#   ABL=a1   RSI in the exact ERDM reduction (loss/rsi_a1.yaml) on
+#            model/amip_rsi_sst_pred (two heads, H1 inert)
+#
+# Recipe (measured on this model/data at batch 40, 2026-09-08/09): base lr
+# 5e-4 = 5e-5 x 10 (linear scaling from upstream's batch-4 lr), Muon group x10,
+# 1-epoch linear warmup, cosine to eta_min 5e-5 over the 24-epoch horizon,
+# Muon momentum 0.85, weight decay 0.01, fp32 + TF32 matmuls, EMA decay 0.99
+# (= upstream's 0.999 per 10 updates), activation checkpointing on the first
+# 14 of 20 levels. Two epochs per 3 h link; every link resumes from the last
+# checkpoint pair and exits when the target epoch exists. Env knobs:
+#
+#   ABL          a0 | a1 (required)
+#   ABL_TARGET   last epoch (default 24)
+#   ABL_CKPT     checkpoint dir (default checkpoints_${ABL}_sstpred_b40)
+#   ABL_SEED     training seed (default 0, the A2 bundle run's)
+#   ABL_VAL_EVERY validation cadence in epochs (default 2 = every link end)
+#   ABL_NODES    expected node count (default 10; 1 for a debug smoke run)
+#   ABL_RETRY    internal, counts preflight/blacklist resubmissions
+#
+#PBS -A lighthouse-uchicago
+#PBS -q prod
+#PBS -l select=10:system=polaris
+#PBS -l walltime=02:59:00
+#PBS -l filesystems=home:eagle
+#PBS -l place=scatter
+#PBS -j oe
+#PBS -N rsi-abl
+set -uo pipefail
+R=/eagle/lighthouse-uchicago/members/awikner/physicsnemo-rsi
+cd "$R"
+source "$R/polaris_env.sh"
+export HYDRA_FULL_ERROR=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+echo "TMPDIR(job)=${TMPDIR:-unset}"
+export TMPDIR=/tmp   # forkserver DataLoader socket path limit (see polaris_rsi_ft_phase5.pbs)
+J=${PBS_JOBID%%.*}
+ABL=${ABL:?set ABL=a0 or ABL=a1}
+TARGET=${ABL_TARGET:-24}
+CKPT=${ABL_CKPT:-checkpoints_${ABL}_sstpred_b40}
+SEED=${ABL_SEED:-0}
+VAL_EVERY=${ABL_VAL_EVERY:-2}
+EPOCHS_PER_LINK=2
+EXPECT_NODES=${ABL_NODES:-10}
+case "$ABL" in
+  a0) MODEL=amip_erdm_sst_pred; LOSS=erdm_v2; RUN=erdm_sstpred_a0_b40 ;;
+  a1) MODEL=amip_rsi_sst_pred;  LOSS=rsi_a1;  RUN=rsi_sstpred_a1_b40 ;;
+  *) echo "FATAL: ABL must be a0 or a1, got '$ABL'"; exit 1 ;;
+esac
+mkdir -p "$CKPT"
+GC_LEVELS=$(cat "$CKPT/grad_checkpoint_levels" 2>/dev/null || echo 14)
+PPN=4
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+NRANKS=$((NNODES * PPN))
+export GPUS_PER_NODE=$PPN
+export MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
+export MASTER_PORT=29950
+echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | rung $ABL: model=$MODEL loss=$LOSS | ckpt $CKPT | target $TARGET | seed $SEED | gc_levels $GC_LEVELS ==="
+[ "$NNODES" -eq "$EXPECT_NODES" ] || { echo "FATAL: expected $EXPECT_NODES nodes, got $NNODES"; exit 1; }
+DONE=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
+DONE=${DONE:-0}
+if [ "$DONE" -ge "$TARGET" ]; then echo "already at ${DONE}/${TARGET} -- nothing to do"; exit 0; fi
+NEPOCH=$((DONE + EPOCHS_PER_LINK)); [ "$NEPOCH" -gt "$TARGET" ] && NEPOCH=$TARGET
+echo "=== resume: ${DONE} epochs done -> running through epoch ${NEPOCH} of ${TARGET} ==="
+
+# --- node blacklist + GPU preflight, with self-resubmission (as in the Phase 5
+# --- fine-tune script; x3003c0s25b0n0 GPU 2 killed three jobs in September).
+blacklisted () {
+  [ -f "$R/bad_nodes.txt" ] || return 1
+  local hit
+  hit=$(grep -Fxf <(grep -vE "^\s*(#|$)" "$R/bad_nodes.txt" | awk "{print \$1}") <(sort -u "$PBS_NODEFILE" | sed "s/\..*//"))
+  [ -n "$hit" ] && { echo "allocation contains blacklisted host(s): $hit"; return 0; }
+  return 1
+}
+preflight () {
+  local out nok
+  out=$(timeout 300 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" --cpu-bind depth -d 8 \
+        bash hpc/scripts/polaris_rank_env.sh \
+        python -c 'import os, socket, torch
+try:
+    x = torch.randn(2048, 2048, device="cuda"); y = (x @ x).sum().item(); torch.cuda.synchronize()
+    print("GPUOK", socket.gethostname(), os.environ.get("LOCAL_RANK"))
+except Exception as e:
+    print("GPUBAD", socket.gethostname(), os.environ.get("LOCAL_RANK"), repr(e)[:160])' 2>&1)
+  nok=$(grep -c "^GPUOK" <<< "$out")
+  if [ "$nok" -ne "$NRANKS" ]; then
+    echo "GPU preflight: only $nok/$NRANKS ranks ok"
+    grep -vE "^GPUOK|Warning|warn\(" <<< "$out" | head -12
+    grep "^GPUBAD" <<< "$out" | awk '{print $2, "gpu", $3}' | sort -u | tee -a "$R/bad_nodes_$(date +%Y%m%d).txt"
+    return 1
+  fi
+  echo "GPU preflight: all $NRANKS ranks ok"
+}
+if blacklisted || ! preflight; then
+  RETRY=${ABL_RETRY:-0}
+  if [ "$RETRY" -lt 4 ]; then
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
+    echo "bad GPU / blacklisted host in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
+  fi
+  exit 3
+fi
+
+LR=5.0e-4        # LINEAR scaling: 5e-5 * 10 (bundle recipe; safe only with the warmup)
+timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
+    --cpu-bind depth -d 8 \
+    bash hpc/scripts/polaris_rank_env.sh \
+    python examples/weather/ai_rossby/train_diffusion.py \
+    --config-dir=examples/weather/ai_rossby/conf --config-name=config \
+    "run_name=$RUN" \
+    "model=$MODEL" "loss=$LOSS" loss.window_size=6 \
+    dataset=amip_dailyavg_coarse_multiyear \
+    training=amip_diffusion_bf16 validation=diffusion_rollout "seed=$SEED" \
+    wandb.enabled=True wandb.mode=offline wandb.project=ai-rossby-rsi \
+    "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse_train7914" \
+    "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary_train7914" \
+    "++dataset.mean_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_mean_dailyavg.nc" \
+    "++dataset.std_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse/normalize_std_dailyavg.nc" \
+    ++dataset.sst_anomaly_channel=none ++dataset.scalar_forcing=none \
+    ++dataset.normalize_constant_boundary=true \
+    ++dataset.constant_boundary_stats=spatial \
+    ++dataset.smooth_constant_lsm=true \
+    ++training.amp=none ++training.matmul_precision=high \
+    ++training.grad_checkpoint=true \
+    "++training.grad_checkpoint_levels=$GC_LEVELS" \
+    "++training.optimizer.lr=$LR" \
+    ++training.optimizer.weight_decay=0.01 \
+    ++training.optimizer.muon_lr_multiplier=10 \
+    ++training.optimizer.muon_momentum=0.85 \
+    ++training.ema.decay=0.99 \
+    ++training.stages.0.scheduler.type=LinearWarmupCosineAnnealingLR \
+    ++training.stages.0.scheduler.num_warmup_epochs=1 \
+    "++training.stages.0.scheduler.cosine_total_epochs=$TARGET" \
+    ++training.stages.0.scheduler.eta_min=5.0e-5 \
+    "++training.max_epochs=$NEPOCH" "++training.stages.0.num_epochs=$NEPOCH" \
+    "++validation.every_n_epochs=$VAL_EVERY" \
+    "++validation.rollout.climatology.surface_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_surface.pt" \
+    "++validation.rollout.climatology.upper_air_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_upper_air.pt" \
+    "++validation.rollout.climatology.diagnostic_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_diagnostic.pt" \
+    "++checkpoint_dir=$CKPT" \
+    > "abl_${ABL}_${J}.log" 2>&1
+echo "train exit=$? (124 = hit the timeout) ; === $(date) ==="
+L="abl_${ABL}_${J}.log"
+grep -am1 "world_size=" "$L"; grep -am1 "steps_per_epoch=" "$L"; grep -am1 "fast-forwarded" "$L"
+grep -am1 "Scheduler initialized" "$L" | cut -c1-300
+grep -a -E "epoch [0-9]+ batch" "$L" | head -2; grep -a -E "epoch [0-9]+ batch" "$L" | tail -2
+grep -a "valid:" "$L" | tail -2 | cut -c1-400
+grep -a -E "Error|Traceback|SIGSEGV|SIGABRT|out of memory|non-finite" "$L" | head -6
+NOW=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
+echo "=== epochs complete: ${NOW:-0} / ${TARGET} ==="

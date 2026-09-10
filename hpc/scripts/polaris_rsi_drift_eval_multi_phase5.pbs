@@ -62,7 +62,12 @@ NNODES=${#ALLNODES[@]}
 NEED=$(( ${#JOBS[@]} * NODES_PER_JOB ))
 echo "=== $(date) | ${NNODES} nodes | ${#JOBS[@]} jobs x ${RANKS_PER_JOB} ranks | horizon $HORIZON | ${EVAL_JOBS} ==="
 if [ "$NNODES" -lt "$NEED" ]; then echo "FATAL: need $NEED nodes, have $NNODES"; exit 1; fi
-sampler_for () { case "$1" in k120*) echo rsi_sstpred_e1_k120 ;; k145*) echo rsi_sstpred_e1_k145 ;; k180*) echo rsi_sstpred_e1_k180 ;; fd) echo rsi_sstpred_e1_fd ;; *) echo rsi_sstpred_e1 ;; esac; }
+sampler_for () { case "$1" in k120*) echo rsi_sstpred_e1_k120 ;; k145*) echo rsi_sstpred_e1_k145 ;; k180*) echo rsi_sstpred_e1_k180 ;; fd) echo rsi_sstpred_e1_fd ;; a1*) echo rsi_a1_sstpred ;; erdm*) echo erdm_v2 ;; *) echo rsi_sstpred_e1 ;; esac; }
+# cfg "erdm" scores an in-harness ERDM checkpoint (rung A0) through the ERDM
+# combined cascade; "a1" scores an A1 checkpoint through the RSI cascade with
+# the reduction sampler. Everything else is the RSI A2 cascade.
+model_for () { case "$1" in erdm*) echo amip_combined_sst_pred ;; *) echo amip_combined_rsi_sstpred ;; esac; }
+loss_for () { case "$1" in erdm*) echo erdm_v2 ;; a1*) echo rsi_a1 ;; *) echo rsi ;; esac; }
 steps_for () { case "$1" in ns4) echo 4 ;; *) echo 2 ;; esac; }
 seed_for () { case "$1" in *s1) echo 1 ;; *) echo 0 ;; esac; }
 launch_cfg () {
@@ -74,8 +79,8 @@ launch_cfg () {
       python examples/weather/ai_rossby/climate_eval_suite.py \
       --config-dir=examples/weather/ai_rossby/conf --config-name=config \
       run_name=${TAG}_${name} \
-      model=amip_combined_rsi_sstpred "++model.forecaster.sampler=$(sampler_for "$cfg")" \
-      loss=rsi loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear \
+      "model=$(model_for "$cfg")" "++model.forecaster.sampler=$(sampler_for "$cfg")" \
+      "loss=$(loss_for "$cfg")" loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear \
       validation=eval_suite "seed=$(seed_for "$cfg")" wandb.enabled=False \
       "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse" \
       "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary" \

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Inference sampler for an A1 checkpoint (loss/rsi_a1.yaml trained on the
+# sst_pred contract): the RSI scheduler in its exact ERDM reduction. Mirrors
+# the training scheduler byte for byte -- under reduce_to_erdm the forward
+# process is ERDM's rho-schedule between sigma_min and sigma_max, the fresh
+# back slot is pure noise, and the readout is the z head's denoiser. The only
+# knobs that may differ from training are the sampling ones (num_steps,
+# solver, final_denoise, eps_scale); everything else defines the process the
+# heads were regressed against.
+_target_: physicsnemo.experimental.diffusion.RSIScheduler
+window_size: 6
+num_steps: 2
+solver: heun
+integrator: coeff
+final_denoise: false
+parameterization: residual
+h1_precond: none
+beta: linear
+beta_floor: 1.0e-3
+gamma_0: 0.5
+gamma_1: 0.02
+gamma_profile: geometric
+delta_std: 1.0
+time_eps: 1.0e-3
+label_mode: log_sigma_eff
+anchor_noise: 0.0
+weighting: snr_bump
+P_mean: 2.0
+P_std: 1.2
+w_1: 1.0
+w_z: 1.0
+eps_scale: 0.0
+eps_tmin: 0.0
+eps_tmax: 1.0
+noise: gaussian
+l_max: 90
+noise_scale_path: null
+spectrum_path: null
+reduce_to_erdm: true
+sigma_min: 0.002
+sigma_max: 500.0
+rho: -10.0
+ocean_loss_weight: 1.0

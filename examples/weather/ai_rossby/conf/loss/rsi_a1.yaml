@@ -20,6 +20,13 @@ reduce_to_erdm: true
 # beta == 1 under the reduction, so the increment head is inert and the clean
 # readout must come from the interpolant relation.
 parameterization: residual
+# loss/rsi.yaml now defaults to h1_precond: edm (the campaign-1 fix for the
+# STATE head), which the scheduler refuses under the residual parameterization
+# -- without this line the rung does not instantiate (found 2026-09-10 while
+# planning the A0/A1 batch-40 runs). Under the reduction the clean readout is
+# ERDM's D = x - sigma zhat through the z head's own EDM skip/out form, which
+# is what test_a1_loss_reduces_to_erdm_exactly pins; H1 has zero weight.
+h1_precond: none
 # Gamma(tau) becomes ERDM's rho-schedule between these, and the conditioning
 # label becomes ERDM's own log(sigma)/4.
 label_mode: log_sigma_eff
