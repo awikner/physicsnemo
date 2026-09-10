@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Plan: A0 (ERDM) and A1 (RSI in the ERDM reduction) on the sst_pred contract, batch 40, Polaris (draft 2026-09-10)
 
-Status: **plan and scripts ready, nothing submitted.** Open questions are at
-the end; the runs start once they are answered.
+Status: **decisions taken 2026-09-10 (section 6); submitting.** Sections 1-4
+are the review and the original proposal; section 5 records the questions
+and answers.
 
 ## 1. What upstream trained (the sst_pred ERDM we have been comparing against)
 
@@ -65,7 +66,7 @@ was added. A matching inference sampler `sampler/rsi_a1_sstpred.yaml` and an
 so the one- and five-year evaluations run through the same cascade and
 protocol as every earlier number.
 
-## 3. Hyperparameters at batch 40 (best judgement, one recipe for both)
+## 3. Hyperparameters at batch 40 (the original proposal; superseded by section 6)
 
 Upstream's recipe is a batch-4 recipe. Scaling it to batch 40 was already
 worked out on this model and data for A2 (jobs 7589775/6, 7597388/9 and the
@@ -122,7 +123,59 @@ has one output head and should be a few minutes faster. 12 links per run,
    (c) A0 drifts too: the harness or the batch-40 recipe, not RSI, is the
    problem, and every earlier comparison is confounded.
 
-## 5. Questions before submitting
+## 5. Questions asked and the answers (2026-09-10)
+
+1. A0 recipe: **upstream-faithful** (StepLR 0.95 per epoch, Muon momentum
+   0.95, linear-scaled lr), not the A2 bundle recipe.
+2. Budget: **24 epochs**.
+3. Concurrency: **A0 and A1 concurrently**.
+4. Evaluation: one-year at epochs 12 and 24 and five-year at 24, **and check
+   at epochs 12 and 24 whether A0 matches, or is on its way to matching, the
+   upstream model.**
+
+## 6. Final recipe and execution as decided
+
+Both rungs use the same recipe, so A1 versus A0 is a pure code-path
+comparison and A0 is comparable to the upstream checkpoint in everything but
+batch size:
+
+| knob | value |
+|---|---|
+| lr | 5e-4 base (AdamW group), 5e-3 Muon group (x10): upstream's 5e-5 x 10, linear scaling |
+| schedule | StepLR gamma 0.95 per epoch (upstream), preceded by a 1-epoch linear warmup -- the only deviation from upstream's form. Upstream's peak was 10x lower; the linearly scaled peak has only ever been run with a warmup (bundle test), and the lr-only test at 2.8e-4 without warmup already showed gnorm 1.6e4 in its first epoch. After the warmup the decay count lags upstream's by one epoch (0.95^23 at epoch 24 instead of 0.95^24). `make_scheduler` gained the optional `num_warmup_steps` for StepLR (tested). |
+| Muon momentum | 0.95 (upstream) |
+| weight decay, AdamW betas | 0.01 both groups; (0.9, 0.95) -- upstream, and the wrapper's defaults |
+| precision | fp32 + TF32 (upstream 32-true) |
+| EMA | 0.99 per step (upstream 0.999 per update, 10 updates per step) |
+| activation checkpointing | first 14 of 20 levels (no effect on the result) |
+| validation | 10-day rollout every epoch (upstream validated every epoch) |
+| seed | 0 |
+| epochs | 24, two per 3 h link, 12 links each plus one spare blacklist-aware link |
+
+Matching A0 against upstream. Upstream checkpoints exist for epochs 17-24 and
+their five-year evaluations are on disk (`$R/eval_bias5yr_e17..e24`, plateau
+63-67, alpha 0). At epoch 12 there is no upstream checkpoint, so the check is
+(a) the 10-day validation curve of A0 against the upstream epoch-17 and
+epoch-20 validation numbers we have (2.28 / 3.58 / 19.5 / 81 surface RMSE at
+steps 1 / 3 / 6 / 10 for upstream ep20 under our validator) and (b) the
+one-year evaluation of A0 at epoch 12 against the first year of the upstream
+ep17 five-year evaluation. At epoch 24: A0 versus upstream ep23 and ep24 over
+one and five years, on every metric of the drift tables (plateau, bias maps,
+alpha, spread). "Close to matching" means within the member noise measured
+on the epoch-26 seed pair (alpha +-0.005, z500 RMSE +-4) and with a plateau
+inside the upstream range 63-67; a plateau of ~100 at epoch 12 with alpha
+near zero and a still-falling validation curve counts as "on its way".
+
+Evaluations are submitted by hand when the epoch-12 and epoch-24 pairs
+exist (the multi eval script with configs `erdm` for A0 and `a1` for A1):
+
+    qsub -q debug-scaling -l select=4:system=polaris -l walltime=01:00:00 \
+      -v EVAL_TAG=bias1yr,EVAL_JOBS=a0_e12:checkpoints_a0_sstpred_b40:12:erdm+a1_e12:checkpoints_a1_sstpred_b40:12:a1 \
+      polaris_rsi_drift_eval_multi_phase5.pbs
+    # and at 24: the same with :24:, then a 10-node prod job with
+    # EVAL_TAG=bias5yr EVAL_HORIZON=1827 for a0_e24, a1_e24 and the A2 bundle e24.
+
+## 5a. Questions as originally asked
 
 1. **Recipe for A0.** The plan gives A0 the A2 bundle recipe (linear-scaled
    lr, warmup, cosine, momentum 0.85) so the three rungs are optimizer-

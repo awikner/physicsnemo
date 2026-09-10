@@ -5,29 +5,34 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Ablation ladder rungs A0 and A1 on the sst_pred contract, batch 40 on
-# Polaris (10 nodes x 4 ranks, per-rank batch 1), in-harness, with the SAME
-# optimizer / schedule / precision recipe as the A2 bundle run
-# (polaris_rsi_prod24_bundle_b40.pbs) so that A0, A1 and A2 differ only in the
-# scheduler:
+# Polaris (10 nodes x 4 ranks, per-rank batch 1), in-harness. One script for
+# both rungs so that A0 and A1 differ only in the model/loss line:
 #
 #   ABL=a0   ERDM v2 loss (loss/erdm_v2.yaml, byte-mirror of upstream's
 #            ERDM_sst_pred scheduler) on model/amip_erdm_sst_pred (single head)
 #   ABL=a1   RSI in the exact ERDM reduction (loss/rsi_a1.yaml) on
 #            model/amip_rsi_sst_pred (two heads, H1 inert)
 #
-# Recipe (measured on this model/data at batch 40, 2026-09-08/09): base lr
-# 5e-4 = 5e-5 x 10 (linear scaling from upstream's batch-4 lr), Muon group x10,
-# 1-epoch linear warmup, cosine to eta_min 5e-5 over the 24-epoch horizon,
-# Muon momentum 0.85, weight decay 0.01, fp32 + TF32 matmuls, EMA decay 0.99
-# (= upstream's 0.999 per 10 updates), activation checkpointing on the first
-# 14 of 20 levels. Two epochs per 3 h link; every link resumes from the last
+# Recipe (ABL_RECIPE, default "upstream", chosen 2026-09-10): upstream
+# amip_v2's ERDM_sst_pred optimizer scaled to batch 40 -- base lr 5e-4 =
+# 5e-5 x 10 (linear scaling), Muon group x10, Muon momentum 0.95 (upstream's),
+# weight decay 0.01 on both groups, StepLR 0.95 per epoch (upstream's
+# schedule), fp32 + TF32 matmuls (upstream's 32-true), EMA decay 0.99
+# (= upstream's 0.999 per 10 updates). The ONE deviation from upstream's form
+# is a 1-epoch linear warmup in front of the StepLR decay: upstream's peak was
+# 10x lower, the linearly scaled peak has only ever been run WITH a warmup,
+# and the first epoch is where a large-batch run diverges. ABL_RECIPE=bundle
+# gives the A2 bundle run's recipe instead (warmup + cosine to 5e-5 over the
+# horizon, momentum 0.85). Both: activation checkpointing on the first 14 of
+# 20 levels, two epochs per 3 h link; every link resumes from the last
 # checkpoint pair and exits when the target epoch exists. Env knobs:
 #
 #   ABL          a0 | a1 (required)
+#   ABL_RECIPE   upstream (default) | bundle
 #   ABL_TARGET   last epoch (default 24)
 #   ABL_CKPT     checkpoint dir (default checkpoints_${ABL}_sstpred_b40)
 #   ABL_SEED     training seed (default 0, the A2 bundle run's)
-#   ABL_VAL_EVERY validation cadence in epochs (default 2 = every link end)
+#   ABL_VAL_EVERY validation cadence in epochs (default 1, as upstream)
 #   ABL_NODES    expected node count (default 10; 1 for a debug smoke run)
 #   ABL_RETRY    internal, counts preflight/blacklist resubmissions
 #
@@ -52,7 +57,8 @@ ABL=${ABL:?set ABL=a0 or ABL=a1}
 TARGET=${ABL_TARGET:-24}
 CKPT=${ABL_CKPT:-checkpoints_${ABL}_sstpred_b40}
 SEED=${ABL_SEED:-0}
-VAL_EVERY=${ABL_VAL_EVERY:-2}
+VAL_EVERY=${ABL_VAL_EVERY:-1}
+RECIPE=${ABL_RECIPE:-upstream}
 EPOCHS_PER_LINK=2
 EXPECT_NODES=${ABL_NODES:-10}
 case "$ABL" in
@@ -68,7 +74,7 @@ NRANKS=$((NNODES * PPN))
 export GPUS_PER_NODE=$PPN
 export MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
 export MASTER_PORT=29950
-echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | rung $ABL: model=$MODEL loss=$LOSS | ckpt $CKPT | target $TARGET | seed $SEED | gc_levels $GC_LEVELS ==="
+echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | rung $ABL: model=$MODEL loss=$LOSS | recipe $RECIPE | ckpt $CKPT | target $TARGET | seed $SEED | gc_levels $GC_LEVELS ==="
 [ "$NNODES" -eq "$EXPECT_NODES" ] || { echo "FATAL: expected $EXPECT_NODES nodes, got $NNODES"; exit 1; }
 DONE=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
 DONE=${DONE:-0}
@@ -107,13 +113,22 @@ except Exception as e:
 if blacklisted || ! preflight; then
   RETRY=${ABL_RETRY:-0}
   if [ "$RETRY" -lt 4 ]; then
-    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
     echo "bad GPU / blacklisted host in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
   exit 3
 fi
 
-LR=5.0e-4        # LINEAR scaling: 5e-5 * 10 (bundle recipe; safe only with the warmup)
+LR=5.0e-4        # LINEAR scaling: 5e-5 * 10 (safe only with the warmup)
+case "$RECIPE" in
+  upstream) SCHED=(++training.stages.0.scheduler.type=StepLR ++training.stages.0.scheduler.sl_gamma=0.95
+                   ++training.stages.0.scheduler.num_warmup_epochs=1); MOMENTUM=0.95 ;;
+  bundle)   SCHED=(++training.stages.0.scheduler.type=LinearWarmupCosineAnnealingLR
+                   ++training.stages.0.scheduler.num_warmup_epochs=1
+                   "++training.stages.0.scheduler.cosine_total_epochs=$TARGET"
+                   ++training.stages.0.scheduler.eta_min=5.0e-5); MOMENTUM=0.85 ;;
+  *) echo "FATAL: ABL_RECIPE must be upstream or bundle, got '$RECIPE'"; exit 1 ;;
+esac
 timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     --cpu-bind depth -d 8 \
     bash hpc/scripts/polaris_rank_env.sh \
@@ -138,12 +153,9 @@ timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     "++training.optimizer.lr=$LR" \
     ++training.optimizer.weight_decay=0.01 \
     ++training.optimizer.muon_lr_multiplier=10 \
-    ++training.optimizer.muon_momentum=0.85 \
+    "++training.optimizer.muon_momentum=$MOMENTUM" \
     ++training.ema.decay=0.99 \
-    ++training.stages.0.scheduler.type=LinearWarmupCosineAnnealingLR \
-    ++training.stages.0.scheduler.num_warmup_epochs=1 \
-    "++training.stages.0.scheduler.cosine_total_epochs=$TARGET" \
-    ++training.stages.0.scheduler.eta_min=5.0e-5 \
+    "${SCHED[@]}" \
     "++training.max_epochs=$NEPOCH" "++training.stages.0.num_epochs=$NEPOCH" \
     "++validation.every_n_epochs=$VAL_EVERY" \
     "++validation.rollout.climatology.surface_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_surface.pt" \

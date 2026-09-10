@@ -872,7 +872,7 @@ def make_scheduler(
     * ``"LinearWarmupCosineAnnealingLR"`` — composes a linear warmup
       (``num_warmup_steps``) with cosine annealing to ``eta_min``.
     * ``"StepLR"`` — multiply the lr by ``sl_gamma`` every ``sl_step_epochs``
-      EPOCHS. This is upstream amip_v2's schedule
+      EPOCHS, optionally after a linear warmup of ``num_warmup_steps``. This is upstream amip_v2's schedule
       (``StepLR(optimizer, step_size=1, gamma=0.95)`` in
       ``modules/train_module.py``, stepped per-epoch by Lightning), provided
       here for training-budget parity with the ERDM baseline. Our loop steps
@@ -890,8 +890,30 @@ def make_scheduler(
                 "step); pass steps_per_epoch=... to make_scheduler"
             )
         step_size = max(1, int(round(step_epochs * int(steps_per_epoch))))
-        return torch.optim.lr_scheduler.StepLR(
+        step = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=step_size, gamma=gamma
+        )
+        # Optional linear warmup in front of the per-epoch decay
+        # (``num_warmup_steps``; the recipe derives it from
+        # ``num_warmup_epochs``). Upstream amip_v2 has none, but its StepLR
+        # runs at batch 4; at batch 40 the linearly scaled peak lr is 10x
+        # higher and the first epoch is where a large-batch run diverges, so
+        # the in-harness A0/A1 batch-40 runs (2026-09-10) warm up for one
+        # epoch and then follow upstream's 0.95-per-epoch decay. The decay
+        # count then lags upstream's by the warmup length (0.95^(E-1) at
+        # epoch E instead of 0.95^E).
+        warmup_steps = int(getattr(cfg, "num_warmup_steps", 0) or 0)
+        if warmup_steps <= 0:
+            return step
+        warmup_start_lr = float(getattr(cfg, "warmup_start_lr", 1e-8))
+        warmup = LinearLR(
+            optimizer,
+            start_factor=warmup_start_lr / float(cfg.lr),
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        return SequentialLR(
+            optimizer, schedulers=[warmup, step], milestones=[warmup_steps]
         )
     if name == "CosineToFloor":
         # Cosine from the base lr down to ``ct_floor_lr`` over

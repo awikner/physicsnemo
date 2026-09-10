@@ -478,15 +478,20 @@ def _flatten_scheduler_cfg(
     """Map ``stage.scheduler.{type, ...}`` → the flat keys
     ``make_scheduler`` expects.
 
-    Computes the LinearWarmupCosineAnnealingLR warmup-step count from
-    ``num_warmup_epochs`` (epoch-count is the natural unit at config time).
+    Computes the warmup-step count from ``num_warmup_epochs`` (epoch-count is
+    the natural unit at config time) for LinearWarmupCosineAnnealingLR and for
+    any scheduler given that key (StepLR accepts it too).
     Provides a CosineAnnealingLR ``T_max`` default of ``steps_per_epoch *
     num_epochs`` when the user didn't override.
     """
     flat = OmegaConf.to_container(sched_cfg, resolve=True) or {}
     flat["scheduler"] = flat.pop("type", "OneCycleLR")
     flat["lr"] = lr
-    if flat["scheduler"] == "LinearWarmupCosineAnnealingLR":
+    # Any scheduler that understands a warmup (LinearWarmupCosineAnnealingLR,
+    # and StepLR since 2026-09-10) takes it in optimizer steps; the config
+    # states it in epochs. Convert whenever the key is present so a
+    # ``num_warmup_epochs`` on a StepLR stage is not silently ignored.
+    if flat["scheduler"] == "LinearWarmupCosineAnnealingLR" or "num_warmup_epochs" in flat:
         flat["num_warmup_steps"] = int(
             flat.get("num_warmup_epochs", 0) * steps_per_epoch
         )

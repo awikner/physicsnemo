@@ -181,3 +181,40 @@ def test_a_single_fresh_resume_hides_the_bug():
     ff_fixed, _ = _resume_link(3, None, reset_first=True)
     ff_buggy, _ = _resume_link(3, None, reset_first=False)
     assert ff_fixed == pytest.approx(ff_buggy, rel=1e-9)
+
+
+def test_warmup_then_step_decay():
+    """A0/A1 batch-40 recipe: one warmup epoch, then upstream's 0.95 per epoch."""
+    opt = _opt()
+    sch = make_scheduler(opt, _cfg(sl_gamma=0.95, num_warmup_steps=SPE, lr=LR),
+                         total_steps=SPE * 24, steps_per_epoch=SPE)
+    # warmup starts near zero and reaches the base lr at the end of epoch 1
+    assert opt.param_groups[0]["lr"] < 0.01 * LR
+    for _ in range(SPE):
+        sch.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(LR, rel=1e-6)
+    # no decay during epoch 2; one gamma at its end
+    for _ in range(SPE - 1):
+        sch.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(LR, rel=1e-6)
+    sch.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(LR * 0.95, rel=1e-6)
+    # after 24 epochs: 23 decays (the warmup epoch does not decay)
+    for _ in range(SPE * 22):
+        sch.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(LR * 0.95**23, rel=1e-6)
+
+
+def test_recipe_flattener_converts_warmup_epochs_for_steplr():
+    """``num_warmup_epochs`` on a StepLR stage must reach make_scheduler as
+    steps (the flattener used to convert it for the cosine schedule only)."""
+    from train import _flatten_scheduler_cfg  # noqa: E402
+    stage = OmegaConf.create({"type": "StepLR", "sl_gamma": 0.95, "num_warmup_epochs": 1})
+    flat = _flatten_scheduler_cfg(stage, lr=LR, steps_per_epoch=SPE, num_epochs=24)
+    assert flat.scheduler == "StepLR" and flat.num_warmup_steps == SPE and flat.sl_gamma == 0.95
+    opt = _opt()
+    sch = make_scheduler(opt, flat, total_steps=SPE * 24, steps_per_epoch=SPE)
+    assert opt.param_groups[0]["lr"] < 0.01 * LR
+    for _ in range(SPE):
+        sch.step()
+    assert opt.param_groups[0]["lr"] == pytest.approx(LR, rel=1e-6)
