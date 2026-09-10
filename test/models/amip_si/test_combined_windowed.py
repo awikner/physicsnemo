@@ -326,13 +326,14 @@ def _rsi_forecaster(*, ocean=()):
     )
 
 
-def _rsi_combined(*, ocean=(), num_steps=2):
+def _rsi_combined(*, ocean=(), num_steps=2, anchor_lag=1):
     from physicsnemo.experimental.diffusion import RSIScheduler
 
     fc = _rsi_forecaster(ocean=ocean).eval()
     sched = RSIScheduler(
         window_size=_W, num_steps=num_steps, noise="gaussian",
         nocean=len(ocean), ocean_grid_indices=[0, 1][: len(ocean)],
+        anchor_lag=anchor_lag,
     )
     if ocean:
         sched.ocean_grid_indices = list(fc.ocean_grid_indices)
@@ -404,5 +405,89 @@ def test_rsi_streaming_reproduces_sample_rollout_frame_for_frame():
             cg = sched._gather_window(c_grid, k)
             cs = sched._gather_window(c_scalar, k)
             emitted, (x_bar, eps) = sched.stream_step(fc, (x_bar, eps), cg, cs, 2)
+            got.append(emitted)
+    torch.testing.assert_close(torch.stack(got, dim=1), ref)
+
+
+# ---------------------------------------------------------------------------
+# Anchor lag L = W (proposal v0.2): 2W init frames, the anchor-time boundary
+# window reaches stream_step, and streaming with pre-IC frames matches the
+# batch rollout frame for frame.
+# ---------------------------------------------------------------------------
+
+
+def test_rsi_lag_w_init_needs_two_w_frames():
+    cm, fc, sched = _rsi_combined(anchor_lag=_W)
+    assert sched.init_frames == 2 * _W
+    torch.manual_seed(0)
+    x_bar, eps_prev = cm.windowed_init(torch.randn(1, 2 * _W, fc.in_channels, *_LOW))
+    assert x_bar.shape == (1, _W, fc.in_channels, *_LOW) and eps_prev is None
+    with pytest.raises(ValueError, match="init_frames"):
+        cm.windowed_init(torch.randn(1, _W + 1, fc.in_channels, *_LOW))
+
+
+def test_anchor_bnd_win_reaches_the_schedulers_stream_step(monkeypatch):
+    ocean = ["sea_surface_temperature_monthly_interp"]
+    cm, fc, sched = _rsi_combined(ocean=ocean, anchor_lag=_W)
+    seen = {}
+    orig = sched.stream_step
+
+    def spy(model, state, cg, cs, num_steps=None, ocean_win=None, anchor_bnd_win=None):
+        seen["anchor_bnd_win"] = anchor_bnd_win
+        return orig(model, state, cg, cs, num_steps, ocean_win=ocean_win,
+                    anchor_bnd_win=anchor_bnd_win)
+    monkeypatch.setattr(sched, "stream_step", spy)
+    torch.manual_seed(0)
+    init = torch.randn(1, 2 * _W, fc.num_state_channels, *_LOW)
+    x_bar, eps = cm.windowed_init(init)
+    c_grid, c_scalar = _forcings(1, _W, fc.c_grid_dim, fc.scalar_dim)
+    own, anchor = torch.randn_like(c_grid), torch.randn_like(c_grid)
+    with torch.no_grad():
+        cm.windowed_step(x_bar, eps, c_grid, c_scalar, ocean_win=own,
+                         anchor_bnd_win=anchor)
+    assert seen["anchor_bnd_win"] is anchor
+    # at lag > 1 the imposition cannot fall back on c_grid_win
+    with pytest.raises(ValueError, match="anchor_bnd_win"), torch.no_grad():
+        cm.windowed_step(x_bar, eps, c_grid, c_scalar, ocean_win=own)
+
+
+def test_erdm_refuses_an_anchor_window():
+    cm, fc, sched = _combined()
+    torch.manual_seed(0)
+    x_bar, eps = cm.windowed_init(torch.randn(1, _W, fc.in_channels, *_LOW))
+    c_grid, c_scalar = _forcings(1, _W, fc.c_grid_dim, fc.scalar_dim)
+    with pytest.raises(ValueError, match="anchor"), torch.no_grad():
+        cm.windowed_step(x_bar, eps, c_grid, c_scalar, anchor_bnd_win=c_grid)
+
+
+def test_rsi_lag_w_streaming_with_pre_ic_frames_matches_the_batch_rollout():
+    """Driver contract for rollout.py: gather forcing at k+lead, own-time
+    ocean at k+1+lead, anchor-time ocean via _anchor_bnd_window(k, lead)."""
+    ocean = ["sea_surface_temperature_monthly_interp", "sea_ice_cover_monthly_interp"]
+    cm, fc, sched = _rsi_combined(ocean=ocean, anchor_lag=_W)
+    lead = _W - 1
+    horizon = 3
+    torch.manual_seed(0)
+    init = torch.randn(1, 2 * _W, fc.num_state_channels, *_LOW)     # bare state
+    c_grid = torch.randn(1, lead + _W + horizon, fc.c_grid_dim, *_LOW)
+    c_scalar = torch.randn(1, lead + _W + horizon, fc.scalar_dim)
+
+    torch.manual_seed(99)
+    with torch.no_grad():
+        ref = sched.sample_rollout(fc, init, c_grid, c_scalar, horizon=horizon,
+                                   traj_lead=lead)
+
+    torch.manual_seed(99)
+    x_bar, eps = cm.windowed_init(init)
+    got = []
+    with torch.no_grad():
+        for k in range(horizon):
+            emitted, (x_bar, eps) = sched.stream_step(
+                fc, (x_bar, eps),
+                sched._gather_window(c_grid, k + lead),
+                sched._gather_window(c_scalar, k + lead), 2,
+                ocean_win=sched._gather_window(c_grid, k + 1 + lead),
+                anchor_bnd_win=sched._anchor_bnd_window(c_grid, k, lead),
+            )
             got.append(emitted)
     torch.testing.assert_close(torch.stack(got, dim=1), ref)

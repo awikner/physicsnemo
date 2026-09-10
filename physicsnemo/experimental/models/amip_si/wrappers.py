@@ -1539,6 +1539,7 @@ class CombinedModule(_PNeMoModule):
         num_steps: int | None = None,
         *,
         ocean_win: torch.Tensor | None = None,
+        anchor_bnd_win: torch.Tensor | None = None,
         downscaler_num_steps: int | None = None,
     ):
         r"""Advance the window by one emitted frame and downscale it.
@@ -1549,7 +1550,10 @@ class CombinedModule(_PNeMoModule):
 
         ``ocean_win`` is the forcing window **shifted forward one step**, from
         which the true ocean fields are imposed (Phase 12f); ``None`` disables
-        it. Returns ``(y_highres, x_bar, eps_prev)``.
+        it. ``anchor_bnd_win`` is the boundary at each slot's ANCHOR time (RSI
+        with anchor lag L: L steps behind ``ocean_win``); it is handed to a
+        scheduler-owned ``stream_step`` and refused for schedulers without one
+        (ERDM has no anchor). Returns ``(y_highres, x_bar, eps_prev)``.
         """
         sch = self.forecaster_scheduler
         # A rolling state saved by a run with a different channel count would
@@ -1563,15 +1567,21 @@ class CombinedModule(_PNeMoModule):
                 f"rather than resuming."
             )
         if hasattr(sch, "stream_step"):
+            extra = {"anchor_bnd_win": anchor_bnd_win} if anchor_bnd_win is not None else {}
             emitted, (x_bar, eps_prev) = sch.stream_step(
                 self.forecaster, (x_bar, eps_prev), c_grid_win, c_scalar_win,
-                num_steps, ocean_win=ocean_win,
+                num_steps, ocean_win=ocean_win, **extra,
             )
             # Strip the predicted ocean block before the downscaler: it is a
             # pretrained, state-width model and must not see the extra channels.
             y_highres = self._downscale(
                 sch.strip_ocean(emitted), num_steps=downscaler_num_steps)
             return y_highres, x_bar, eps_prev
+        if anchor_bnd_win is not None:
+            raise ValueError(
+                f"{type(sch).__name__} has no anchor: anchor_bnd_win is an RSI "
+                "(scheduler-owned streaming) argument."
+            )
         x_bar = sch.sample_window(
             self.forecaster, x_bar, c_grid_win, c_scalar_win, num_steps,
             ocean_win=ocean_win,

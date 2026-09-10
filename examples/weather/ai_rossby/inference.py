@@ -1198,11 +1198,21 @@ def run_diffusion_inference_streaming_per_ic(
     window_size = (
         int(getattr(scheduler, "window_size", 0)) if window_mode else 0
     )
-    # Frames the scheduler wants for its first window: W for ERDM/RFM, W+1 for
-    # a data-coupled scheduler (RSI), whose leading frame is slot 1's anchor.
-    # The default keeps every existing scheduler on its old path.
+    # Frames the scheduler wants for its first window: W for ERDM/RFM, W+L for
+    # a data-coupled scheduler (RSI with anchor lag L), whose leading L frames
+    # are the anchors of slots 1..L. The default keeps every existing scheduler
+    # on its old path.
     init_frames = (
         int(getattr(scheduler, "init_frames", window_size)) if window_mode else 0
+    )
+    # Frames read BEFORE the IC (proposal v0.2): at anchor lag L the init stack
+    # starts L-1 steps before the IC and the forcing trajectory is prepended
+    # with the same L-1 boundary frames (``traj_lead``) so the first rolls'
+    # anchor-time ocean imposition is real data. 0 for ERDM/RFM and lag-1 RSI.
+    traj_lead = (
+        max(int(getattr(scheduler, "anchor_lag", 1) or 1) - 1,
+            init_frames - window_size - 1, 0)
+        if window_mode else 0
     )
 
     # Store rows per MODEL step. The deterministic driver above has carried
@@ -1291,9 +1301,16 @@ def run_diffusion_inference_streaming_per_ic(
         if window_mode:
             # Build the oracle initial window ending at ic + W (the future
             # window y_{1:W} the schedulers document), normalize, replicate
-            # across the ensemble, pack. A scheduler asking for an extra
-            # anchor frame (RSI, init_frames = W + 1) reaches back to the IC
-            # itself rather than moving the window.
+            # across the ensemble, pack. A scheduler asking for extra anchor
+            # frames (RSI, init_frames = W + L) reaches back to the IC itself
+            # (L = 1) and L-1 steps before it rather than moving the window.
+            if ic - traj_lead * step_size < 0:
+                raise ValueError(
+                    f"window rollout from ic={ic} needs store row "
+                    f"{ic - traj_lead * step_size} ({traj_lead} model step(s) "
+                    f"before the IC: the scheduler's anchor lag is "
+                    f"{traj_lead + 1}); use ic >= {traj_lead * step_size}."
+                )
             init_window = _maybe_normalize(
                 normalizer,
                 _stack_window_initial(
@@ -1304,11 +1321,13 @@ def run_diffusion_inference_streaming_per_ic(
             init_window = perturber(init_window, ensemble_size, generator=rng)
             init_y = inner_model.pack_window_state(init_window)
 
-            # Build c_grid_traj + c_scalar_traj: slot j is the forcing at
-            # absolute step j (store row ic + j * step_size), so roll k's
+            # Build c_grid_traj + c_scalar_traj: slot lead + j is the forcing
+            # at absolute step j (store row ic + j * step_size), so roll k's
             # window slot w — holding state y_{k+w+1} — is conditioned on
-            # traj[k+w], its LAG-1 forcing (the forcing_lag=1 training
-            # alignment). Slots span [ic, ic + (W + max_step - 2) * step].
+            # traj[lead+k+w], its LAG-1 forcing (the forcing_lag=1 training
+            # alignment). Slots span [ic - lead*step, ic + (W + max_step - 2)
+            # * step]; the ``lead`` pre-IC frames (anchor lag L - 1, else 0)
+            # feed the anchor-time ocean imposition of the first rolls.
             # +1 with predicted ocean channels: they are imposed from the
             # boundary at each slot's own time, one step past the last forcing
             # the model is conditioned on (Phase 12f). Omitting it would clamp
@@ -1335,8 +1354,11 @@ def run_diffusion_inference_streaming_per_ic(
                     normalizer,
                     _stack_at_step(dataset, [ic + j * step_size], device),
                 )
-                for j in range(traj_len)
+                for j in range(-traj_lead, traj_len)
             ]
+            # Only an RSI scheduler with anchor lag > 1 takes the kwarg; every
+            # other scheduler (and the test fakes) keeps its exact call.
+            lead_kw = {"traj_lead": traj_lead} if traj_lead else {}
 
             def _stack_traj(key: str) -> torch.Tensor:
                 return torch.stack([f[key] for f in traj_frames], dim=1)
@@ -1365,6 +1387,7 @@ def run_diffusion_inference_streaming_per_ic(
                 c_scalar_traj,
                 horizon=max_step,
                 num_steps=sampler_num_steps,
+                **lead_kw,
             )  # (E, max_step, C_packed, H, W)
 
             for k in range(1, max_step + 1):

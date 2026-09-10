@@ -169,7 +169,13 @@ def _save_state(out_dir: Path, *, step: int, x_bar, eps_prev) -> None:
     """
     tmp = _state_path(out_dir).with_suffix(".tmp")
     torch.save(
-        {"step": int(step), "x_bar": x_bar.cpu(), "eps_prev": eps_prev.cpu()}, tmp
+        {
+            "step": int(step),
+            "x_bar": x_bar.cpu(),
+            # RSI carries no noise history: its second state element is None.
+            "eps_prev": eps_prev.cpu() if eps_prev is not None else None,
+        },
+        tmp,
     )
     tmp.replace(_state_path(out_dir))          # atomic: never a half-written state
 
@@ -179,7 +185,12 @@ def _load_state(out_dir: Path, device):
     if not path.exists():
         return None
     blob = torch.load(path, map_location=device, weights_only=False)
-    return int(blob["step"]), blob["x_bar"].to(device), blob["eps_prev"].to(device)
+    eps_prev = blob["eps_prev"]
+    return (
+        int(blob["step"]),
+        blob["x_bar"].to(device),
+        eps_prev.to(device) if eps_prev is not None else None,
+    )
 
 
 class _MonthBuffer:
@@ -255,11 +266,22 @@ def _traj_windows(cfg, dataset, forecaster, scheduler, *, ic, horizon, step_size
 
     Same construction ``inference.py``'s rolling branch uses, including the extra
     lookahead frame the predicted-ocean imposition needs (the ocean truth is the
-    forcing window shifted one step forward).
+    forcing window shifted one step forward) and, for an RSI scheduler with
+    anchor lag L > 1, the L-1 boundary frames BEFORE the IC that the
+    anchor-time imposition of the first rolls needs. Returns ``(c_grid,
+    c_scalar, ocean_lookahead, traj_lead)``; slot ``traj_lead + j`` is the
+    forcing at absolute step j.
     """
     from inference import _maybe_normalize, _stack_at_step
 
     W = int(scheduler.window_size)
+    lead = max(int(getattr(scheduler, "anchor_lag", 1) or 1) - 1, 0)
+    if ic - lead * step_size < 0:
+        raise ValueError(
+            f"rollout from ic={ic} needs store row {ic - lead * step_size} "
+            f"({lead} model step(s) before the IC: the scheduler's anchor lag "
+            f"is {lead + 1}); use ic >= {lead * step_size}."
+        )
     ocean_lookahead = int(bool(getattr(scheduler, "nocean", 0)))
     n_archive = int(getattr(dataset, "n_time", 0) or 0)
     if ocean_lookahead and n_archive and (
@@ -283,20 +305,20 @@ def _traj_windows(cfg, dataset, forecaster, scheduler, *, ic, horizon, step_size
             normalizer,
             _stack_at_step(dataset, [ic + j * step_size], device),
         )
-        for j in range(traj_len)
+        for j in range(-lead, traj_len)
     ]
     stack = lambda key: torch.cat(  # noqa: E731
         [f[key].unsqueeze(1) for f in frames], dim=1
     )
     const = frames[0]["constant_boundary"]
     if const.dim() == 4:
-        const = const.unsqueeze(1).expand(-1, traj_len, -1, -1, -1)
+        const = const.unsqueeze(1).expand(-1, traj_len + lead, -1, -1, -1)
     c_grid = forecaster.pack_window_c_grid({
         "surface_in": stack("surface_in"),
         "constant_boundary": const,
         "varying_boundary": stack("varying_boundary"),
     })
-    return c_grid, stack("calendar"), ocean_lookahead
+    return c_grid, stack("calendar"), ocean_lookahead, lead
 
 
 @hydra.main(version_base="1.2", config_path="conf", config_name="config")
@@ -366,10 +388,13 @@ def main(cfg: DictConfig) -> None:
     d_steps = rcfg.get("downscaler_num_steps", None)
     state_every = int(rcfg.get("state_every", 50))
 
-    c_grid_traj, c_scalar_traj, ocean_lookahead = _traj_windows(
+    c_grid_traj, c_scalar_traj, ocean_lookahead, traj_lead = _traj_windows(
         cfg, dataset, forecaster, f_sched, ic=ic, horizon=horizon,
         step_size=step_size, normalizer=normalizer, device=dist.device, log=log,
     )
+    if traj_lead:
+        log.info(f"anchor lag {traj_lead + 1}: {traj_lead} pre-IC boundary frame(s) "
+                 f"prepended to the forcing trajectory")
 
     resumed = _load_state(out_dir, dist.device)
     if resumed is not None:
@@ -379,8 +404,10 @@ def main(cfg: DictConfig) -> None:
         from inference import _stack_window_initial
 
         # The oracle stack is the FUTURE window ending at ic + W (ERDM:
-        # y_{1:W}); a data-coupled scheduler (RSI) asks for one more frame
-        # and reaches back to the IC itself for its anchor y_0.
+        # y_{1:W}); a data-coupled scheduler (RSI) asks for L more frames
+        # and reaches back to the IC itself (and L-1 steps before it) for its
+        # anchors y_{1-L} .. y_0. The IC lower bound was checked in
+        # _traj_windows.
         n_init = int(getattr(f_sched, "init_frames", f_sched.window_size))
         init = _stack_window_initial(
             dataset, ic, n_init, dist.device, step_size=step_size,
@@ -419,6 +446,7 @@ def main(cfg: DictConfig) -> None:
             start_step=start_step, horizon=horizon,
             forecaster_num_steps=f_steps, downscaler_num_steps=d_steps,
             ocean_lookahead=bool(ocean_lookahead), state_every=state_every, log=log,
+            traj_lead=traj_lead,
         )
     log.info(f"wrote {len(buf.paths)} monthly file(s) to {out_dir}")
 
@@ -440,6 +468,7 @@ def run_rollout(
     ocean_lookahead: bool = False,
     state_every: int = 50,
     log=None,
+    traj_lead: int = 0,
 ):
     """The streaming loop: one emitted frame per iteration.
 
@@ -450,22 +479,33 @@ def run_rollout(
 
     ``ocean_win`` is the forcing window one step FORWARD of the conditioning
     window: the predicted ocean channels are supervised against the boundary at
-    each frame's own time, not at the time it was conditioned on.
+    each frame's own time, not at the time it was conditioned on. An RSI
+    scheduler with anchor lag L also gets ``anchor_bnd_win``, the boundary L
+    steps BEHIND the own-time window (proposal v0.2); ``traj_lead`` is the
+    number of pre-IC frames the trajectory was prepended with so that this
+    window is real data for the first rolls (slot ``traj_lead + j`` is the
+    forcing at absolute step j).
     """
     log = log or logging.getLogger(__name__)
     sched = combined.forecaster_scheduler
     downscaler = combined.downscaler
+    lead = int(traj_lead)
+    anchor_time = hasattr(sched, "_anchor_bnd_window")
     for k in range(start_step, horizon):
         ocean_win = (
-            sched._gather_window(c_grid_traj, k + 1) if ocean_lookahead else None
+            sched._gather_window(c_grid_traj, k + 1 + lead) if ocean_lookahead else None
         )
+        extra = {}
+        if ocean_lookahead and anchor_time:
+            extra["anchor_bnd_win"] = sched._anchor_bnd_window(c_grid_traj, k, lead)
         y_high, x_bar, eps_prev = combined.windowed_step(
             x_bar, eps_prev,
-            sched._gather_window(c_grid_traj, k),
-            sched._gather_window(c_scalar_traj, k),
+            sched._gather_window(c_grid_traj, k + lead),
+            sched._gather_window(c_scalar_traj, k + lead),
             forecaster_num_steps,
             ocean_win=ocean_win,
             downscaler_num_steps=downscaler_num_steps,
+            **extra,
         )
         fields = downscaler.unpack_state(y_high)
         emitted = {"surface": fields["surface_in"][0]}

@@ -342,3 +342,87 @@ def test_state_is_checkpointed_on_the_requested_cadence(tmp_path):
     step, _, _ = R._load_state(tmp_path, torch.device("cpu"))
     assert step == 4                      # final save wins
     assert R._state_path(tmp_path).exists()
+
+
+# ---------------------------------------------------------------------------
+# Anchor lag (proposal v0.2): the loop gathers at k+lead / k+1+lead and hands
+# the anchor-time window to windowed_step; the state file tolerates RSI's
+# eps_prev = None.
+# ---------------------------------------------------------------------------
+
+
+class _NullBuf:
+    def __init__(self):
+        self.added = []
+        self.paths = []
+
+    def add(self, t, emitted):
+        self.added.append(t)
+
+    def flush(self):
+        pass
+
+
+class _RecordingCombined:
+    """Records every window handed to windowed_step; emits a constant frame."""
+
+    def __init__(self, sched, C=2):
+        self.forecaster_scheduler = sched
+        self.calls = []
+        self.C = C
+
+        class _DS:
+            def unpack_state(self_, y):
+                return {"surface_in": y}
+        self.downscaler = _DS()
+
+    def windowed_step(self, x_bar, eps_prev, cg, cs, num_steps, *, ocean_win=None,
+                      downscaler_num_steps=None, anchor_bnd_win=None):
+        first = lambda t: None if t is None else float(t[0, 0, 0, 0, 0])  # noqa: E731
+        self.calls.append((first(cg), first(ocean_win), first(anchor_bnd_win)))
+        return torch.zeros(1, self.C, 4, 4), x_bar, eps_prev
+
+
+@pytest.mark.parametrize("L", [1, 3])
+def test_the_loop_gathers_the_three_windows_with_the_lead(tmp_path, L):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=Warning)
+        from physicsnemo.experimental.diffusion import RSIScheduler
+
+    W, horizon = 3, 4
+    lead = L - 1
+    sched = RSIScheduler(window_size=W, anchor_lag=L, nocean=1, ocean_grid_indices=[0])
+    cm = _RecordingCombined(sched)
+    T = lead + W + horizon
+    traj = torch.arange(float(T))[None, :, None, None, None].expand(1, T, 1, 4, 4).clone()
+    times = [cftime.DatetimeGregorian(1981, 1, 1 + k) for k in range(horizon)]
+    R.run_rollout(
+        combined=cm, buf=_NullBuf(), out_dir=tmp_path, times=times,
+        x_bar=torch.zeros(1, W, 1, 4, 4), eps_prev=None,
+        c_grid_traj=traj, c_scalar_traj=None, start_step=0, horizon=horizon,
+        ocean_lookahead=True, state_every=0, traj_lead=lead,
+    )
+    assert len(cm.calls) == horizon
+    for k, (cg, own, anchor) in enumerate(cm.calls):
+        assert cg == k + lead
+        assert own == k + 1 + lead
+        assert anchor == max(k + 1 - L + lead, 0)      # = k at lead = L-1
+    # the final state checkpoint round-trips RSI's None noise history
+    step, x2, e2 = R._load_state(tmp_path, torch.device("cpu"))
+    assert step == horizon and e2 is None and x2.shape == (1, W, 1, 4, 4)
+
+
+def test_erdm_loop_is_untouched_by_the_lead_plumbing(tmp_path):
+    """Default traj_lead = 0 and no anchor window for a scheduler without one."""
+    writer, buf = _drive(tmp_path, horizon=3, nocean=("sea_surface_temperature_monthly_interp",))
+    assert len(writer.written) >= 1
+
+
+def test_state_round_trips_with_a_none_noise_history(tmp_path):
+    x_bar = torch.randn(1, 3, 2, 4, 4)
+    R._save_state(tmp_path, step=5, x_bar=x_bar, eps_prev=None)
+    step, x2, e2 = R._load_state(tmp_path, torch.device("cpu"))
+    assert step == 5 and e2 is None
+    torch.testing.assert_close(x2, x_bar)
