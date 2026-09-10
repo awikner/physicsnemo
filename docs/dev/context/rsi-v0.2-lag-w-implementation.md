@@ -116,12 +116,17 @@ clean allocation: `world_size=40`, `steps_per_epoch=1315`, ~3.5 s/step
 loss=rsi_a2l`, `checkpoints_a2l_sstpred_b40`: the recipe the lag-1 A2 bundle
 run reached batch-4 loss parity with (lr 5e-4 / Muon 5e-3, 1-epoch warmup,
 cosine to 5e-5 over 24 epochs, momentum 0.85, weight decay 0.01, fp32 +
-TF32, EMA 0.99, GC 14), validation every epoch. Smoke first: job 7603511
-(debug queue, 1 node, `ABL_MAX_ITERS=60 ABL_TARGET=1`,
-`checkpoints_a2l_smoke`) -- checks the 2W-frame loader, `anchor_lag=6` in
-the init log, finite losses, the epoch-end checkpoint and the in-training
-rollout validation (12 init frames, 5 pre-IC boundary frames). Chain: see
-`$R/abl_jobs.txt` (appended after the smoke).
+TF32, EMA 0.99, GC 14), validation every epoch. Smoke first (debug queue, 1
+node, `checkpoints_a2l_smoke`): job 7603511 with `ABL_TARGET=1` failed in
+`make_scheduler` because a 1-epoch cosine equals the 1-epoch warmup (a
+smoke-config artifact; use `ABL_TARGET=24 ABL_MAX_ITERS=60`); job 7603531
+passed: stage line `anchor_lag=6, anchor_frames=6, history_frames=5 (loader
+window 12 state frames)`, `steps_per_epoch=13138` at 4 ranks (13143 at
+lag 1), finite losses (2.3e4 -> 2.0e4 over the first batches, ~3 s/step on
+one node), epoch-end checkpoints `RollingDiTWrapper.0.{1,2}.mdlus` written,
+and the in-training rollout validation ran through the lag-6 path (12 init
+frames, 5 pre-IC boundary frames, horizon 10, 4 ICs x 10 members). Chain of
+13 links submitted 23:1x UTC: 7603546-7603558 (`afterany`, prod -> small).
 
 Not touched: `rsi-sstpred-prod24` (7586612, 1 node, capacity queue, running
 since 2026-09-06, with 7599793 held behind it) -- the batch-4 lag-1 A2
