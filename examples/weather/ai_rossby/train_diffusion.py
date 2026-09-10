@@ -271,15 +271,21 @@ def _build_loader(
     ``forcing_lag`` / ``emit_boundary_next`` (Phase 12f) come from the
     model's channel contract, not from a config knob — see
     ``RollingDiTWrapper.forcing_lag``. ``anchor_frames`` comes from the
-    *scheduler* instead (``RSIScheduler.anchor_frames``): a data-coupled
-    rolling scheduler anchors slot 1 on the frame before the window, so it
-    needs that frame emitted. It costs no extra read at ``forcing_lag >= 1``. ``step_stride`` is the model step in
-    store rows (``resolve_step_stride``); the rolling window advances one model
-    step per frame, which on the 6-hourly AMIP archives is 4 rows, not 1.
-    ``history_frames`` (``RSIScheduler.history_frames``, = ``pushforward_rolls``)
-    lengthens the read window by that many frames in FRONT of the anchor: the
-    scheduler rolls its own sampler over them to self-generate anchors and
-    trains on the last W+1 frames, so the model's window is unchanged.
+    *scheduler* instead (``RSIScheduler.anchor_frames`` = its ``anchor_lag``
+    L): a data-coupled rolling scheduler anchors slot w on frame w-L, so the
+    window has to be preceded by L history frames. The loader emits ONE
+    ``{key}_prev`` frame (``emit_anchor``) and the remaining L-1 arrive through
+    ``history_frames``, so the truthiness of ``anchor_frames`` is all that is
+    used here. It costs no extra read at ``forcing_lag >= 1``. ``step_stride``
+    is the model step in store rows (``resolve_step_stride``); the rolling
+    window advances one model step per frame, which on the 6-hourly AMIP
+    archives is 4 rows, not 1. ``history_frames``
+    (``RSIScheduler.history_frames`` = ``(anchor_lag - 1) + pushforward_rolls``)
+    lengthens the read window by that many frames in FRONT of the ``_prev``
+    frame: the lag frames are the anchors of slots 1..L-1 and the pushforward
+    frames seed the scheduler's self-generated anchor rolls; the model's window
+    is unchanged either way. The forcing stack widens by the same count (the
+    scheduler tail-slices it to the W target slots).
     """
     window_mode = window_size > 1
     if window_mode:
@@ -553,12 +559,15 @@ def _pack_window(model: nn.Module, window: dict, *, anchor_frames: int = 0) -> t
     across the window axis here so the wrapper's ``pack_window_c_grid``
     sees ``(B, W, C, H, W)`` streams throughout.
 
-    With ``anchor_frames=1`` (Rolling Stochastic Interpolants) the state stack
-    ``y`` is returned with ``W+1`` frames: the loader's ``{key}_prev`` anchor
-    frame packed and prepended, so ``y[:, w]`` is slot ``w``'s target and
-    ``y[:, w-1]`` its interpolant anchor. ``c_grid`` / ``c_scalar`` stay at
-    ``W`` frames aligned to slots 1..W — the anchor is a state, not a slot, and
-    is never itself predicted.
+    With ``anchor_frames`` set (Rolling Stochastic Interpolants) the state
+    stack ``y`` gains the loader's ``{key}_prev`` frame, packed and prepended:
+    ``W+1`` frames at anchor lag 1, ``W+L`` (``+K`` pushforward frames) when
+    the loader was built with ``history_frames`` -- the extra frames come in
+    through ``{key}_seq`` itself, so this function is frame-count generic.
+    ``y[:, j]`` is the state at frame j; the scheduler pairs slot w's target
+    with its anchor L frames earlier. ``c_grid`` / ``c_scalar`` carry one slot
+    per ``_seq`` frame (the lag-1 forcing of each state frame); the ``_prev``
+    frame is a state, not a slot, and is never itself predicted.
     """
     inner = model.module if hasattr(model, "module") else model
     surface_seq = window["surface_in_seq"]
@@ -643,10 +652,14 @@ def _train_step(
                         "SequenceDataset with emit_boundary_next=True"
                     )
                 if anchor_frames:
-                    # y carries the anchor frame, so the ocean target stack
-                    # must too: the anchor's own-time boundary is the slot-1
+                    # y carries the ``_prev`` frame, so the ocean target stack
+                    # must too: its own-time boundary is the first
                     # CONDITIONING frame (forcing_lag=1), which the loader
-                    # already emits as varying_boundary_seq[:, 0].
+                    # already emits as varying_boundary_seq[:, 0]. Any further
+                    # history frames (anchor lag, pushforward) are ordinary
+                    # ``_seq`` frames whose own-time boundary is already in
+                    # ``_next_seq``, so the stack is the own-time boundary of
+                    # EVERY state frame at any lag.
                     bnd_next = torch.cat(
                         [sample["varying_boundary_seq"][:, :1], bnd_next], dim=1
                     )
@@ -864,11 +877,13 @@ def main(cfg: DictConfig) -> None:
     # on every rank so a mismatch aborts the job rather than deadlocking it.
     # A no-op for a fresh run: there is no .mdlus in the directory yet.
     assert_checkpoint_dir_contract(inner_model, ckpt_dir, log=logger)
+    resume_meta: dict = {}
     resumed_epoch = load_checkpoint(
         ckpt_dir,
         models=inner_model,
         optimizer=optimizer,
         device=dist.device,
+        metadata_dict=resume_meta,
     )
     start_epoch = max(start_epoch, resumed_epoch + 1)
 
@@ -965,6 +980,28 @@ def main(cfg: DictConfig) -> None:
         )
         stage_anchor_frames = int(getattr(scheduler_loss, "anchor_frames", 0) or 0)
         stage_history_frames = int(getattr(scheduler_loss, "history_frames", 0) or 0)
+        stage_anchor_lag = getattr(scheduler_loss, "anchor_lag", None)
+
+        # A resumed RSI run must keep its anchor lag: the lag fixes which
+        # frame each slot interpolates from, so weights trained at one lag are
+        # not a checkpoint of the other -- and the shapes match either way, so
+        # nothing else would notice. The lag is written into the checkpoint
+        # metadata below; older checkpoints carry none and only get a warning.
+        if resumed_epoch > 0 and stage_anchor_lag is not None:
+            saved_lag = resume_meta.get("rsi_anchor_lag")
+            if saved_lag is None:
+                logger.warning(
+                    "resume: checkpoint carries no rsi_anchor_lag (written by "
+                    f"older recipes); running at anchor_lag={stage_anchor_lag} "
+                    "unverified"
+                )
+            elif int(saved_lag) != int(stage_anchor_lag):
+                raise ValueError(
+                    f"resume: checkpoint was trained at anchor_lag={saved_lag} "
+                    f"but the config asks for anchor_lag={stage_anchor_lag}; "
+                    "the two are different interpolants (proposal v0.2). Use a "
+                    "fresh checkpoint directory."
+                )
 
         # (Re)build the DataLoader when the window size or the anchor contract
         # changes — and on the first stage where it has to be built from scratch.
@@ -1121,6 +1158,13 @@ def main(cfg: DictConfig) -> None:
             f"global_epoch={global_epoch}: window_mode={window_mode} "
             f"(W={window_size}), steps_per_epoch={steps_per_epoch}, "
             f"sched={type(scheduler_loss).__name__}"
+            + (
+                f", anchor_lag={stage_anchor_lag}, anchor_frames={anchor_frames}, "
+                f"history_frames={history_frames} (loader window "
+                f"{window_size + (1 if anchor_frames else 0) + history_frames} "
+                f"state frames)"
+                if stage_anchor_lag is not None else ""
+            )
         )
 
         # Per-stage iteration cap (mirrors train.py's handling — this key
@@ -1203,7 +1247,18 @@ def main(cfg: DictConfig) -> None:
                     models=inner_model,
                     optimizer=optimizer,
                     epoch=global_epoch,
-                    metadata={"ema": ema.state_dict() if ema is not None else None},
+                    metadata={
+                        "ema": ema.state_dict() if ema is not None else None,
+                        # Scheduler contract, checked on resume (see the
+                        # stage loop): the anchor lag decides which frame each
+                        # slot interpolates from.
+                        "scheduler": type(scheduler_loss).__name__,
+                        "window_size": int(window_size),
+                        "rsi_anchor_lag": (
+                            int(stage_anchor_lag) if stage_anchor_lag is not None
+                            else None
+                        ),
+                    },
                 )
 
             # Rollout validation — runs EMA-applied to match inference

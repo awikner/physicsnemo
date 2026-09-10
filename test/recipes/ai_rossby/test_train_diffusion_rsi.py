@@ -376,3 +376,82 @@ def test_train_step_with_pushforward_anchors_runs_end_to_end():
     )
     assert torch.isfinite(torch.tensor(out["loss"]))
     assert model.training
+
+
+# ---------------------------------------------------------------------------
+# Anchor lag (proposal v0.2): the loader delivers W+L state frames through
+# the same emit_anchor + history_frames route; the ocean stack stays the
+# own-time boundary of every frame.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("L", [1, 2, 3])
+def test_anchor_lag_loader_delivers_w_plus_l_consecutive_frames(L):
+    W = 3
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L)
+    loader, _ = _build_loader(
+        _cfg(1), _SyntheticBase(), window_size=W, rank=0, forcing_lag=1,
+        anchor_frames=sched.anchor_frames, history_frames=sched.history_frames,
+    )
+    batch = next(iter(loader))
+    y, c_grid, c_scalar = _pack_window(_wrapper().eval(), batch, anchor_frames=1)
+    assert y.shape[1] == W + L and c_grid.shape[1] == W + L - 1
+    assert c_scalar.shape[1] == W + L - 1
+    times = [float(y[0, i].flatten()[0]) for i in range(y.shape[1])]
+    assert all(times[i + 1] - times[i] == pytest.approx(1.0)
+               for i in range(len(times) - 1))
+    # forcing slot i is the lag-1 forcing of state frame i+1, i.e. it encodes
+    # the time of frame i
+    vb = c_grid[0, :, :_VARY].flatten(1).mean(1) - 100.0
+    assert all(float(vb[i]) == pytest.approx(times[i]) for i in range(c_grid.shape[1]))
+    # and the scheduler accepts exactly this stack
+    loss = sched.compute_loss(_wrapper(), c_grid, c_scalar, y)
+    assert torch.isfinite(loss)
+
+
+def test_anchor_lag_ocean_stack_is_the_own_time_boundary_of_every_frame():
+    W, L = 3, 3
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L)
+    loader, _ = _build_loader(
+        _cfg(1), _SyntheticBase(), window_size=W, rank=0, forcing_lag=1,
+        emit_boundary_next=True, anchor_frames=sched.anchor_frames,
+        history_frames=sched.history_frames,
+    )
+    b = next(iter(loader))
+    stack = torch.cat(
+        [b["varying_boundary_seq"][:, :1], b["varying_boundary_next_seq"]], dim=1
+    )
+    assert stack.shape[1] == W + L
+    prev_t = float(b["surface_in_prev"].flatten()[0])
+    seq_t = [float(b["surface_in_seq"][0, i].flatten()[0]) for i in range(W + L - 1)]
+    got = [float(stack[0, i].flatten()[0]) for i in range(W + L)]
+    assert got == [100.0 + t for t in ([prev_t] + seq_t)]
+
+
+@pytest.mark.parametrize("pushforward", [0, 1])
+def test_anchor_lag_w_train_step_with_ocean_runs_end_to_end(pushforward):
+    from train_loop import adopt_ocean_contract
+
+    W = 3
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=W,
+                         pushforward_rolls=pushforward, pushforward_num_steps=1)
+    if pushforward:
+        sched._draw_pushforward_k = lambda: pushforward
+    model = _wrapper(ocean=_OCEAN)
+    adopt_ocean_contract(sched, model)
+    loader, window_mode = _build_loader(
+        _cfg(1), _SyntheticBase(), window_size=W, rank=0, forcing_lag=1,
+        emit_boundary_next=True, anchor_frames=sched.anchor_frames,
+        history_frames=sched.history_frames,
+    )
+    batch = next(iter(loader))
+    assert batch["surface_in_seq"].shape[1] == W + (W - 1) + pushforward
+    opt = torch.optim.SGD(model.parameters(), lr=1e-4)
+    out = _train_step(
+        model=model, scheduler_loss=sched, sample=batch, optimizer=opt,
+        grad_scaler=None, amp_dtype=None, device=torch.device("cpu"),
+        window_mode=window_mode, anchor_frames=sched.anchor_frames,
+    )
+    assert torch.isfinite(torch.tensor(out["loss"]))
+    assert "loss_ocean" in out
+    assert model.training

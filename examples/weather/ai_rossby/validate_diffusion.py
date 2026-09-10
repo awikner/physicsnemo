@@ -466,6 +466,21 @@ class DiffusionRolloutValidator:
             if self.window_mode
             else 0
         )
+        # Frames the rollout reads BEFORE the IC. An RSI scheduler with anchor
+        # lag L anchors slot w on frame w-L, so the init stack starts at
+        # t + (1 - L) and the forcing trajectory is prepended with the same
+        # L-1 boundary frames (``traj_lead``) so the ocean block of the first
+        # rolls can be imposed from its anchor-time truth. 0 for ERDM/RFM and
+        # for RSI at lag 1 -- every existing path is unchanged.
+        self.traj_lead = (
+            max(
+                int(getattr(self.scheduler, "anchor_lag", 1) or 1) - 1,
+                self.init_frames - self.window_size - 1,
+                0,
+            )
+            if self.window_mode
+            else 0
+        )
 
         # Horizon default: training W for rolling, last log_step for
         # single-step. Either way, log_steps[-1] must fit.
@@ -585,13 +600,14 @@ class DiffusionRolloutValidator:
     # ------------------------------------------------------------------ #
 
     def _select_ic_indices(self, rank: int, world_size: int) -> list[int]:
-        # The maximum admissible IC index depends on the dispatch path.
-        # Single-step needs ``horizon`` future frames after the IC. Window
-        # mode reads NOTHING before the IC (the oracle window is the FUTURE
-        # window y_{1:W}; RSI's extra anchor frame is the IC itself) but
-        # reaches further forward: the init window ends at t + W, the forcing
-        # trajectory at t + (W + horizon - 2 + nocean), the scored truth at
-        # t + horizon.
+        # The admissible IC range depends on the dispatch path. Single-step
+        # needs ``horizon`` future frames after the IC. Window mode reads
+        # ``traj_lead`` frames before the IC (0 unless the scheduler's anchor
+        # lag exceeds 1: the oracle window is the FUTURE window y_{1:W}, and
+        # RSI's lag-1 anchor frame is the IC itself; at lag L the init stack
+        # and the boundary trajectory reach back L-1 more frames) and further
+        # forward: the init window ends at t + W, the forcing trajectory at
+        # t + (W + horizon - 2 + nocean), the scored truth at t + horizon.
         if self.window_mode:
             nocean = int(bool(getattr(self.scheduler, "nocean", 0)))
             last_future = self.step_size * max(
@@ -599,7 +615,7 @@ class DiffusionRolloutValidator:
                 self.window_size,
                 self.window_size + self.horizon - 2 + nocean,
             )
-            first_past = 0
+            first_past = self.step_size * self.traj_lead
         else:
             last_future = self.horizon * self.step_size
             first_past = 0
@@ -1034,10 +1050,11 @@ class DiffusionRolloutValidator:
         ``w_offset`` and the intra-window spacing are both in MODEL steps, so
         the frames land ``step_size`` store rows apart, the last one on
         ``t + w_offset``. ``n_frames`` defaults to the scheduler's
-        ``init_frames`` (= W for ERDM/RFM, W+1 for RSI, whose leading frame
-        is slot 1's anchor): at ``w_offset = W`` the ERDM window is the
-        future oracle y_{1:W} and RSI's extra frame is the anchor y_0 = the
-        IC itself.
+        ``init_frames`` (= W for ERDM/RFM, W+L for RSI with anchor lag L,
+        whose leading L frames are the anchors of slots 1..L): at
+        ``w_offset = W`` the ERDM window is the future oracle y_{1:W} and
+        RSI's extra frames are y_{1-L} .. y_0, the last of them the IC
+        itself.
         """
         n_frames = int(n_frames if n_frames is not None else self.init_frames)
         per_batch_windows = []
@@ -1081,9 +1098,9 @@ class DiffusionRolloutValidator:
         # y_{1:W} (erdm.py sample_rollout: "oracle true first window
         # y_{1:W}"; emit k is scored against t + k below, which only lines
         # up when the first window really holds t+1 .. t+W). RSI
-        # (init_frames = W + 1) additionally wants the anchor y_0 — the IC
-        # frame itself — so the stack ends at t + W and reaches back
-        # init_frames, leaving the anchor at t unmoved.
+        # (init_frames = W + L) additionally wants the anchors y_{1-L} .. y_0
+        # — the last of them the IC frame itself — so the stack ends at t + W
+        # and reaches back init_frames, leaving y_0 at t unmoved.
         init_window = self._to_device(
             self._stack_window(batch_ics, w_offset=self.window_size)
         )
@@ -1097,17 +1114,22 @@ class DiffusionRolloutValidator:
         init_y = wrapper.pack_window_state(init_window_ens)  # (B*E, W, C, H, W)
 
         # Build the trajectory of forcings + scalars over the horizon.
-        # Trajectory slot i is the forcing at absolute step i (store row
-        # t + i * step_size): the scheduler's roll k conditions window slot
-        # w (holding state y_{k+w+1}) on traj[k+w], giving every state its
-        # LAG-1 forcing — the training alignment (sequence.py forcing_lag=1,
-        # forcing frame j conditions state frame j+1). Slots therefore span
-        # [t, t + (W + horizon - 2) * step_size].
+        # Trajectory slot lead + i is the forcing at absolute step i (store
+        # row t + i * step_size): the scheduler's roll k conditions window
+        # slot w (holding state y_{k+w+1}) on traj[lead+k+w], giving every
+        # state its LAG-1 forcing — the training alignment (sequence.py
+        # forcing_lag=1, forcing frame j conditions state frame j+1). Slots
+        # therefore span [t - lead, t + (W + horizon - 2) * step_size].
         # Phase 12f: predicted ocean channels are imposed from the boundary at
         # each window slot's OWN time, which reaches one step past the last
         # forcing the model is conditioned on. Without this extra frame
         # ``_gather_window`` would clamp and the final roll would be imposed
         # from a stale SST — silently, since the shapes still line up.
+        # Proposal v0.2: they are ALSO imposed from the boundary at each
+        # slot's ANCHOR time, L steps back, which for the first rolls lies
+        # before the IC; the ``lead = L - 1`` pre-IC frames prepended here
+        # make that a real boundary rather than a clamped copy of frame t.
+        lead = self.traj_lead
         traj_len = (
             self.window_size
             + self.horizon
@@ -1125,10 +1147,13 @@ class DiffusionRolloutValidator:
         # ``.to(device, non_blocking=True)``, so the GPU never holds more than
         # one window (~7 MB) and the per-frame H2D is ~0.04% of a ~3 s frame.
         traj_frames = []
-        for i in range(traj_len):
+        for i in range(-lead, traj_len):
             full = self._stack([t + i * self.step_size for t in batch_ics])
             pruned = {k: v for k, v in full.items() if k in _traj_keys}
             traj_frames.append(pruned if self.stream else self._to_device(pruned))
+        # Schedulers without an anchor lag (ERDM/RFM, the test fakes) do not
+        # take ``traj_lead``; it is only ever non-zero for an RSI scheduler.
+        lead_kw = {"traj_lead": lead} if lead else {}
 
         def _stack_traj(key):
             xs = [f[key] for f in traj_frames]
@@ -1176,6 +1201,7 @@ class DiffusionRolloutValidator:
                 c_scalar_traj,
                 horizon=self.horizon,
                 num_steps=self.sampler_num_steps,
+                **lead_kw,
             ):
                 k = k0 + 1                      # generator is 0-indexed
                 if k not in log_step_to_idx:
@@ -1192,6 +1218,7 @@ class DiffusionRolloutValidator:
             c_scalar_traj,
             horizon=self.horizon,
             num_steps=self.sampler_num_steps,
+            **lead_kw,
         )
         # traj is (B*E, horizon, C, H, W) of packed flat channels.
 

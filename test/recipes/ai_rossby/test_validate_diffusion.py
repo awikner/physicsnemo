@@ -499,3 +499,89 @@ def test_window_rollout_nocean_lookahead_frame_is_own_time():
     c_grid = s.seen["c_grid"]
     assert c_grid.shape[1] == 3 + 3 - 1 + 1
     assert torch.equal(c_grid[0, -1, -1:], ds._varying[t0 + 3 + 3 - 1])
+
+
+# ---------------------------------------------------------------------------
+# Anchor lag (proposal v0.2): an RSI scheduler at lag L reads L-1 frames
+# before the IC -- the init stack y_{1-L} .. y_W and the same pre-IC boundary
+# frames prepended to the forcing trajectory (``traj_lead``).
+# ---------------------------------------------------------------------------
+
+
+class _LagOracleEcho(_OracleEchoScheduler):
+    """Oracle echo advertising an anchor lag; records ``traj_lead``."""
+
+    def __init__(self, window_size=3, anchor_lag=1, nocean=0):
+        super().__init__(window_size=window_size,
+                         init_frames=window_size + anchor_lag, nocean=nocean)
+        self.anchor_lag = anchor_lag
+
+    def sample_rollout(self, model, init_window, c_grid_traj, c_scalar_traj,
+                       horizon, num_steps=None, traj_lead=0):
+        out = super().sample_rollout(model, init_window, c_grid_traj,
+                                     c_scalar_traj, horizon, num_steps)
+        self.seen["traj_lead"] = traj_lead
+        return out
+
+
+@pytest.mark.parametrize("L", [1, 2, 3])
+def test_anchor_lag_reserves_l_minus_one_past_rows(L):
+    v = _validator_all_ics(_LagOracleEcho(window_size=3, anchor_lag=L), horizon=3)
+    assert v.traj_lead == L - 1
+    ics = v._select_ic_indices(rank=0, world_size=1)
+    assert min(ics) == L - 1
+    # the forward bound is unchanged by the lag
+    ref = _validator_all_ics(_OracleEchoScheduler(window_size=3), horizon=3)
+    assert max(ics) == max(ref._select_ic_indices(rank=0, world_size=1))
+
+
+def test_anchor_lag_rejects_an_explicit_ic_before_the_reserved_rows():
+    v = DiffusionRolloutValidator(
+        _StubDataset(),
+        wrapper=_StubWrapper(),
+        inference_scheduler=_LagOracleEcho(window_size=3, anchor_lag=3),
+        log_steps=[3],
+        device=torch.device("cpu"),
+        horizon=3,
+        max_initial_conditions=1,
+        batch_size=1,
+        ic_stride=1,
+        sampler_num_steps=2,
+        ic_indices=[1],
+    )
+    with pytest.raises(ValueError, match="admissible range \\[2"):
+        v._select_ic_indices(rank=0, world_size=1)
+
+
+@pytest.mark.parametrize("L", [1, 2, 3])
+def test_anchor_lag_init_stack_and_trajectory_reach_back_l_minus_one(L):
+    """Init frames are rows t+1-L .. t+W; the trajectory starts at row
+    t-(L-1) and the sampler is told how many pre-IC frames it holds; the
+    oracle echo still scores zero at every step."""
+    s = _LagOracleEcho(window_size=3, anchor_lag=L, nocean=1)
+    v = _emit_time_validator(s, horizon=3)
+    results = v.run(nn.Identity(), epoch=0)
+    ds = v.dataset
+    t0 = v._select_ic_indices(rank=0, world_size=1)[0]
+    init = s.seen["init"]
+    assert init.shape[1] == 3 + L
+    for j in range(3 + L):
+        assert torch.equal(init[0, j], ds._surface[t0 + 1 - L + j])
+    lead = L - 1
+    assert s.seen["traj_lead"] == lead
+    c_grid = s.seen["c_grid"]
+    assert c_grid.shape[1] == lead + 3 + 3 - 1 + 1
+    for i in range(c_grid.shape[1]):
+        assert torch.equal(c_grid[0, i, -1:], ds._varying[t0 - lead + i])
+        assert torch.equal(s.seen["c_scalar"][0, i], ds._calendar[t0 - lead + i])
+    for step in (1, 2, 3):
+        assert results[f"rmse_step{step}_surface"] == 0.0
+
+
+def test_lag_one_scheduler_is_not_handed_traj_lead():
+    """ERDM/RFM and lag-1 RSI keep their exact call (no traj_lead kwarg)."""
+    s = _OracleEchoScheduler(window_size=3, init_frames=4)
+    v = _emit_time_validator(s, horizon=3)
+    assert v.traj_lead == 0
+    v.run(nn.Identity(), epoch=0)          # the fake has no traj_lead parameter
+    assert s.seen["c_grid"].shape[1] == 3 + 3 - 1
