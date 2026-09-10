@@ -149,9 +149,16 @@ win.
   again (54). After two epochs the head depends on the anchor law it was
   trained on: the plain sampler creeps late in the year (353 at day 365)
   where the paired one stays flat, so the inference `fresh_noise_scale` must
-  match the training rolls. The same fine-tune on the finished epoch 24 (the
-  deployable candidate) and five-year runs are in the queue; full tables in
-  the plan's Phase 5 section.
+  match the training rolls. **Five years, however, show the one-epoch fix
+  to be a delay:** the yearly surface plateau runs 143, 211, 419, 593, 606
+  (control 709-783, ERDM 65) as the anchor chain, intact through year 1,
+  collapses in years 2-3 to the base model's state; the shrink variants
+  stay flat (450; 320 with pushforward) but biased. The head learned its
+  restoring force from anchors one or two links off truth and has none for
+  the states its free run reaches after hundreds of links. Two-epoch and
+  finished-model five-year runs and a long-chain (k up to 6, Euler rolls)
+  variant are queued; the complete remedy is to train on the model's own
+  free-run windows as anchors. Full tables in the plan's Phase 5 section.
 
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast

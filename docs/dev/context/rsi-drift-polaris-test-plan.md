@@ -704,6 +704,43 @@ inference sampler must use the same `fresh_noise_scale` as the training
 rolls. Production recipe: `loss.pushforward_rolls 2` with
 `loss.fresh_noise_scale 1.45`, sampled with `rsi_sstpred_e1_k145`.
 
+**Five-year wave 1 (job 7602002, 8 members; P21 paired and plain, C22, S22,
+PS21):**
+
+| | C22 plain | S22 shrink | PS21 pf + shrink | P21 paired | P21 plain | ERDM |
+|---|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias, 5 yr | 2305 / -1248 | 2169 / -1758 | 1625 / -1572 | 1315 / -777 | 1212 / -739 | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K), 5 yr | 12.50 / -5.56 | 9.86 / -7.07 | 6.73 / -5.92 | 5.62 / -3.17 | 5.03 / -3.02 | 0.21 / -0.01 |
+| surface RMSE-vs-clim, mean per year 1 / 2 / 3 / 4 / 5 | 709 / 790 / 782 / 780 / 783 | 394 / 454 / 451 / 452 / 457 | 256 / 336 / 332 / 317 / 325 | **143 / 211 / 419 / 593 / 606** | 135 / 188 / 349 / 501 / 616 | 67 / 67 / 66 / 62 / 63 |
+| alpha skt / sp / t2m (5-yr mean map) | 0.79 / 0.66 / 0.79 | 0.44 / 0.30 / 0.44 | 0.02 / 0.01 / 0.02 | 0.33 / 0.30 / 0.32 | 0.28 / 0.27 / 0.28 | ~0 |
+| alpha upper-air T / u / v / z / q | 0.83 / 0.90 / 0.93 / 0.80 / 0.87 | 0.78 / 0.79 / 0.85 / 0.57 / 0.54 | 0.58 / 0.57 / 0.71 / 0.21 / 0.27 | 0.54 / 0.68 / 0.57 / 0.49 / 0.51 | 0.52 / 0.64 / 0.52 / 0.45 / 0.52 | ~0 |
+| anchor trace, tropospheric v amplitude, mean per year | 0.41 / 0.32 / 0.30 / 0.30 / 0.33 | | | **0.85 / 0.62 / 0.34 / 0.35 / 0.36** | 0.80 / 0.75 / 0.55 / 0.31 / 0.30 | |
+| anchor trace, t2m amplitude per year | 0.37 / 0.26 / 0.27 / 0.25 / 0.26 | | | 1.09 / 0.88 / 0.28 / 0.27 / 0.27 | 1.10 / 1.10 / 0.76 / 0.28 / 0.27 | |
+
+Readings. (i) **After one pushforward epoch the drift is delayed, not
+removed.** The anchor chain holds through year 1 (fast winds at 0.85 of
+their amplitude, t2m at 1.09), weakens in year 2 (0.62) and collapses in
+year 3 to the base model's state (0.34; t2m 0.28), and the surface plateau
+follows: 143 in year 1, 606 in year 5 -- the old shipped model's level (610),
+still below the bundle control (783). The five-year bias maps are therefore
+in between (t2m 5.6 K, level -3.2 K; control 12.5 K / -5.6 K). (ii) The
+shrink variants do not collapse: S22 is flat at 450 for five years and PS21
+at 320, i.e. the amplifier bias the shrink trains in is a crude but
+persistent restoring force, while the pushforward's restoring force is exact
+but was learned only from anchors one or two chain links off truth -- the
+states the free run reaches after hundreds of links are further off-manifold
+than anything the head saw, and once there it has no force to return. (iii)
+The plain sampler now delays the collapse slightly longer than the paired
+one (year 3: 349 vs 419) but ends in the same place. (iv) Consequences:
+the five-year evaluation of the two-epoch model (P22) and of the
+finished-model fine-tune (P24 -> P26) decide whether more epochs extend the
+hold; independently, the head must be shown anchors from deeper in its own
+chain. Cheapest version: longer chains with a one-step (Euler) pushforward
+sampler so that k ~ U{0..6} costs what k ~ U{0..2} with Heun did
+(`pushforward_num_steps 1`, launched below as P24K6). The full version is a
+replay of the model's own free-run windows as training anchors (targets
+stay truth), which the code does not have yet.
+
 **Queued at hand-off (2026-09-10 00:30 UTC; the `small` queue is blocked by
 a 10-hour reservation until about 05:35 UTC):** P22 second epoch (jobs
 7601656 -> 7601657, `checkpoints_ft5_pf_b40` epoch 22); P24 (7602052 ->
