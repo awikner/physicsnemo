@@ -261,10 +261,10 @@ def test_compute_loss_finite_and_scalar(param):
 
 
 def test_compute_loss_rejects_w_frames():
-    """W frames is ERDM's contract; RSI needs W+1 and must say so."""
+    """W frames is ERDM's contract; RSI needs W+L and must say so."""
     sched = RSIScheduler(window_size=3)
     y = torch.randn(1, 3, 3, 8, 16)
-    with pytest.raises(ValueError, match=r"W\+1"):
+    with pytest.raises(ValueError, match=r"W\+L\+K = 4"):
         sched.compute_loss(_TwoHeadStub(3), None, None, y)
 
 
@@ -860,7 +860,7 @@ def test_pushforward_off_is_bit_identical_and_rejects_extra_frames():
     sched = RSIScheduler(window_size=3, num_steps=2)
     assert sched.history_frames == 0
     y = torch.randn(1, 6, 3, 8, 16)          # W+1+2 frames
-    with pytest.raises(ValueError, match=r"W\+1\+K = 4"):
+    with pytest.raises(ValueError, match=r"W\+L\+K = 4"):
         sched.compute_loss(_TwoHeadStub(3), None, None, y)
 
 
@@ -868,11 +868,11 @@ def test_pushforward_expects_history_frames_and_matching_c_grid():
     sched = RSIScheduler(window_size=3, num_steps=2, pushforward_rolls=2)
     assert sched.history_frames == 2
     y = torch.randn(1, 4, 3, 8, 16)          # plain W+1: too short now
-    with pytest.raises(ValueError, match=r"W\+1\+K = 6"):
+    with pytest.raises(ValueError, match=r"W\+L\+K = 6"):
         sched.compute_loss(_TwoHeadStub(3), None, None, y)
     y = torch.randn(1, 6, 3, 8, 16)
-    cg = torch.randn(1, 3, 1, 8, 16)         # W slots instead of W+K
-    with pytest.raises(ValueError, match="W\\+K = 5"):
+    cg = torch.randn(1, 3, 1, 8, 16)         # W slots instead of W+H
+    with pytest.raises(ValueError, match="W\\+H = 5"):
         sched.compute_loss(_TwoHeadStub(3), cg, None, y)
 
 
@@ -985,3 +985,342 @@ def test_pushforward_num_steps_controls_the_roll_cost():
     assert len(model.labels_seen) == 3 * k      # Heun, 2 steps: 3 per roll
     with pytest.raises(ValueError):
         RSIScheduler(window_size=W, pushforward_rolls=1, pushforward_num_steps=0)
+
+
+# ---------------------------------------------------------------------------
+# Anchor lag (proposal v0.2): slot w anchored on frame w - L, L in [1, W]
+# ---------------------------------------------------------------------------
+
+_W_LAG = 3
+_LAGS = [1, 2, _W_LAG]
+
+
+def _lag_init(L, W=_W_LAG, C=3):
+    return torch.randn(1, W + L, C, 8, 16)
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_driver_surface(L):
+    """The contract deltas the drivers read: W+L init frames, L anchor frames,
+    L-1 history frames (no pushforward)."""
+    sched = RSIScheduler(window_size=_W_LAG, num_steps=2, anchor_lag=L)
+    assert sched.anchor_lag == L
+    assert sched.init_frames == _W_LAG + L
+    assert sched.anchor_frames == L
+    assert sched.history_frames == L - 1
+    k = RSIScheduler(window_size=_W_LAG, anchor_lag=L, pushforward_rolls=2)
+    assert k.history_frames == L - 1 + 2
+
+
+def test_anchor_lag_default_is_one_and_bounds_are_enforced():
+    assert RSIScheduler(window_size=3).anchor_lag == 1
+    with pytest.raises(ValueError, match="anchor_lag"):
+        RSIScheduler(window_size=3, anchor_lag=0)
+    with pytest.raises(ValueError, match="anchor_lag"):
+        RSIScheduler(window_size=3, anchor_lag=4)
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_compute_loss_frame_contract(L):
+    """W+L frames (+K under pushforward) are accepted, W+L-1 and W+L+1 are not;
+    with history frames the forcing stack must carry W+H slots."""
+    W = _W_LAG
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L)
+    model = _TwoHeadStub(3)
+    H = sched.history_frames
+    cg = torch.randn(1, W + H, 2, 8, 16)
+    cs = torch.randn(1, W + H, 4)
+    loss = sched.compute_loss(model, cg, cs, _lag_init(L))
+    assert loss.dim() == 0 and torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(model.h1.weight.grad).all()
+    for n in (W + L - 1, W + L + 1):
+        with pytest.raises(ValueError, match=rf"W\+L\+K = {W + L}"):
+            sched.compute_loss(model, cg, cs, torch.randn(1, n, 3, 8, 16))
+    if H > 0:
+        with pytest.raises(ValueError, match=rf"W\+H = {W + H}"):
+            sched.compute_loss(model, cg[:, :W], cs[:, :W], _lag_init(L))
+
+
+def test_anchor_lag_loss_uses_frame_w_minus_l_as_anchor_and_last_w_forcings():
+    """Spy on perturb_anchor and on the backbone's forcing: anchors are the
+    first W frames of the W+L stack, targets the last W, forcings the last W
+    slots of the widened stack."""
+    W, L = _W_LAG, 2
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L)
+    y = _lag_init(L)
+    H = sched.history_frames
+    cg = torch.randn(1, W + H, 2, 8, 16)
+    seen = {}
+    orig = sched.perturb_anchor
+
+    def spy(a):
+        seen["anchors"] = a.detach().clone()
+        return orig(a)
+    sched.perturb_anchor = spy
+
+    class _Rec(_TwoHeadStub):
+        def forward(self, x, label, c_grid, c_scalar):
+            seen["c_grid"] = c_grid
+            return super().forward(x, label, c_grid, c_scalar)
+
+    sched.compute_loss(_Rec(3), cg, None, y)
+    torch.testing.assert_close(seen["anchors"], y[:, :W])
+    assert torch.equal(seen["c_grid"], cg[:, -W:])
+
+
+def test_anchor_lag_one_is_bit_identical_to_the_default():
+    """anchor_lag=1 must not change a single bit of the shipped path."""
+    model = _TwoHeadStub(3)
+    y = torch.randn(1, 4, 3, 8, 16)
+    cg = torch.randn(1, 3, 2, 8, 16)
+    torch.manual_seed(0)
+    a = RSIScheduler(window_size=3, num_steps=2).compute_loss(model, cg, None, y)
+    torch.manual_seed(0)
+    b = RSIScheduler(window_size=3, num_steps=2, anchor_lag=1).compute_loss(
+        model, cg, None, y)
+    assert torch.equal(a, b)
+    torch.manual_seed(0)
+    ra = RSIScheduler(window_size=3, num_steps=2).sample_rollout(
+        model.eval(), y, None, None, horizon=3)
+    torch.manual_seed(0)
+    rb = RSIScheduler(window_size=3, num_steps=2, anchor_lag=1).sample_rollout(
+        model, y, None, None, horizon=3, traj_lead=0)
+    assert torch.equal(ra, rb)
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_warmup_window_pairs_frame_w_with_w_minus_l(L):
+    """With Gamma -> 0 and tau_W(0) = 0 the back slot IS its anchor, frame
+    W-L of the stack (0-based); slot 1 at tau = 1 - 1/W is mostly its target."""
+    W = _W_LAG
+    sched = RSIScheduler(window_size=W, anchor_lag=L, gamma_0=1e-8, gamma_1=1e-8)
+    init = torch.zeros(1, W + L, 1, 2, 2)
+    for f in range(W + L):
+        init[:, f] = float(f)
+    x = sched.warmup_window(init)
+    assert x.shape == (1, W, 1, 2, 2)
+    # back slot (w = W) at tau_W(0) = 0 IS its anchor y_{W-L}, init index W-1
+    # (the init stack runs y_{1-L} .. y_W); the fresh-slot index W-L refers to
+    # the window's READOUTS, not to this stack.
+    torch.testing.assert_close(x[:, -1], init[:, W - 1], atol=1e-4, rtol=0)
+    # slot w: anchor + beta(tau_w(0)) (target - anchor), target = frame w-1+L
+    tau0 = sched.local_time(torch.zeros(1))
+    beta = sched.beta(tau0)
+    for w in range(W):
+        a, t = init[:, w], init[:, w + L]
+        torch.testing.assert_close(x[:, w], a + beta[:, w] * (t - a),
+                                   atol=1e-4, rtol=0)
+    with pytest.raises(ValueError, match="init_frames"):
+        sched.warmup_window(torch.zeros(1, W + L - 1, 1, 2, 2))
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_fresh_slot_is_slot_w_minus_l(L):
+    """Fill y_hat[:, w] with w: the fresh slot's anchor is index W-L, i.e. the
+    emitted frame (index 0) at L = W and slot W (index W-1) at L = 1."""
+    W = _W_LAG
+    sched = RSIScheduler(window_size=W, anchor_lag=L, gamma_0=1e-8)
+    y_hat = torch.zeros(1, W, 2, 4, 4)
+    for w in range(W):
+        y_hat[:, w] = float(w)
+    fresh = sched._fresh_slot(y_hat)
+    assert fresh.shape == (1, 1, 2, 4, 4)
+    assert fresh.mean().item() == pytest.approx(float(W - L), abs=1e-3)
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_rollout_generator_and_stream_agree(L):
+    """The three sampling entry points emit the same frames at every lag and
+    the rollout stays bounded."""
+    torch.manual_seed(0)
+    model = _TwoHeadStub(channels=3).eval()
+    init = _lag_init(L)
+    traj = torch.randn(1, 12, 2, 8, 16)
+    mk = lambda: RSIScheduler(window_size=_W_LAG, num_steps=2, gamma_0=0.4,
+                              anchor_lag=L)
+    torch.manual_seed(3)
+    batch = mk().sample_rollout(model, init, traj, None, horizon=4)
+    assert batch.shape == (1, 4, 3, 8, 16)
+    _assert_bounded(batch, what=f"lag-{L} rollout")
+    torch.manual_seed(3)
+    frames = [f for _, f in mk().sample_rollout_generator(
+        model, init, traj, None, horizon=4)]
+    torch.testing.assert_close(torch.stack(frames, dim=1), batch)
+    torch.manual_seed(3)
+    sched = mk()
+    state = sched.stream_init(init)
+    out = []
+    with torch.no_grad():
+        for k in range(4):
+            frame, state = sched.stream_step(
+                model, state, sched._gather_window(traj, k), None, 2)
+            out.append(frame)
+    torch.testing.assert_close(torch.stack(out, dim=1), batch)
+
+
+def test_anchor_lag_trace_records_the_fresh_slot_anchor(monkeypatch, tmp_path):
+    """RSI_TRACE_PATH records emitted-frame and fresh-slot-anchor stats; at
+    L = W the anchor IS the emitted frame, so the two rows coincide, while at
+    L = 1 they are different slots."""
+    W = _W_LAG
+    path = tmp_path / "trace.pt"
+    monkeypatch.setenv("RSI_TRACE_PATH", str(path))
+    y_hat = torch.randn(1, W, 2, 4, 4)
+    x = torch.randn(1, W, 2, 4, 4)
+    RSIScheduler(window_size=W, anchor_lag=W)._trace(y_hat, x)
+    rec = torch.load(path)
+    assert set(rec) == {"emit_std", "emit_mean", "anchor_std", "anchor_mean",
+                        "slot_std", "slot_mean"}
+    torch.testing.assert_close(rec["anchor_std"], rec["emit_std"])
+    torch.testing.assert_close(rec["anchor_mean"], rec["emit_mean"])
+    RSIScheduler(window_size=W, anchor_lag=1)._trace(y_hat, x)
+    rec = torch.load(path)
+    assert not torch.allclose(rec["anchor_std"], rec["emit_std"])
+
+
+def test_gather_window_clamps_negative_starts_to_frame_zero():
+    """A negative window start (anchor-time boundary of the first rolls) must
+    clamp to frame 0, not wrap to the end of the trajectory."""
+    sched = RSIScheduler(window_size=3)
+    traj = torch.arange(6.0)[None, :, None, None, None]
+    win = sched._gather_window(traj, -2)
+    assert win[0, :, 0, 0, 0].tolist() == [0.0, 0.0, 0.0]
+    win = sched._gather_window(traj, -1)
+    assert win[0, :, 0, 0, 0].tolist() == [0.0, 0.0, 1.0]
+    win = sched._gather_window(traj, 5)
+    assert win[0, :, 0, 0, 0].tolist() == [5.0, 5.0, 5.0]
+
+
+def test_anchor_lag_traj_lead_shifts_the_forcing_windows():
+    """With traj_lead pre-IC frames prepended the backbone must see the same
+    forcings as without them."""
+    W, L, lead = _W_LAG, _W_LAG, 2
+    model = _TwoHeadStub(channels=2).eval()
+    init = torch.randn(1, W + L, 2, 8, 16)
+    traj = torch.randn(1, 10, 2, 8, 16)
+    pre = torch.randn(1, lead, 2, 8, 16)
+    mk = lambda: RSIScheduler(window_size=W, num_steps=2, anchor_lag=L)
+    torch.manual_seed(1)
+    a = mk().sample_rollout(model, init, traj, None, horizon=3)
+    torch.manual_seed(1)
+    b = mk().sample_rollout(model, init, torch.cat([pre, traj], dim=1), None,
+                            horizon=3, traj_lead=lead)
+    assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("num_steps,solver", [(2, "heun"), (3, "euler")])
+def test_a1_reduction_is_lag_independent(num_steps, solver):
+    """reduce_to_erdm drops the anchors, so the A1 rollout at L = W must equal
+    the L = 1 one bit for bit (same init frames W..2W-1 feed the window)."""
+    W = 3
+    D = _linear_denoiser(3)
+    kw = dict(window_size=W, sigma_min=0.002, sigma_max=500.0, rho=-10.0,
+              num_steps=num_steps, solver=solver, reduce_to_erdm=True,
+              label_mode="log_sigma_eff")
+    torch.manual_seed(0)
+    init_l1 = torch.randn(1, W + 1, 3, 8, 16)
+    extra = torch.randn(1, W - 1, 3, 8, 16)
+    init_lw = torch.cat([extra, init_l1], dim=1)     # same last W+1 frames
+    torch.manual_seed(2)
+    a = RSIScheduler(**kw, anchor_lag=1).sample_rollout(
+        _RSILinearStub(D), init_l1, None, None, horizon=3)
+    torch.manual_seed(2)
+    b = RSIScheduler(**kw, anchor_lag=W).sample_rollout(
+        _RSILinearStub(D), init_lw, None, None, horizon=3)
+    assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_pushforward_k0_matches_plain_loss(L):
+    """k = 0 rolls at any lag is the plain lag-L loss on the last W+L frames
+    with the last W forcing slots."""
+    K, W = 2, _W_LAG
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L,
+                         pushforward_rolls=K)
+    sched._draw_pushforward_k = lambda: 0
+    plain = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L)
+    model = _TwoHeadStub(3)
+    H = sched.history_frames
+    y = torch.randn(1, W + L + K, 3, 8, 16)
+    cg = torch.randn(1, W + H, 2, 8, 16)
+    cs = torch.randn(1, W + H, 4)
+    torch.manual_seed(1)
+    a = sched.compute_loss(model, cg, cs, y)
+    torch.manual_seed(1)
+    Hp = plain.history_frames
+    b = plain.compute_loss(model, cg[:, H - Hp:], cs[:, H - Hp:], y[:, K:])
+    torch.testing.assert_close(a, b)
+
+
+@pytest.mark.parametrize("L", _LAGS)
+def test_anchor_lag_pushforward_rolls_use_shifted_forcing_slices(L):
+    """The pushforward rolls must feed the backbone the forcings of the frames
+    the rolled window holds: roll j of k sees c_grid[:, s0+L-1 : s0+L-1+W],
+    s0 = K-k+j, and the readout collected is slot W-L."""
+    K, W, k = 2, _W_LAG, 2
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L,
+                         pushforward_rolls=K, pushforward_num_steps=1)
+    sched._draw_pushforward_k = lambda: k
+    H = sched.history_frames
+    y = torch.randn(1, W + L + K, 3, 8, 16)
+    cg = torch.zeros(1, W + H, 1, 8, 16)
+    for j in range(W + H):
+        cg[:, j] = float(j)           # slot index encoded as the value
+
+    seen_cg = []
+
+    class _Rec(_TwoHeadStub):
+        def forward(self, x, label, c_grid, c_scalar):
+            seen_cg.append(c_grid[0, :, 0, 0, 0].tolist())
+            return super().forward(x, label, c_grid, c_scalar)
+
+    model = _Rec(3)
+    seen = {}
+    orig = sched.perturb_anchor
+
+    def spy(a):
+        seen["anchors"] = a.detach().clone()
+        return orig(a)
+    sched.perturb_anchor = spy
+
+    torch.manual_seed(3)
+    own = sched._pushforward_anchors(model, y, cg, None, k)
+    assert own.shape == (1, k, 3, 8, 16)
+    j0 = K - k
+    for j in range(k):
+        s0 = j0 + j
+        expect = [float(s0 + L - 1 + i) for i in range(W)]
+        assert seen_cg[j] == expect, (j, seen_cg[j], expect)
+    # 1 Euler step per roll => exactly k backbone calls so far
+    assert len(seen_cg) == k
+    # the loss forward sees the LAST W forcing slots of the widened stack
+    torch.manual_seed(3)
+    loss = sched.compute_loss(model, cg, None, y)
+    assert torch.isfinite(loss)
+    assert seen_cg[-1] == [float(H + i) for i in range(W)]
+    a = seen["anchors"]
+    # truth anchors for the first W-k slots are frames K .. K+W-k-1
+    torch.testing.assert_close(a[:, : W - k], y[:, K : K + W - k])
+    torch.testing.assert_close(a[:, W - k:], own)
+
+
+def test_anchor_lag_pushforward_readout_is_the_emitted_frame_at_lag_w():
+    """At L = W the collected pushforward anchor is y_hat[:, 0], the emitted
+    frame of that roll: check against a manual roll of the same sampler."""
+    K, W, k = 1, _W_LAG, 1
+    L = W
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=L,
+                         pushforward_rolls=K, pushforward_num_steps=2)
+    model = _TwoHeadStub(3).eval()
+    H = sched.history_frames
+    y = torch.randn(1, W + L + K, 3, 8, 16)
+    cg = torch.randn(1, W + H, 2, 8, 16)
+    torch.manual_seed(7)
+    own = sched._pushforward_anchors(model, y, cg, None, k)
+    torch.manual_seed(7)
+    with torch.no_grad():
+        x = sched.warmup_window(y[:, : W + L])
+        _, y_hat = sched.sample_window(model, x, cg[:, L - 1 : L - 1 + W], None,
+                                       num_steps=2)
+    torch.testing.assert_close(own[:, 0], y_hat[:, 0])

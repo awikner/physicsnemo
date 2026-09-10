@@ -362,3 +362,146 @@ def test_rollout_with_per_channel_scales_and_ocean(tmp_path):
     with torch.no_grad():
         out = s.sample_rollout(_Zero(), init, c_grid, None, horizon=4)
     _assert_bounded(out, what="scales+ocean rollout")
+
+
+# ---------------------------------------------------------------------------
+# Anchor lag: the ocean block is imposed between the ANCHOR-time truth (L
+# steps back) and the own-time truth
+# ---------------------------------------------------------------------------
+
+
+def test_sample_window_at_lag_gt_one_needs_the_anchor_time_boundary():
+    """c_grid_win is the anchor-time boundary only at L = 1; at L > 1 the
+    caller must pass anchor_bnd_win or the imposition would be wrong."""
+    s = _sched(anchor_lag=2)
+    model = _TwoHeadStub(_C + _NOCEAN).eval()
+    x = torch.randn(_B, _W, _C + _NOCEAN, _H, _WD)
+    with pytest.raises(ValueError, match="anchor_bnd_win"):
+        s.sample_window(model, x, _bnd(_W), None, ocean_win=_bnd(_W, base=1000.0))
+    # no ocean window at all: nothing to impose, no complaint
+    with torch.no_grad():
+        s.sample_window(model, x, _bnd(_W), None)
+
+
+def test_sample_window_imposes_the_anchor_time_truth_from_anchor_bnd_win():
+    """With Gamma -> 0 the back slot (tau = 0) is exactly the anchor-time
+    truth, which must come from anchor_bnd_win, not from c_grid_win."""
+    L = 2
+    s = _sched(anchor_lag=L, gamma_0=1e-8, gamma_1=1e-8, num_steps=1)
+    seen = {}
+
+    class _Rec(_TwoHeadStub):
+        def forward(self, x, label, c_grid, c_scalar):
+            seen.setdefault("x0", x.detach().clone())
+            return super().forward(x, label, c_grid, c_scalar)
+
+    model = _Rec(_C + _NOCEAN).eval()
+    x = torch.zeros(_B, _W, _C + _NOCEAN, _H, _WD)
+    forcing, own, anchor = _bnd(_W, base=0.0), _bnd(_W, base=1000.0), _bnd(_W, base=5000.0)
+    with torch.no_grad():
+        s.sample_window(model, x, forcing, None, ocean_win=own,
+                        anchor_bnd_win=anchor)
+    a_back = s.ocean_truth(anchor, (_H, _WD))[:, -1]
+    torch.testing.assert_close(seen["x0"][:, -1, -_NOCEAN:], a_back,
+                               atol=1e-3, rtol=0)
+
+
+def _traj_encoded(n_frames, c=5):
+    """Boundary trajectory whose channels encode 100*frame + channel."""
+    return _bnd(n_frames, base=0.0, c=c)
+
+
+@pytest.mark.parametrize("L", [1, 2, _W])
+def test_rollout_anchor_time_boundary_is_l_steps_back(L):
+    """Roll k imposes the back slot from the boundary frame k+1-L+lead (the
+    anchor time of the fresh frame). With traj_lead = L-1 pre-IC frames the
+    first roll's anchor-time window starts at frame 0 of the trajectory."""
+    lead = L - 1
+    s = _sched(anchor_lag=L, gamma_0=1e-8, gamma_1=1e-8, num_steps=1)
+    seen = []
+
+    class _Rec(_TwoHeadStub):
+        def forward(self, x, label, c_grid, c_scalar):
+            seen.append(x[:, -1, -_NOCEAN:].detach().clone())
+            return super().forward(x, label, c_grid, c_scalar)
+
+    model = _Rec(_C + _NOCEAN).eval()
+    init = torch.zeros(_B, _W + L, _C, _H, _WD)
+    traj = _traj_encoded(_W + 8 + lead)
+    with torch.no_grad():
+        s.sample_rollout(model, init, traj, None, horizon=3, traj_lead=lead)
+    truth = s.ocean_truth(traj, (_H, _WD), expect=traj.shape[1])
+    for k in range(3):
+        # back slot of roll k = window slot W, anchor-time frame index
+        # (k + 1 - L + lead) + (W - 1) = k + W - 1 (lead = L - 1)
+        expect = truth[:, k + _W - 1]
+        torch.testing.assert_close(seen[k], expect, atol=1e-3, rtol=0)
+
+
+def test_rollout_without_pre_ic_frames_clamps_and_warns_once(caplog):
+    """Without traj_lead the first rolls' anchor-time window starts before
+    the trajectory: clamp to frame 0 (never wrap) and warn once."""
+    import logging
+    L = _W
+    s = _sched(anchor_lag=L, gamma_0=1e-8, gamma_1=1e-8, num_steps=1)
+    seen = []
+
+    class _Rec(_TwoHeadStub):
+        def forward(self, x, label, c_grid, c_scalar):
+            seen.append(x[:, :, -_NOCEAN:].detach().clone())
+            return super().forward(x, label, c_grid, c_scalar)
+
+    model = _Rec(_C + _NOCEAN).eval()
+    init = torch.zeros(_B, _W + L, _C, _H, _WD)
+    traj = _traj_encoded(_W + 8)
+    with caplog.at_level(logging.WARNING), torch.no_grad():
+        s.sample_rollout(model, init, traj, None, horizon=2)
+    msgs = [r.getMessage() for r in caplog.records if "anchor-time" in r.getMessage()]
+    assert len(msgs) == 1
+    truth = s.ocean_truth(traj, (_H, _WD), expect=traj.shape[1])
+    # roll 0, anchor window start 1 - W < 0: every slot clamps to frame 0 up
+    # to slot index W-1 -> frame 0; the back slot's anchor is frame 0, never
+    # a frame from the END of the trajectory.
+    torch.testing.assert_close(seen[0][:, -1], truth[:, 0], atol=1e-3, rtol=0)
+
+
+def test_rollout_with_per_channel_scales_and_ocean_at_lag_w(tmp_path):
+    """The eval-crash path at L = W: scales + ocean + anchor-time window."""
+    full_c = _C + _NOCEAN
+    scales = torch.full((full_c, 1, 1), 0.1)
+    path = tmp_path / "scales.pt"
+    torch.save(scales, path)
+    s = _sched(anchor_lag=_W, gamma_0=1.0, gamma_1=0.04,
+               noise_scale_path=str(path), h1_precond="edm")
+
+    class _Zero(torch.nn.Module):
+        def forward(self, x, label, c_grid, c_scalar):
+            return torch.cat([torch.zeros_like(x)] * 2, dim=2)
+
+    init = torch.randn(_B, 2 * _W, _C, _H, _WD)
+    c_grid = _bnd_unit(2 * _W + 8)
+    with torch.no_grad():
+        out = s.sample_rollout(_Zero(), init, c_grid, None, horizon=4,
+                               traj_lead=_W - 1)
+    assert out.shape == (_B, 4, full_c, _H, _WD)
+    _assert_bounded(out, what="scales+ocean lag-W rollout")
+    with torch.no_grad():
+        frames = [f for _, f in s.sample_rollout_generator(
+            _Zero(), init, c_grid, None, horizon=4, traj_lead=_W - 1)]
+    assert torch.stack(frames, dim=1).shape == out.shape
+
+
+def test_pushforward_rolls_impose_ocean_from_both_windows_at_lag_w():
+    """Under pushforward at L = W the rolls must slice the anchor-time ocean
+    window from the widened forcing stack (no ValueError, finite loss)."""
+    K = 1
+    s = _sched(anchor_lag=_W, pushforward_rolls=K, pushforward_num_steps=1)
+    s._draw_pushforward_k = lambda: K
+    model = _TwoHeadStub(_C + _NOCEAN)
+    H = s.history_frames
+    y_state = torch.randn(_B, 2 * _W + K, _C, _H, _WD)
+    bnd = _bnd_unit(2 * _W + K)
+    y = s.append_ocean_target(y_state, bnd)
+    cg = _bnd_unit(_W + H)
+    loss = s.compute_loss(model, cg, None, y)
+    assert torch.isfinite(loss)

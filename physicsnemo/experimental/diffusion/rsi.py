@@ -109,11 +109,23 @@ class RSIScheduler(nn.Module):
     ``sampler=`` groups. Differs from ERDM's contract in exactly two places, both
     advertised through attributes the drivers read:
 
-    ``anchor_frames = 1``
-        :meth:`compute_loss` wants ``W + 1`` state frames, not ``W``: slot 1's
-        anchor is the frame *before* the window.
-    ``init_frames = W + 1``
-        :meth:`sample_rollout` wants ``W + 1`` oracle frames for the same reason.
+    ``anchor_frames = L`` (``L = anchor_lag``, default 1)
+        :meth:`compute_loss` wants ``W + L`` state frames, not ``W``: slot w's
+        anchor is the frame ``L`` steps before its target, so the window is
+        preceded by ``L`` history frames (``W + L + K`` with ``pushforward_rolls
+        = K``; the recipe reads the extra front frames as ``history_frames``).
+    ``init_frames = W + L``
+        :meth:`sample_rollout` wants ``W + L`` oracle frames for the same reason.
+
+    The anchor lag (proposal v0.2, 2026-09-10). At ``L = 1`` the fresh back
+    slot is anchored on the state head's readout of slot W at local time
+    1/(2W): a conditional MEAN, whose iteration contracts the free-run climate
+    (the September drift campaign). At ``L = W`` the fresh slot is anchored on
+    the frame being EMITTED at the same roll, ``y_hat[:, 0]`` at local time
+    1: a completed conditional sample. Every anchor is then a sample, and the
+    consistency of the rolling shift holds by construction. ``Gamma(0)`` must
+    be the ``L``-step increment scale (``noise_scale_path`` artifact built with
+    the matching lag). ``reduce_to_erdm`` is independent of the lag.
     """
 
     def __init__(self,
@@ -122,6 +134,7 @@ class RSIScheduler(nn.Module):
                  solver="heun",
                  integrator="coeff",
                  final_denoise=False,
+                 anchor_lag=1,
                  # ── interpolant profiles ──────────────────────────────────
                  parameterization="state",
                  h1_precond="none",
@@ -177,9 +190,18 @@ class RSIScheduler(nn.Module):
         # (validate_diffusion, inference, rollout). ERDM/RFM only ever set
         # ``W``, which is a latent bug in those paths; RSI sets both.
         self.window_size = self.W
-        # The two contract deltas vs ERDM, advertised for the drivers.
-        self.init_frames = self.W + 1
-        self.anchor_frames = 1
+        # The two contract deltas vs ERDM, advertised for the drivers. Slot w
+        # is anchored on frame w - L; L = W (proposal v0.2) makes every anchor
+        # an emitted sample, L = 1 (v0.1, rung A2) a conditional-mean readout.
+        self.anchor_lag = int(anchor_lag)
+        if not 1 <= self.anchor_lag <= self.W:
+            raise ValueError(
+                f"anchor_lag must be in [1, W={self.W}], got {anchor_lag} "
+                "(L = W anchors the fresh slot on the emitted frame; a larger "
+                "lag would index a slot that does not exist)"
+            )
+        self.init_frames = self.W + self.anchor_lag
+        self.anchor_frames = self.anchor_lag
 
         self.num_steps = int(num_steps)
         self.solver = solver
@@ -261,7 +283,9 @@ class RSIScheduler(nn.Module):
         self.pushforward_rolls = int(pushforward_rolls)
         if self.pushforward_rolls < 0:
             raise ValueError(f"pushforward_rolls must be >= 0, got {pushforward_rolls}")
-        self.history_frames = self.pushforward_rolls
+        # Extra frames the loader reads in FRONT of the single ``_prev`` anchor
+        # frame: L - 1 for the lag plus K for the pushforward rolls.
+        self.history_frames = (self.anchor_lag - 1) + self.pushforward_rolls
         self.pushforward_seed = int(pushforward_seed)
         # Sampler steps used by the pushforward rolls (None = the scheduler's
         # own num_steps). One Heun roll is ~3 head evaluations, so k ~ U{0..2}
@@ -365,11 +389,11 @@ class RSIScheduler(nn.Module):
             )
 
         logger.info(
-            "RSIScheduler initialized: W=%s, num_steps=%s, param=%s (h1_precond=%s), "
-            "beta=%s, gamma=[%s -> %s] (%s), integrator=%s, solver=%s, weighting=%s, "
-            "eps_scale=%s, noise=%s, reduce_to_erdm=%s",
-            self.W, self.num_steps, self.parameterization, self.h1_precond,
-            self.beta_mode,
+            "RSIScheduler initialized: W=%s, anchor_lag=%s, num_steps=%s, param=%s "
+            "(h1_precond=%s), beta=%s, gamma=[%s -> %s] (%s), integrator=%s, "
+            "solver=%s, weighting=%s, eps_scale=%s, noise=%s, reduce_to_erdm=%s",
+            self.W, self.anchor_lag, self.num_steps, self.parameterization,
+            self.h1_precond, self.beta_mode,
             self.gamma_0, self.gamma_1, self.gamma_mode, self.integrator,
             self.solver, self.weighting, self.eps_scale, noise, self.reduce_to_erdm,
         )
@@ -410,12 +434,36 @@ class RSIScheduler(nn.Module):
         return self.generator(b, c, device=ref.device).reshape(*lead, H, Wd).to(ref.dtype)
 
     def _gather_window(self, traj, k):
-        """Slice W consecutive frames starting at k, clamping past the end."""
+        """Slice W consecutive frames starting at k, clamping at BOTH ends.
+
+        A negative start (the anchor-time boundary of the first rolls when the
+        driver did not prepend pre-IC frames) is clamped to frame 0 instead of
+        wrapping around to the end of the trajectory.
+        """
         if traj is None:
             return None
         T = traj.shape[1]
-        idx = torch.arange(k, k + self.W, device=traj.device).clamp(max=T - 1)
+        idx = torch.arange(k, k + self.W, device=traj.device).clamp(min=0, max=T - 1)
         return traj[:, idx]
+
+    def _anchor_bnd_window(self, traj, k, traj_lead=0):
+        """Anchor-time boundary window of roll ``k``: the forcing window ``L``
+        steps behind the own-time window ``k + 1`` (``k + 1 - L``), shifted by
+        the ``traj_lead`` pre-IC frames the driver prepended. Warns once when
+        the window has to be clamped at the trajectory start."""
+        if traj is None or not self.nocean:
+            return None
+        start = k + 1 - self.anchor_lag + int(traj_lead)
+        if start < 0 and not getattr(self, "_warned_anchor_clamp", False):
+            self._warned_anchor_clamp = True
+            logger.warning(
+                "anchor-time boundary window starts %d frame(s) before the "
+                "trajectory (anchor_lag=%d, traj_lead=%d); clamping to frame 0 "
+                "for the first rolls. Prepend anchor_lag-1 pre-IC boundary "
+                "frames and pass traj_lead to avoid this.",
+                -start, self.anchor_lag, int(traj_lead),
+            )
+        return self._gather_window(traj, start)
 
     # ------------------------------------------------------------------
     # Rolling schedule
@@ -817,37 +865,41 @@ class RSIScheduler(nn.Module):
     def compute_loss(self, model, c_grid, c_scalar, y, return_parts=False):
         """RSI training loss.
 
-        y : (b, W+1, C, H, W)  -- W+1 clean frames y_0 .. y_W. Slot w = 1..W
-            targets y_w and is anchored on y_{w-1}; the leading frame is the
-            anchor for slot 1 and is never itself a target. Ocean block
-            included on all W+1 frames (see :meth:`append_ocean_target`).
-            With ``pushforward_rolls = K > 0`` the stack carries K extra
-            HISTORY frames in front (``W+1+K`` frames, ``history_frames``);
-            the loss window is the last W+1 and the history seeds the
+        y : (b, W+L, C, H, W)  -- L = anchor_lag history frames y_{1-L} .. y_0
+            followed by the W targets y_1 .. y_W. Slot w = 1..W targets y_w
+            and is anchored on y_{w-L}; the history frames are never targets.
+            Ocean block included on all frames (see :meth:`append_ocean_target`).
+            With ``pushforward_rolls = K > 0`` the stack carries K further
+            frames in front (``W+L+K`` frames; ``history_frames = L-1+K`` is
+            what the loader reads beyond its single ``_prev`` frame); the loss
+            window is the last W+L and the extra history seeds the
             self-generated anchor rolls (see :meth:`_pushforward_anchors`).
-        c_grid   : (b, W, c_grid, H, W) per-slot forcings (slots 1..W);
-            ``(b, W+K, ...)`` under pushforward, aligned to the W+K targets.
-        c_scalar : (b, W, scalar_dim) or None (``W+K`` under pushforward)
+        c_grid   : (b, W, c_grid, H, W) per-slot forcings (slots 1..W), or
+            ``(b, W+H, ...)`` with ``H = history_frames`` when the loader read
+            extra front frames; the last W slots belong to the targets.
+        c_scalar : (b, W, scalar_dim) or None (same widening as c_grid)
         """
-        K = self.history_frames
-        if y.shape[1] != self.W + 1 + K:
+        L = self.anchor_lag
+        K = self.pushforward_rolls
+        H = self.history_frames
+        if y.shape[1] != self.W + L + K:
             raise ValueError(
-                f"RSI compute_loss expects W+1+K = {self.W + 1 + K} state frames "
-                f"(slot 1's anchor is the frame before the window; K = "
-                f"pushforward_rolls = {K} history frames ahead of it), got "
+                f"RSI compute_loss expects W+L+K = {self.W + L + K} state frames "
+                f"(L = anchor_lag = {L} history frames ahead of the window, "
+                f"K = pushforward_rolls = {K} further frames ahead of those), got "
                 f"{y.shape[1]}. The recipe supplies them via "
-                f"SequenceDataset(emit_anchor=True, unroll_steps=W-1+K) + "
-                f"_pack_window(anchor_frames=1)."
+                f"SequenceDataset(emit_anchor=True, unroll_steps=W-1+history_frames) "
+                f"+ _pack_window(anchor_frames=1)."
+            )
+        if H > 0 and c_grid is not None and c_grid.shape[1] != self.W + H:
+            raise ValueError(
+                f"with history_frames = {H} compute_loss needs c_grid with "
+                f"W+H = {self.W + H} slots, got {c_grid.shape[1]}"
             )
         if K > 0:
-            if c_grid.shape[1] != self.W + K:
-                raise ValueError(
-                    f"pushforward needs c_grid with W+K = {self.W + K} slots, got "
-                    f"{c_grid.shape[1]}"
-                )
             k = self._draw_pushforward_k()
-            y_win = y[:, K:]
-            anchors = y_win[:, :-1]
+            y_win = y[:, K:]                              # (b, W+L, ...)
+            anchors = y_win[:, : self.W]                  # frame w-L for slot w
             if k > 0:
                 own = self._pushforward_anchors(model, y, c_grid, c_scalar, k)
                 if self.nocean:
@@ -861,15 +913,18 @@ class RSIScheduler(nn.Module):
                     )
                 anchors = torch.cat([anchors[:, : self.W - k], own], dim=1)
             y = y_win
-            c_grid = c_grid[:, K:]
-            c_scalar = c_scalar[:, K:] if c_scalar is not None else None
         else:
-            anchors = y[:, :-1]
+            anchors = y[:, : self.W]                      # frame w-L for slot w
+        if H > 0:
+            # The loader widened the forcing stack by the history frames; the
+            # W target slots are the last W of it.
+            c_grid = c_grid[:, -self.W:] if c_grid is not None else None
+            c_scalar = c_scalar[:, -self.W:] if c_scalar is not None else None
         b = y.shape[0]
         device = y.device
 
         anchors = self.perturb_anchor(anchors)        # (b, W, C, H, W)
-        targets = y[:, 1:]                            # (b, W, C, H, W)
+        targets = y[:, L:]                            # (b, W, C, H, W)
 
         t = torch.rand(b, device=device)              # global time, (b,)
         tau = self.local_time(t)                      # (b, W)
@@ -967,35 +1022,42 @@ class RSIScheduler(nn.Module):
 
     @torch.no_grad()
     def _pushforward_anchors(self, model, y, c_grid, c_scalar, k):
-        """Roll the model's own sampler k times and return its slot-W
-        readouts, ``(b, k, C, H, W)``: estimates of frames K+W-k .. K+W-1 of
-        the ``W+1+K`` stack, i.e. the anchors of the last k loss slots.
+        """Roll the model's own sampler k times and return the readouts that
+        the fresh slot would be anchored on, ``(b, k, C, H, W)``: estimates of
+        frames K+W-k .. K+W-1 of the ``W+L+K`` stack, i.e. the anchors of the
+        last k loss slots (slot w's anchor is frame w-L).
 
         The window is initialized from truth k frames before the loss window
-        (``warmup_window`` on frames K-k .. K-k+W) and advanced with
+        (``warmup_window`` on frames K-k .. K-k+W+L-1) and advanced with
         :meth:`sample_window` + :meth:`_fresh_slot` exactly as ``stream_step``
-        does, forcings and own-time ocean boundary sliced from the W+K-slot
-        conditioning stack. Runs in eval mode without grad; the loss forward
-        that follows is untouched.
+        does. Frame j of the stack has its lag-1 forcing at ``c_grid[:, j-1]``;
+        after ``j`` rolls the window holds frames ``s0+L .. s0+L+W-1`` with
+        ``s0 = j0 + j``, so the forcings are ``c_grid[:, s0+L-1 : s0+L-1+W]``,
+        the own-time ocean boundary ``c_grid[:, s0+L : s0+L+W]`` and the
+        anchor-time one ``c_grid[:, s0 : s0+W]``. Runs in eval mode without
+        grad; the loss forward that follows is untouched.
         """
-        K = self.history_frames
+        K = self.pushforward_rolls
+        L = self.anchor_lag
         j0 = K - k
         was_training = model.training
         model.eval()
         try:
-            x = self.warmup_window(y[:, j0 : j0 + self.W + 1])
+            x = self.warmup_window(y[:, j0 : j0 + self.W + L])
             outs = []
             for j in range(k):
                 s0 = j0 + j
-                cg = c_grid[:, s0 : s0 + self.W]
-                cs = c_scalar[:, s0 : s0 + self.W] if c_scalar is not None else None
+                cg = c_grid[:, s0 + L - 1 : s0 + L - 1 + self.W]
+                cs = (c_scalar[:, s0 + L - 1 : s0 + L - 1 + self.W]
+                      if c_scalar is not None else None)
                 ocean_win = (
-                    c_grid[:, s0 + 1 : s0 + 1 + self.W] if self.nocean else None
+                    c_grid[:, s0 + L : s0 + L + self.W] if self.nocean else None
                 )
+                anchor_bnd_win = c_grid[:, s0 : s0 + self.W] if self.nocean else None
                 x, y_hat = self.sample_window(
                     model, x, cg, cs, num_steps=self.pushforward_num_steps,
-                    ocean_win=ocean_win)
-                outs.append(y_hat[:, -1])
+                    ocean_win=ocean_win, anchor_bnd_win=anchor_bnd_win)
+                outs.append(y_hat[:, self.W - L])
                 x = torch.cat([x[:, 1:], self._fresh_slot(y_hat)], dim=1)
         finally:
             model.train(was_training)
@@ -1138,19 +1200,23 @@ class RSIScheduler(nn.Module):
         )
 
     def sample_window(self, model, x, c_grid_win, c_scalar_win, num_steps=None,
-                      ocean_win=None):
+                      ocean_win=None, anchor_bnd_win=None):
         """One inner sweep: transport the window from t = 0 to t = 1.
 
         Returns ``(x, y_hat)``. ERDM's sweep returns only the noisy window
         because its emitted frame IS ``x[:, 0]`` at sigma_min; RSI's emitted
         frame is the denoised readout of the final evaluation (the noise floor
         Gamma_1 subtracted), and the freshly appended back slot is anchored on
-        ``y_hat[:, -1]``. Both come from the same last head evaluation, so it is
-        returned rather than recomputed.
+        ``y_hat[:, W - L]`` (the emitted frame itself at ``L = W``). Both come
+        from the same last head evaluation, so it is returned rather than
+        recomputed.
 
-        ``ocean_win`` is the forcing window shifted forward one step;
-        ``c_grid_win`` doubles as the anchor-time boundary (see
-        :meth:`impose_ocean`).
+        ``ocean_win`` is the forcing window shifted forward one step (each
+        slot's OWN-time boundary); ``anchor_bnd_win`` is the boundary at each
+        slot's ANCHOR time, ``L`` steps behind the own-time window. At
+        ``anchor_lag = 1`` it is ``c_grid_win`` itself, which is used when the
+        argument is omitted; at ``L > 1`` with ocean channels the caller must
+        pass it (see :meth:`impose_ocean`).
         """
         if num_steps is None:
             num_steps = self.num_steps
@@ -1162,7 +1228,16 @@ class RSIScheduler(nn.Module):
         # Prescribe the ocean channels BEFORE integrating: global t=0 is the one
         # point where a single tau per slot is correct (see impose_ocean).
         if self.nocean:
-            x = self.impose_ocean(x, ocean_win, c_grid_win)
+            if anchor_bnd_win is None:
+                if self.anchor_lag > 1 and ocean_win is not None:
+                    raise ValueError(
+                        "sample_window needs anchor_bnd_win (the boundary at "
+                        f"anchor time, anchor_lag={self.anchor_lag} steps back) "
+                        "to impose the ocean channels; c_grid_win is the "
+                        "anchor-time boundary only at anchor_lag=1."
+                    )
+                anchor_bnd_win = c_grid_win
+            x = self.impose_ocean(x, ocean_win, anchor_bnd_win)
 
         h1 = zhat = tau_last = tau_eval = x_eval = None
         for i in range(num_steps):
@@ -1219,33 +1294,39 @@ class RSIScheduler(nn.Module):
         return x, y_hat
 
     def warmup_window(self, init_window):
-        """Place W+1 oracle frames on the interpolant at the t = 0 staircase.
+        """Place W+L oracle frames on the interpolant at the t = 0 staircase.
 
-        init_window : (b, W+1, C, H, W) -- y_0 .. y_W. Slot w = 1..W is built
-        from anchor y_{w-1} and target y_w at tau_w(0) = (W-w)/W, so the front
-        slot enters nearly clean and the back slot at pure anchor + full noise.
+        init_window : (b, W+L, C, H, W) -- y_{1-L} .. y_W. Slot w = 1..W is
+        built from anchor y_{w-L} and target y_w at tau_w(0) = (W-w)/W, so the
+        front slot enters nearly clean and the back slot at pure anchor + full
+        noise.
         """
         if init_window.shape[1] != self.init_frames:
             raise ValueError(
                 f"RSI oracle init expects {self.init_frames} frames "
-                f"(W+1: slot 1 needs its anchor), got {init_window.shape[1]}. "
+                f"(W+L with anchor_lag L={self.anchor_lag}: slot w needs its "
+                f"anchor y_(w-L)), got {init_window.shape[1]}. "
                 f"Drivers read the count off `scheduler.init_frames`."
             )
         b = init_window.shape[0]
         tau0 = self.local_time(torch.zeros(b, device=init_window.device))
-        anchors = init_window[:, :-1]
-        targets = init_window[:, 1:]
+        anchors = init_window[:, : self.W]
+        targets = init_window[:, self.anchor_lag:]
         z = self.get_noise(targets)
         return self.interpolant(anchors, targets, tau0, z)
 
     def _fresh_slot(self, y_hat):
         """Back slot entering at tau = 0: anchor + Gamma(0) z.
 
-        The anchor is the newest available state estimate -- the resolved slot W
-        of the window just integrated. No slot ever starts from structureless
-        noise; this is the single most consequential change relative to ERDM.
+        The new slot holds frame n+W+1 (n = frames emitted so far) and is
+        anchored on frame n+W+1-L, the readout of window slot W-L+1
+        (0-based index W-L). At ``anchor_lag = W`` that is slot 1, the frame
+        being EMITTED at this roll -- a completed conditional sample; at
+        ``anchor_lag = 1`` it is slot W, a conditional-mean readout whose
+        iteration contracts the climate (v0.1 behaviour, kept for rung A2).
+        No slot ever starts from structureless noise.
         """
-        anchor = y_hat[:, -1:]
+        anchor = y_hat[:, self.W - self.anchor_lag : self.W - self.anchor_lag + 1]
         tau0 = torch.zeros(anchor.shape[0], 1, device=anchor.device,
                            dtype=torch.float32)
         z = self.get_noise(anchor)
@@ -1257,8 +1338,10 @@ class RSIScheduler(nn.Module):
     # Rollout trace (drift diagnosis). Export RSI_TRACE_PATH=<file.pt> to
     # record, once per roll, the per-channel spatial-anomaly std and spatial
     # mean of the emitted frame (y_hat[:, 0]), of the fresh-slot anchor
-    # (y_hat[:, -1]) and of every window slot's ODE state. Off unless the
-    # variable is set; costs a few reductions per roll.
+    # (y_hat[:, W - anchor_lag]; identical to the emitted frame at lag W, so
+    # the anchor/emitted ratio is 1 by construction there) and of every window
+    # slot's ODE state. Off unless the variable is set; costs a few reductions
+    # per roll. The six keys are consumed by tools/diagnostics/rsi_drift.
     # ------------------------------------------------------------------
     def _trace(self, y_hat, x):
         path = os.environ.get("RSI_TRACE_PATH")
@@ -1275,7 +1358,7 @@ class RSIScheduler(nn.Module):
             return a.mean(0).cpu(), m.mean(0).cpu()
 
         es, em = _stats(y_hat[:, 0])
-        as_, am = _stats(y_hat[:, -1])
+        as_, am = _stats(y_hat[:, self.W - self.anchor_lag])
         ss, sm = zip(*[_stats(x[:, w]) for w in range(x.shape[1])])
         b = self._trace_buf
         b["emit_std"].append(es); b["emit_mean"].append(em)
@@ -1288,14 +1371,18 @@ class RSIScheduler(nn.Module):
 
     @torch.no_grad()
     def sample_rollout(self, model, init_window, c_grid_traj, c_scalar_traj,
-                       horizon, num_steps=None):
+                       horizon, num_steps=None, traj_lead=0):
         """Rolling-window autoregressive sampler.
 
-        init_window  : (b, W+1, C, H, W) oracle frames y_0..y_W. Under
+        init_window  : (b, W+L, C, H, W) oracle frames y_{1-L}..y_W. Under
             ``nocean > 0`` pass a BARE state stack -- it is padded here and the
             zeros are overwritten by the first imposition.
-        c_grid_traj  : (b, T, c_grid, H, W) forcings over absolute future frames
-        c_scalar_traj: (b, T, scalar_dim) or None
+        c_grid_traj  : (b, T, c_grid, H, W) forcings over absolute frames; slot
+            ``traj_lead + i`` is the forcing at absolute step i (the lag-1
+            forcing of frame i+1). ``traj_lead`` pre-IC frames let the
+            anchor-time ocean boundary (``L`` steps back) be real data for the
+            first rolls; without them it is clamped to the trajectory start.
+        c_scalar_traj: (b, T, scalar_dim) or None (same layout)
         horizon      : number of frames to forecast (emit)
         num_steps    : solver steps per emitted frame; int/None, or a sequence
             of length ``horizon``.
@@ -1310,18 +1397,21 @@ class RSIScheduler(nn.Module):
             )
 
         x = self.warmup_window(self.pad_state(init_window))
+        lead = int(traj_lead)
 
         outputs = []
         for k in range(horizon):
-            c_grid_win = self._gather_window(c_grid_traj, k)
-            c_scalar_win = self._gather_window(c_scalar_traj, k)
+            c_grid_win = self._gather_window(c_grid_traj, k + lead)
+            c_scalar_win = self._gather_window(c_scalar_traj, k + lead)
             ocean_win = (
-                self._gather_window(c_grid_traj, k + 1) if self.nocean else None
+                self._gather_window(c_grid_traj, k + 1 + lead) if self.nocean else None
             )
+            anchor_bnd_win = self._anchor_bnd_window(c_grid_traj, k, lead)
 
             step_k = num_steps[k] if isinstance(num_steps, (list, tuple)) else num_steps
             x, y_hat = self.sample_window(
-                model, x, c_grid_win, c_scalar_win, step_k, ocean_win=ocean_win)
+                model, x, c_grid_win, c_scalar_win, step_k, ocean_win=ocean_win,
+                anchor_bnd_win=anchor_bnd_win)
             self._trace(y_hat, x)
 
             outputs.append(y_hat[:, 0])
@@ -1330,46 +1420,56 @@ class RSIScheduler(nn.Module):
         return torch.stack(outputs, dim=1)
 
     def forward(self, model, init_window, c_grid_traj, c_scalar_traj, horizon,
-                num_steps=None):
+                num_steps=None, traj_lead=0):
         return self.sample_rollout(model, init_window, c_grid_traj, c_scalar_traj,
-                                   horizon, num_steps)
+                                   horizon, num_steps, traj_lead=traj_lead)
 
     @torch.no_grad()
     def sample_rollout_generator(self, model, init_window, c_grid_traj,
                                  c_scalar_traj, horizon, num_steps=None,
-                                 forcing_provider=None):
+                                 forcing_provider=None, traj_lead=0):
         """Streaming variant of :meth:`sample_rollout`, yielding ``(k, frame)``.
 
         This is what the 40-year climate rollout runs on: with a
         ``forcing_provider`` the GPU only ever holds the W-frame forcing window,
         never the full horizon. A provider may return a third element, the
-        one-step-shifted window used to impose the true ocean fields;
-        two-element returns stay valid.
+        one-step-shifted window used to impose the true ocean fields, and a
+        fourth, the anchor-time boundary window (``anchor_lag`` steps behind
+        the own-time one; required at ``anchor_lag > 1`` with ocean channels);
+        two-element returns stay valid. Without a provider the windows are
+        gathered from the trajectories as in :meth:`sample_rollout`
+        (``traj_lead`` pre-IC frames included).
         """
         device = init_window.device
         x = self.warmup_window(self.pad_state(init_window))
+        lead = int(traj_lead)
 
         for k in range(horizon):
             if forcing_provider is not None:
                 provided = forcing_provider(k)
                 c_grid_win, c_scalar_win = provided[0], provided[1]
                 ocean_win = provided[2] if len(provided) > 2 else None
+                anchor_bnd_win = provided[3] if len(provided) > 3 else None
             else:
-                c_grid_win = self._gather_window(c_grid_traj, k)
-                c_scalar_win = self._gather_window(c_scalar_traj, k)
+                c_grid_win = self._gather_window(c_grid_traj, k + lead)
+                c_scalar_win = self._gather_window(c_scalar_traj, k + lead)
                 ocean_win = (
-                    self._gather_window(c_grid_traj, k + 1) if self.nocean else None
+                    self._gather_window(c_grid_traj, k + 1 + lead) if self.nocean else None
                 )
+                anchor_bnd_win = self._anchor_bnd_window(c_grid_traj, k, lead)
             if c_grid_win is not None and c_grid_win.device != device:
                 c_grid_win = c_grid_win.to(device, non_blocking=True)
             if c_scalar_win is not None and c_scalar_win.device != device:
                 c_scalar_win = c_scalar_win.to(device, non_blocking=True)
             if ocean_win is not None and ocean_win.device != device:
                 ocean_win = ocean_win.to(device, non_blocking=True)
+            if anchor_bnd_win is not None and anchor_bnd_win.device != device:
+                anchor_bnd_win = anchor_bnd_win.to(device, non_blocking=True)
 
             step_k = num_steps[k] if isinstance(num_steps, (list, tuple)) else num_steps
             x, y_hat = self.sample_window(
-                model, x, c_grid_win, c_scalar_win, step_k, ocean_win=ocean_win)
+                model, x, c_grid_win, c_scalar_win, step_k, ocean_win=ocean_win,
+                anchor_bnd_win=anchor_bnd_win)
             self._trace(y_hat, x)
 
             yield k, y_hat[:, 0]
@@ -1386,16 +1486,21 @@ class RSIScheduler(nn.Module):
         ``(x_bar, eps_prev)`` and the drivers (``rollout.py``, including its
         on-disk resume format) unpack two elements, so RSI keeps the arity and
         leaves the second slot empty -- it carries no noise history, the
-        anchor is the previous roll's own resolved estimate.
+        anchor is a readout of the current roll's own window.
         """
         return (self.warmup_window(self.pad_state(init_window)), None)
 
     def stream_step(self, model, state, c_grid_win, c_scalar_win, num_steps=None,
-                    ocean_win=None):
-        """Advance one emitted frame. Returns ``(emitted, new_state)``."""
+                    ocean_win=None, anchor_bnd_win=None):
+        """Advance one emitted frame. Returns ``(emitted, new_state)``.
+
+        ``anchor_bnd_win`` (the boundary at anchor time, ``anchor_lag`` steps
+        behind ``ocean_win``) is required at ``anchor_lag > 1`` with ocean
+        channels; the driver holds the trajectory and slices it."""
         x = state[0]
         x, y_hat = self.sample_window(
-            model, x, c_grid_win, c_scalar_win, num_steps, ocean_win=ocean_win)
+            model, x, c_grid_win, c_scalar_win, num_steps, ocean_win=ocean_win,
+            anchor_bnd_win=anchor_bnd_win)
         self._trace(y_hat, x)
         emitted = y_hat[:, 0]
         x = torch.cat([x[:, 1:], self._fresh_slot(y_hat)], dim=1)
