@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A2-L -- RSI with the LAG-W SAMPLE ANCHOR (proposal v0.2, the core
+# rung). Slot w interpolates from y_{w-W} to y_w, so the fresh back slot is
+# anchored on the frame EMITTED at the same roll -- a completed conditional
+# sample -- instead of the slot-W conditional-mean readout whose iteration
+# collapsed the free-run climate at lag 1 (rung A2, loss/rsi.yaml; the
+# September 2026 drift campaign, docs/dev/context/
+# rsi-anchor-fix-report-for-proposal-revision.md). Everything else is the
+# campaign-1 A2 recipe that trained stably on the sst_pred contract: state
+# head with the EDM readout, per-channel increment scales, gamma 1.0 -> 0.04,
+# snr_bump weighting, no anchor perturbation, no pushforward.
+#
+# Gamma(0) is the W-STEP increment scale: noise_scale_path points at the
+# lag-6 artifact (tools/data/amip/make_rsi_delta_scales.py --lag 6 --contract
+# sst_pred; one model step = 4 rows of the 6-hourly store), NOT the lag-1 file
+# the A2 runs used. Contract deltas advertised by the scheduler and read by
+# the recipe/drivers: anchor_frames = 6 and init_frames = 12 (2W state frames
+# per training sample; the loader reads history_frames = 5 extra front
+# frames), and the evaluation drivers read 5 boundary frames before the IC
+# so the first rolls' anchor-time ocean imposition is real data.
+# Pair with model=amip_rsi_sst_pred (two heads).
+defaults:
+  - rsi
+  - _self_
+
+# The lag. 1 <= anchor_lag <= window_size; W makes every anchor a sample.
+anchor_lag: 6
+parameterization: state
+h1_precond: edm
+# In units of the per-channel W-step increment std (noise_scale_path below).
+gamma_0: 1.0
+gamma_1: 0.04
+# The fresh slot enters at anchor + fresh_noise_scale * Gamma(0) z: 1.0 is
+# the interpolant's own law (the >1 values were the lag-1 mitigation sweep).
+fresh_noise_scale: 1.0
+anchor_noise: 0.0
+noise_scale_path: ${oc.env:AI_ROSSBY_DATA,/scratch/09979/awikner/physicsnemo-zarr}/norm_stats/sigma_c_sstpred153_lag6.pt

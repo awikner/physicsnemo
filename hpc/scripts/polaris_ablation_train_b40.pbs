@@ -4,14 +4,21 @@
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Ablation ladder rungs A0 and A1 on the sst_pred contract, batch 40 on
+# Ablation ladder rungs A0, A1 and A2-L on the sst_pred contract, batch 40 on
 # Polaris (10 nodes x 4 ranks, per-rank batch 1), in-harness. One script for
-# both rungs so that A0 and A1 differ only in the model/loss line:
+# all rungs so that they differ only in the model/loss line:
 #
 #   ABL=a0   ERDM v2 loss (loss/erdm_v2.yaml, byte-mirror of upstream's
 #            ERDM_sst_pred scheduler) on model/amip_erdm_sst_pred (single head)
 #   ABL=a1   RSI in the exact ERDM reduction (loss/rsi_a1.yaml) on
 #            model/amip_rsi_sst_pred (two heads, H1 inert)
+#   ABL=a2l  RSI with the lag-W sample anchor (loss/rsi_a2l.yaml, proposal
+#            v0.2: anchor_lag 6, state head + EDM readout, W-step noise
+#            scales sigma_c_sstpred153_lag6.pt) on model/amip_rsi_sst_pred.
+#            Each sample carries 2W = 12 state frames; run it with
+#            ABL_RECIPE=bundle (the recipe the lag-1 A2 bundle run reached
+#            batch-4 loss parity with). Prerequisite: the lag-6 artifact under
+#            $AI_ROSSBY_DATA/norm_stats (make_rsi_delta_scales.py --lag 6).
 #
 # Recipe (ABL_RECIPE, default "upstream", chosen 2026-09-10): upstream
 # amip_v2's ERDM_sst_pred optimizer scaled to batch 40 -- base lr 5e-4 =
@@ -27,13 +34,16 @@
 # 20 levels, two epochs per 3 h link; every link resumes from the last
 # checkpoint pair and exits when the target epoch exists. Env knobs:
 #
-#   ABL          a0 | a1 (required)
+#   ABL          a0 | a1 | a2l (required)
 #   ABL_RECIPE   upstream (default) | bundle
 #   ABL_TARGET   last epoch (default 24)
 #   ABL_CKPT     checkpoint dir (default checkpoints_${ABL}_sstpred_b40)
 #   ABL_SEED     training seed (default 0, the A2 bundle run's)
 #   ABL_VAL_EVERY validation cadence in epochs (default 1, as upstream)
 #   ABL_NODES    expected node count (default 10; 1 for a debug smoke run)
+#   ABL_MAX_ITERS cap the stage at this many batches per epoch (default 0 =
+#                off): a smoke run then reaches the epoch-end checkpoint and
+#                the in-training rollout validation within its 30 minutes
 #   ABL_RETRY    internal, counts preflight/blacklist resubmissions
 #
 #PBS -A lighthouse-uchicago
@@ -53,18 +63,23 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "TMPDIR(job)=${TMPDIR:-unset}"
 export TMPDIR=/tmp   # forkserver DataLoader socket path limit (see polaris_rsi_ft_phase5.pbs)
 J=${PBS_JOBID%%.*}
-ABL=${ABL:?set ABL=a0 or ABL=a1}
+ABL=${ABL:?set ABL=a0, a1 or a2l}
 TARGET=${ABL_TARGET:-24}
 CKPT=${ABL_CKPT:-checkpoints_${ABL}_sstpred_b40}
 SEED=${ABL_SEED:-0}
 VAL_EVERY=${ABL_VAL_EVERY:-1}
 RECIPE=${ABL_RECIPE:-upstream}
+MAX_ITERS=${ABL_MAX_ITERS:-0}
 EPOCHS_PER_LINK=2
 EXPECT_NODES=${ABL_NODES:-10}
 case "$ABL" in
-  a0) MODEL=amip_erdm_sst_pred; LOSS=erdm_v2; RUN=erdm_sstpred_a0_b40 ;;
-  a1) MODEL=amip_rsi_sst_pred;  LOSS=rsi_a1;  RUN=rsi_sstpred_a1_b40 ;;
-  *) echo "FATAL: ABL must be a0 or a1, got '$ABL'"; exit 1 ;;
+  a0)  MODEL=amip_erdm_sst_pred; LOSS=erdm_v2; RUN=erdm_sstpred_a0_b40 ;;
+  a1)  MODEL=amip_rsi_sst_pred;  LOSS=rsi_a1;  RUN=rsi_sstpred_a1_b40 ;;
+  a2l) MODEL=amip_rsi_sst_pred;  LOSS=rsi_a2l; RUN=rsi_sstpred_a2l_b40
+       if [ ! -f "$AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153_lag6.pt" ]; then
+         echo "FATAL: a2l needs $AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153_lag6.pt (make_rsi_delta_scales.py --lag 6 --contract sst_pred)"; exit 1
+       fi ;;
+  *) echo "FATAL: ABL must be a0, a1 or a2l, got '$ABL'"; exit 1 ;;
 esac
 mkdir -p "$CKPT"
 GC_LEVELS=$(cat "$CKPT/grad_checkpoint_levels" 2>/dev/null || echo 14)
@@ -113,7 +128,7 @@ except Exception as e:
 if blacklisted || ! preflight; then
   RETRY=${ABL_RETRY:-0}
   if [ "$RETRY" -lt 4 ]; then
-    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
     echo "bad GPU / blacklisted host in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
   exit 3
@@ -129,6 +144,7 @@ case "$RECIPE" in
                    ++training.stages.0.scheduler.eta_min=5.0e-5); MOMENTUM=0.85 ;;
   *) echo "FATAL: ABL_RECIPE must be upstream or bundle, got '$RECIPE'"; exit 1 ;;
 esac
+CAP=(); [ "$MAX_ITERS" -gt 0 ] && CAP=("++training.stages.0.max_iterations=$MAX_ITERS")
 timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     --cpu-bind depth -d 8 \
     bash hpc/scripts/polaris_rank_env.sh \
@@ -155,7 +171,7 @@ timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     ++training.optimizer.muon_lr_multiplier=10 \
     "++training.optimizer.muon_momentum=$MOMENTUM" \
     ++training.ema.decay=0.99 \
-    "${SCHED[@]}" \
+    "${SCHED[@]}" "${CAP[@]}" \
     "++training.max_epochs=$NEPOCH" "++training.stages.0.num_epochs=$NEPOCH" \
     "++validation.every_n_epochs=$VAL_EVERY" \
     "++validation.rollout.climatology.surface_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_surface.pt" \
@@ -167,6 +183,7 @@ echo "train exit=$? (124 = hit the timeout) ; === $(date) ==="
 L="abl_${ABL}_${J}.log"
 grep -am1 "world_size=" "$L"; grep -am1 "steps_per_epoch=" "$L"; grep -am1 "fast-forwarded" "$L"
 grep -am1 "Scheduler initialized" "$L" | cut -c1-300
+grep -am1 "anchor_lag=" "$L" | grep -o "anchor_lag=[^,]*, anchor_frames=[^,]*, history_frames=[^)]*)" | head -1
 grep -a -E "epoch [0-9]+ batch" "$L" | head -2; grep -a -E "epoch [0-9]+ batch" "$L" | tail -2
 grep -a "valid:" "$L" | tail -2 | cut -c1-400
 grep -a -E "Error|Traceback|SIGSEGV|SIGABRT|out of memory|non-finite" "$L" | head -6

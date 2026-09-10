@@ -13,6 +13,7 @@
 # heads were regressed against.
 _target_: physicsnemo.experimental.diffusion.RSIScheduler
 window_size: 6
+anchor_lag: 1
 num_steps: 2
 solver: heun
 integrator: coeff

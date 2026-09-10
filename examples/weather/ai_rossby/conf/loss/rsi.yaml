@@ -13,11 +13,22 @@
 # the ladder is a small delta over this file: rsi_a1 … rsi_a5.yaml.
 #
 # Contract deltas vs. loss/erdm_v2.yaml, both advertised by the scheduler and
-# read by the recipe/drivers rather than configured here:
-#   * anchor_frames = 1 — training needs W+1 state frames (slot 1's anchor is
-#     the frame before the window). The recipe turns on
-#     SequenceDataset(emit_anchor=True); costs no extra I/O at forcing_lag=1.
-#   * init_frames = W+1 — the oracle first window needs the same extra frame.
+# read by the recipe/drivers rather than configured here (L = anchor_lag):
+#   * anchor_frames = L — training needs W+L state frames (slot w's anchor is
+#     the frame L steps before its target). The recipe turns on
+#     SequenceDataset(emit_anchor=True) and reads L-1 extra front frames
+#     (history_frames); costs no extra I/O at forcing_lag=1 for L = 1.
+#   * init_frames = W+L — the oracle first window needs the same extra frames.
+#
+# anchor_lag (proposal v0.2, 2026-09-10). This file keeps the v0.1 default,
+# anchor_lag = 1: the fresh back slot is anchored on the slot-W readout of the
+# state head at local time 1/(2W), a conditional MEAN, and iterating it
+# contracts the free-run climate (one-year surface plateau 611-795 vs ERDM's
+# 63 on the sst_pred contract; no perturbation-based mitigation repaired it).
+# Lag 1 is therefore the DIAGNOSTIC rung A2. The core rung is A2-L
+# (loss/rsi_a2l.yaml): anchor_lag = W anchors the fresh slot on the frame
+# emitted at the same roll, a completed sample, with Gamma(0) the W-step
+# increment scale. Both lags share every other knob below.
 # Pair with model=amip_rsi_v2, which is amip_erdm_v2 plus the second output
 # head (RSI regresses H1 and the latent zhat, so the backbone emits 2*C).
 #
@@ -25,6 +36,9 @@
 
 _target_: physicsnemo.experimental.diffusion.RSIScheduler
 window_size: 6
+# Anchor lag L (see the header): 1 = rung A2 (conditional-mean anchor,
+# diagnostic), window_size = rung A2-L (loss/rsi_a2l.yaml). 1 <= L <= W.
+anchor_lag: 1
 num_steps: 2
 solver: heun
 # Exact coefficient increments rather than first-order Euler on the velocity:
