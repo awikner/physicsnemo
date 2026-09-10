@@ -756,12 +756,22 @@ Both job scripts now also check the allocation against `$R/bad_nodes.txt`
 P24K6 chains were extended by two blacklist-aware links each so both still
 reach epoch 26 whichever link draws the bad node.
 
-*16:30 UTC, 2026-09-10:* **the remaining queued runs were cancelled at the
-user's request** (P24 chain 7602053/7602054, P24K6 chain 7602472-7602474 with
-the blacklist links 7602534-7602537, and the five-year wave 2 eval 7602471);
-none of them had started. The seeded directories `checkpoints_ft5_pf24_b40`
-and `checkpoints_ft5_pf24k6_b40` hold only the epoch-24 pair. The hand-off
-notes below describe how those runs would be scored if they are resubmitted.
+**HALTED 2026-09-10 16:34 UTC at the user's request.** Every remaining Phase 5
+job was killed: the P24 chain (7602053, 7602054 and blacklist links 7602534,
+7602535), the P24K6 chain (7602472-7602474 and 7602536, 7602537) and the
+five-year wave 2 evaluation (7602471, killed at 2 h 36 of its 2 h 59; partial
+saves every 200 frames may exist under `$R/eval_bias5yr_{p22_k145,p22_base,
+ps22_k145,l22_base,b24_base}`). Neither P24 nor P24K6 ever trained a step;
+their directories hold only the seeded epoch-24 pair. The user's own
+capacity-queue production run (`rsi-sstpred-prod24`) was left alone. What the
+killed runs were meant to test: (1) five-year wave 2 -- whether the second
+pushforward epoch (P22) holds longer than the one-epoch model, which collapsed
+in years 2-3; (2) P24 -- whether the same two-epoch fine-tune on the finished
+epoch 24 reproduces P22's one-year result, making it the deployable candidate;
+(3) P24K6 -- whether a chain of up to six Euler rolls, showing the head anchors
+deeper in its own chain at the cost of two Heun rolls, extends the five-year
+hold. All checkpoints (ft5_{shrink,pf,pfshrink,shrinklvl}_b40 at epoch 22)
+and the one-year and five-year evaluation files remain on Polaris.
 
 **Queued at hand-off (2026-09-10 00:30 UTC; the `small` queue is blocked by
 a 10-hour reservation until about 05:35 UTC):** P22 second epoch (jobs
