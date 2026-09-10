@@ -142,6 +142,7 @@ class RSIScheduler(nn.Module):
                  anchor_level_noise=0.0,
                  pushforward_rolls=0,
                  pushforward_seed=0,
+                 pushforward_num_steps=None,
                  weighting="snr_bump",
                  P_mean=2.0,
                  P_std=1.2,
@@ -262,6 +263,17 @@ class RSIScheduler(nn.Module):
             raise ValueError(f"pushforward_rolls must be >= 0, got {pushforward_rolls}")
         self.history_frames = self.pushforward_rolls
         self.pushforward_seed = int(pushforward_seed)
+        # Sampler steps used by the pushforward rolls (None = the scheduler's
+        # own num_steps). One Heun roll is ~3 head evaluations, so k ~ U{0..2}
+        # already costs 1.7x a plain step; a 1-step (Euler) roll costs one
+        # evaluation and lets k reach 6 at the same price. The anchor is then
+        # the slot-W readout of the t = 0 evaluation, a conditional mean of
+        # the same kind, only less transported.
+        self.pushforward_num_steps = (
+            None if pushforward_num_steps is None else int(pushforward_num_steps)
+        )
+        if self.pushforward_num_steps is not None and self.pushforward_num_steps < 1:
+            raise ValueError("pushforward_num_steps must be >= 1 or None")
         self._pf_gen = None
         self.weighting = weighting
         self.P_mean = P_mean
@@ -366,10 +378,10 @@ class RSIScheduler(nn.Module):
             logger.info(
                 "RSIScheduler drift-diagnosis knobs: fresh_noise_scale=%s, "
                 "anchor_shrink=%s (exclude %s), anchor_level_noise=%s, "
-                "pushforward_rolls=%s",
+                "pushforward_rolls=%s (num_steps=%s)",
                 self.fresh_noise_scale, self.anchor_shrink,
                 list(self.anchor_shrink_exclude), self.anchor_level_noise,
-                self.pushforward_rolls,
+                self.pushforward_rolls, self.pushforward_num_steps,
             )
 
     # ------------------------------------------------------------------
@@ -980,7 +992,9 @@ class RSIScheduler(nn.Module):
                 ocean_win = (
                     c_grid[:, s0 + 1 : s0 + 1 + self.W] if self.nocean else None
                 )
-                x, y_hat = self.sample_window(model, x, cg, cs, ocean_win=ocean_win)
+                x, y_hat = self.sample_window(
+                    model, x, cg, cs, num_steps=self.pushforward_num_steps,
+                    ocean_win=ocean_win)
                 outs.append(y_hat[:, -1])
                 x = torch.cat([x[:, 1:], self._fresh_slot(y_hat)], dim=1)
         finally:

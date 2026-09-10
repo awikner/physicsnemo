@@ -965,3 +965,23 @@ def test_anchor_level_noise_is_a_spatially_uniform_per_channel_offset():
     torch.testing.assert_close(out - out.mean(dim=(-2, -1), keepdim=True),
                                a - a.mean(dim=(-2, -1), keepdim=True))
     assert torch.equal(RSIScheduler(window_size=3).perturb_anchor(a), a)
+
+
+def test_pushforward_num_steps_controls_the_roll_cost():
+    """With pushforward_num_steps=1 each roll is a single head evaluation."""
+    K, W, k = 3, 3, 3
+    sched = RSIScheduler(window_size=W, num_steps=2, pushforward_rolls=K,
+                         pushforward_num_steps=1)
+    model = _TwoHeadStub(3)
+    y = torch.randn(1, W + 1 + K, 3, 8, 16)
+    cg = torch.randn(1, W + K, 2, 8, 16)
+    torch.manual_seed(0)
+    own = sched._pushforward_anchors(model, y, cg, None, k)
+    assert own.shape == (1, k, 3, 8, 16) and torch.isfinite(own).all()
+    assert len(model.labels_seen) == k          # one evaluation per roll
+    model.labels_seen.clear()
+    sched2 = RSIScheduler(window_size=W, num_steps=2, pushforward_rolls=K)
+    sched2._pushforward_anchors(model, y, cg, None, k)
+    assert len(model.labels_seen) == 3 * k      # Heun, 2 steps: 3 per roll
+    with pytest.raises(ValueError):
+        RSIScheduler(window_size=W, pushforward_rolls=1, pushforward_num_steps=0)

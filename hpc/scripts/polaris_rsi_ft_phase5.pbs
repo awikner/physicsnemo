@@ -21,6 +21,8 @@
 #              offset of the anchor, in increment-std units
 #   FT_PF      loss.pushforward_rolls K (0 = off): k ~ U{0..K} own-sampler
 #              rolls per step, last k anchors self-generated
+#   FT_PFSTEPS loss.pushforward_num_steps (sampler steps per roll; 1 = Euler,
+#              one head evaluation, lets K reach 6 at the K=2 Heun cost)
 #   FT_FRESH   loss.fresh_noise_scale used by those rolls (pair with the
 #              matching sampler yaml at evaluation)
 #   EPOCHS_PER_LINK  epochs per 3 h link (1 for pushforward, 2 otherwise)
@@ -52,6 +54,7 @@ SHRINK=${FT_SHRINK:-0.0}
 EXCLUDE=${FT_EXCLUDE:-}
 LEVEL=${FT_LEVEL:-0.0}
 PF=${FT_PF:-0}
+PFSTEPS=${FT_PFSTEPS:-}
 FRESH=${FT_FRESH:-1.0}
 EPOCHS_PER_LINK=${EPOCHS_PER_LINK:-1}
 GC_LEVELS=$(cat "$CKPT/grad_checkpoint_levels" 2>/dev/null || echo 14)
@@ -61,7 +64,7 @@ NRANKS=$((NNODES * PPN))
 export GPUS_PER_NODE=$PPN
 export MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
 export MASTER_PORT=29900
-echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | ckpt $CKPT | base $BASE target $TARGET | shrink $SHRINK exclude [$EXCLUDE] level $LEVEL | pushforward $PF fresh $FRESH | gc_levels $GC_LEVELS ==="
+echo "=== $(date) ${NNODES} nodes / ${NRANKS} ranks | ckpt $CKPT | base $BASE target $TARGET | shrink $SHRINK exclude [$EXCLUDE] level $LEVEL | pushforward $PF (steps ${PFSTEPS:-default}) fresh $FRESH | gc_levels $GC_LEVELS ==="
 EXPECT_NODES=${FT_NODES:-10}   # FT_NODES=1 for a debug-queue smoke run
 [ "$NNODES" -eq "$EXPECT_NODES" ] || { echo "FATAL: expected $EXPECT_NODES nodes, got $NNODES"; exit 1; }
 DONE=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
@@ -97,13 +100,14 @@ except Exception as e:
 if ! preflight; then
   RETRY=${FT_RETRY:-0}
   if [ "$RETRY" -lt 2 ]; then
-    NEW=$(qsub -N "$PBS_JOBNAME" -v "FT_CKPT=$CKPT,FT_BASE=$BASE,FT_TARGET=$TARGET,FT_SHRINK=$SHRINK,FT_EXCLUDE=$EXCLUDE,FT_LEVEL=$LEVEL,FT_PF=$PF,FT_FRESH=$FRESH,EPOCHS_PER_LINK=$EPOCHS_PER_LINK,FT_NODES=$EXPECT_NODES,FT_RETRY=$((RETRY + 1))" "$R/polaris_rsi_ft_phase5.pbs" 2>&1)
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "FT_CKPT=$CKPT,FT_BASE=$BASE,FT_TARGET=$TARGET,FT_SHRINK=$SHRINK,FT_EXCLUDE=$EXCLUDE,FT_LEVEL=$LEVEL,FT_PF=$PF,FT_PFSTEPS=$PFSTEPS,FT_FRESH=$FRESH,EPOCHS_PER_LINK=$EPOCHS_PER_LINK,FT_NODES=$EXPECT_NODES,FT_RETRY=$((RETRY + 1))" "$R/polaris_rsi_ft_phase5.pbs" 2>&1)
     echo "bad GPU in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
   exit 3
 fi
 EXCL_ARG=()
 if [ -n "$EXCLUDE" ]; then EXCL_ARG=("++loss.anchor_shrink_exclude=[${EXCLUDE//+/,}]"); fi
+if [ -n "$PFSTEPS" ]; then EXCL_ARG+=("++loss.pushforward_num_steps=$PFSTEPS"); fi
 LR=5.0e-4        # bundle recipe (linear scaling), continued cosine schedule
 timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     --cpu-bind depth -d 8 \
