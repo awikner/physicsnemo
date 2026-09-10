@@ -756,6 +756,13 @@ Both job scripts now also check the allocation against `$R/bad_nodes.txt`
 P24K6 chains were extended by two blacklist-aware links each so both still
 reach epoch 26 whichever link draws the bad node.
 
+*16:30 UTC, 2026-09-10:* **the remaining queued runs were cancelled at the
+user's request** (P24 chain 7602053/7602054, P24K6 chain 7602472-7602474 with
+the blacklist links 7602534-7602537, and the five-year wave 2 eval 7602471);
+none of them had started. The seeded directories `checkpoints_ft5_pf24_b40`
+and `checkpoints_ft5_pf24k6_b40` hold only the epoch-24 pair. The hand-off
+notes below describe how those runs would be scored if they are resubmitted.
+
 **Queued at hand-off (2026-09-10 00:30 UTC; the `small` queue is blocked by
 a 10-hour reservation until about 05:35 UTC):** P22 second epoch (jobs
 7601656 -> 7601657, `checkpoints_ft5_pf_b40` epoch 22); P24 (7602052 ->
