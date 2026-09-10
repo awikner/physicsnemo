@@ -741,7 +741,7 @@ sampler so that k ~ U{0..6} costs what k ~ U{0..2} with Heun did
 replay of the model's own free-run windows as training anchors (targets
 stay truth), which the code does not have yet.
 
-*Submitted 08:20 UTC:* five-year wave 2 (job 7602471: P22 paired and plain,
+*Submitted 07:55 UTC:* five-year wave 2 (job 7602471: P22 paired and plain,
 PS22, L22, plain epoch 24) and **P24K6** = `pushforward_rolls 6` with
 `pushforward_num_steps 1` (Euler rolls, one head evaluation each, so k up to 6
 costs what k up to 2 did) + `fresh_noise_scale` 1.45, two epochs from the
