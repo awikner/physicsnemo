@@ -7,6 +7,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # RSI ablation ladder: which rungs have actually been trained (2026-09-10)
 
+> **Update 2026-09-10 (evening), proposal v0.2.** The ladder was revised:
+> lag-1 RSI (every run below) is now the *diagnostic* rung A2, the core rung
+> is **A2-L** (lag-W sample anchor, `loss/rsi_a2l.yaml`, `anchor_lag: 6`),
+> **A2-P** is the pushforward fine-tune on top of A2-L, and A3-A5 build on the
+> A2-L base. Both baselines are now training in-harness on the sst_pred
+> contract at batch 40 (Polaris, `polaris_ablation_train_b40.pbs`): **A0**
+> (`checkpoints_a0_sstpred_b40`, upstream recipe) and **A2-L**
+> (`checkpoints_a2l_sstpred_b40`, bundle recipe). A1 is not launched. See
+> [rsi-v0.2-lag-w-implementation](rsi-v0.2-lag-w-implementation.md) for the
+> code changes, the runs and the noise-scale finding.
+
 The proposal (section 5) defines the ladder as: **A0** ERDM baseline,
 retrained in our harness; **A1** RSI in the uncoupled white-noise limit, a
 consistency check that must match A0 within noise and "the fallback operating

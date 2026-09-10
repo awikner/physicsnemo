@@ -7,8 +7,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Plan: A0 (ERDM) and A1 (RSI in the ERDM reduction) on the sst_pred contract, batch 40, Polaris (draft 2026-09-10)
 
-Status: **decisions taken 2026-09-10 (section 6); submitting.** Sections 1-4
-are the review and the original proposal; section 5 records the questions
+Status: **superseded for A1 on 2026-09-10 (evening).** After the proposal
+v0.2 revision the second baseline launched is **A2-L** (lag-W sample anchor,
+`loss/rsi_a2l.yaml`), not A1; A0 was launched as planned here (section 6,
+upstream-faithful recipe, `checkpoints_a0_sstpred_b40`). A1 remains a ladder
+rung and this document remains the recipe reference for it. The A0 launch, its
+bad-node restart and the A2-L run are recorded in
+[rsi-v0.2-lag-w-implementation](rsi-v0.2-lag-w-implementation.md). Sections
+1-4 are the review and the original proposal; section 5 records the questions
 and answers.
 
 ## 1. What upstream trained (the sst_pred ERDM we have been comparing against)

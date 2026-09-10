@@ -498,16 +498,33 @@ separate instances, so a trained ERDM v2 checkpoint warm-starts head 1 verbatim
 and only `output_head_aux.*` starts fresh (zero-init, so `zhat == 0` at step 0).
 
 **Two contract deltas vs. every other rolling scheduler**, both advertised by the
-scheduler and read by the recipe rather than configured:
+scheduler and read by the recipe rather than configured (`L = anchor_lag`, the
+number of steps between a slot's anchor and its target; 1 in `loss/rsi.yaml`,
+`W` in `loss/rsi_a2l.yaml`):
 
-- `anchor_frames = 1` — training needs `W+1` state frames, because slot 1's
-  anchor is the frame *before* the window. The recipe turns on
-  `SequenceDataset(emit_anchor=True)`; at `forcing_lag=1` that frame is already
-  read (it is where the slot-1 forcing comes from) and today discarded, so it
-  costs **no extra I/O**.
-- `init_frames = W+1` — the oracle first window needs the same extra frame. The
-  window still *ends* at the IC; the extra frame comes from further back, so the
-  last usable IC does not move.
+- `anchor_frames = L` — training needs `W+L` state frames, because slot `w`'s
+  anchor is the frame `L` steps *before* its target. The recipe turns on
+  `SequenceDataset(emit_anchor=True)` and reads the remaining `L-1` frames
+  through `history_frames`; at `forcing_lag=1` and `L=1` the anchor frame is
+  already read (it is where the slot-1 forcing comes from) and today
+  discarded, so it costs **no extra I/O**. At `L=W` every sample carries `2W`
+  frames.
+- `init_frames = W+L` — the oracle first window needs the same extra frames.
+  The window still *ends* at the IC + W; the extra frames come from before the
+  IC, so the earliest usable IC moves `L-1` steps into the store (and the
+  evaluation drivers prepend the same `L-1` boundary frames to the forcing
+  trajectory, `traj_lead`, for the anchor-time ocean imposition of the first
+  rolls).
+
+**The anchor lag (proposal v0.2, 2026-09-10).** At `L=1` the fresh back slot is
+anchored on the state head's readout of slot `W` at local time `1/(2W)`: a
+conditional *mean*, whose iteration contracts the free-run climate (the
+September 2026 drift campaign; `docs/dev/context/rsi-anchor-fix-report-for-proposal-revision.md`).
+At `L=W` the fresh slot is anchored on the frame *emitted* at the same roll, a
+completed conditional sample. `Gamma(0)` must then be the `L`-step increment
+scale: build `noise_scale_path` with `make_rsi_delta_scales.py --lag L`
+(`--contract sst_pred`), which counts the lag in **model steps** (4 rows of the
+6-hourly store per 24 h step).
 
 ```bash
 # (a) A2 — the VANILLA rolling SI: state parameterization, scalar white noise.
@@ -540,9 +557,12 @@ one to be trained *in this order*, gated on the climatology/bias suite and the
 
 | `loss=` | What it adds | Needs |
 |---|---|---|
-| `rsi_a1` | `reduce_to_erdm` — ERDM-equivalence sanity | — |
-| `rsi` | **A2**: coupled rolling SI, state parameterization, scalar white `Gamma` | — |
-| `rsi_a3` | **A3**: residual parameterization (+ an `anchor_noise` sub-rung) | — |
+| `erdm_v2` on `model=amip_erdm_sst_pred` | **A0**: the in-harness ERDM control (`hpc/scripts/polaris_ablation_train_b40.pbs ABL=a0`) | — |
+| `rsi_a1` | **A1**: `reduce_to_erdm` — ERDM-equivalence sanity | — |
+| `rsi` | **A2**: coupled rolling SI at anchor lag 1 (conditional-mean anchor; diagnostic rung since v0.2) | — |
+| `rsi_a2l` | **A2-L**: the lag-`W` sample anchor (`anchor_lag: 6`, state head + EDM readout, `W`-step noise scales) — the core rung of proposal v0.2 | `make_rsi_delta_scales.py --lag 6 --contract sst_pred` |
+| `rsi` + `loss.pushforward_rolls=K` | **A2-P**: self-generated anchors on top of A2-L (`loss=rsi_a2l ++loss.pushforward_rolls=K`) | an A2-L checkpoint to fine-tune |
+| `rsi_a3` | **A3**: residual parameterization (+ an `anchor_noise` sub-rung), on the A2-L base | — |
 | `rsi_a4` | **A4**: spectral `Gamma = gamma_0 g(l) h(tau,l)` | `make_rsi_spectrum.py` |
 | `rsi_a5` | **A5**: the `eps`-family SDE sweep — a **sampler** knob, no retraining | a trained ckpt |
 

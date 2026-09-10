@@ -291,6 +291,11 @@ def cmd_trace(args):
                 print("  " + line(r, rel(r, key)[:, m]))
     print("\n=== anchor / emitted, same roll, mean over channels ===")
     for r in runs:
+        # anchor_std / emit_std: the fresh-slot anchor's amplitude relative to
+        # the emitted frame's. At anchor lag 1 (v0.1) the anchor is the slot-W
+        # conditional-mean readout and the ratio measures its shrinkage; at
+        # anchor lag W (v0.2, rung A2-L) the anchor IS the emitted frame, so
+        # the ratio is 1 by construction from roll 1 and carries no information.
         print(line(r, T[r]["anchor_std"] / T[r]["emit_std"]))
     print("\n=== mean over channels of |emitted spatial-mean change from roll 1| (normalized units) ===")
     for r in runs:

@@ -8,9 +8,12 @@ Tests 1, 2 and 4 of ``docs/dev/context/rsi-drift-diagnosis-report.md``, run
 against a trained RSI or ERDM forecaster with the eval suite's own dataset,
 weights, window assembly and forcing alignment (mirrors
 ``validate_diffusion.DiffusionRolloutValidator._rollout_window`` exactly:
-RSI's first window is rows ``t..t+W`` (anchor + W frames), ERDM's is
-``t+1..t+W``; trajectory slot ``i`` is the forcing at row ``t+i``, so window
-slot ``w`` of roll ``k`` sees the lag-1 forcing ``traj[k+w]``).
+RSI's first window is rows ``t+1-L..t+W`` (L = ``anchor_lag`` anchor frames +
+W frames; ``t..t+W`` at the v0.1 lag 1), ERDM's is ``t+1..t+W``; trajectory
+slot ``lead+i`` (``lead = L-1``) is the forcing at row ``t+i``, so window
+slot ``w`` of roll ``k`` sees the lag-1 forcing ``traj[lead+k+w]``, and the
+anchor-time ocean boundary of the first rolls comes from the ``lead`` pre-IC
+rows).
 
 One process, one GPU. Select probes with ``+probes.which=[readout,cascade,flush]``:
 
@@ -112,9 +115,11 @@ def _to(batch: dict, device) -> dict:
     return {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
 
 
-def _forcing_traj(ds, wrapper, ics, traj_len: int, step: int, device):
-    """``(c_grid_traj, c_scalar_traj)`` for rows ``t .. t + traj_len - 1``."""
-    traj = _batch_windows(ds, ics, 0, traj_len, step, keys=_TRAJ_KEYS)
+def _forcing_traj(ds, wrapper, ics, traj_len: int, step: int, device, first_offset: int = 0):
+    """``(c_grid_traj, c_scalar_traj)`` for rows ``t + first_offset .. t +
+    first_offset + traj_len - 1`` (``first_offset = -lead`` prepends the pre-IC
+    boundary frames an anchor lag > 1 needs)."""
+    traj = _batch_windows(ds, ics, first_offset, traj_len, step, keys=_TRAJ_KEYS)
     c_grid = wrapper.pack_window_c_grid(
         {
             "surface_in": traj["surface_in"],
@@ -199,10 +204,12 @@ class _Stream:
     ``sample_rollout`` loop is replicated verbatim (erdm.py sample_rollout).
     """
 
-    def __init__(self, sched, model, c_grid_traj, c_scalar_traj, num_steps):
+    def __init__(self, sched, model, c_grid_traj, c_scalar_traj, num_steps, lead=0):
         self.s, self.m = sched, model
         self.cg, self.cs, self.n = c_grid_traj, c_scalar_traj, num_steps
         self.family = "rsi" if hasattr(sched, "stream_init") else "erdm"
+        # pre-IC frames at the front of the trajectories (anchor lag - 1)
+        self.lead = int(lead)
 
     def init(self, init_y):
         s = self.s
@@ -216,16 +223,21 @@ class _Stream:
 
     def windows(self, k):
         s = self.s
-        cgw = s._gather_window(self.cg, k)
-        csw = s._gather_window(self.cs, k)
-        ocw = s._gather_window(self.cg, k + 1) if getattr(s, "nocean", 0) else None
-        return cgw, csw, ocw
+        lead = self.lead
+        cgw = s._gather_window(self.cg, k + lead)
+        csw = s._gather_window(self.cs, k + lead)
+        ocw = s._gather_window(self.cg, k + 1 + lead) if getattr(s, "nocean", 0) else None
+        # anchor-time boundary (RSI, anchor lag L): L steps behind the own-time window
+        abw = (s._anchor_bnd_window(self.cg, k, lead)
+               if ocw is not None and hasattr(s, "_anchor_bnd_window") else None)
+        return cgw, csw, ocw, abw
 
     def step(self, state, k):
         s = self.s
-        cgw, csw, ocw = self.windows(k)
+        cgw, csw, ocw, abw = self.windows(k)
         if self.family == "rsi":
-            return s.stream_step(self.m, state, cgw, csw, self.n, ocean_win=ocw)
+            extra = {"anchor_bnd_win": abw} if abw is not None else {}
+            return s.stream_step(self.m, state, cgw, csw, self.n, ocean_win=ocw, **extra)
         x_bar, eps_prev = state
         x_bar = s.sample_window(self.m, x_bar, cgw, csw, self.n, ocean_win=ocw)
         emitted = x_bar[:, 0]
@@ -256,6 +268,8 @@ def probe_readout(sched, model, wrapper, ds, ics, step, device, *, batch, family
                   t_globals=(0.5, 0.0), offset=0.3, shrink=0.7, num_steps=2):
     W = int(sched.W)
     nocean = int(getattr(sched, "nocean", 0) or 0)
+    L = int(getattr(sched, "anchor_lag", 1) or 1) if family == "rsi" else 1
+    lead = L - 1
     res = {}
     for tg in t_globals:
         acc = {k: [] for k in ("std_ratio", "slope", "rmse", "level_gain",
@@ -264,26 +278,29 @@ def probe_readout(sched, model, wrapper, ds, ics, step, device, *, batch, family
             bics = ics[b0:b0 + batch]
             B = len(bics)
             if family == "rsi":
-                win = _batch_windows(ds, bics, 0, W + 1, step)          # rows t..t+W
+                win = _batch_windows(ds, bics, 1 - L, W + L, step)      # rows t+1-L..t+W
             else:
                 win = _batch_windows(ds, bics, 1, W, step)              # rows t+1..t+W
             y = wrapper.pack_window_state(_to(win, device)).float()
             n_state = y.shape[2]
-            cg, cs = _forcing_traj(ds, wrapper, bics, W + 2, step, device)
+            # rows t-lead .. t+W+1: own-time boundary of every init frame + the
+            # W conditioning slots (rows t..t+W-1) at cg[:, lead : lead+W]
+            cg, cs = _forcing_traj(ds, wrapper, bics, W + 2 + lead, step, device,
+                                   first_offset=-lead)
             y = sched.pad_state(y)
             if nocean:
                 if family == "rsi":
-                    truth = sched.ocean_truth(cg[:, : W + 1], y.shape[-2:], expect=W + 1)
+                    truth = sched.ocean_truth(cg[:, : W + L], y.shape[-2:], expect=W + L)
                 else:
                     truth = sched.ocean_truth(cg[:, 1 : W + 1], y.shape[-2:])
                 y[:, :, -nocean:] = truth.to(y.dtype)
-            cgw, csw = cg[:, :W], cs[:, :W]
+            cgw, csw = cg[:, lead : lead + W], cs[:, lead : lead + W]
 
             def readout(y_):
                 torch.manual_seed(1234)                 # identical latents per variant
                 if family == "rsi":
                     tau = sched.local_time(torch.full((B,), float(tg), device=device))
-                    anchors, targets = y_[:, :-1], y_[:, 1:]
+                    anchors, targets = y_[:, :W], y_[:, L:]
                     z = sched.get_noise(targets)
                     x = sched.interpolant(anchors, targets, tau, z)
                     h1, _ = sched.heads(model, x, tau, cgw, csw)
@@ -316,16 +333,20 @@ def probe_cascade(sched, model, wrapper, ds, ics, step, device, *, batch, family
                   rolls, num_steps, trace_path=None):
     W = int(sched.W)
     nocean = int(getattr(sched, "nocean", 0) or 0)
+    L = int(getattr(sched, "anchor_lag", 1) or 1) if family == "rsi" else 1
+    lead = L - 1
+    lead_kw = {"traj_lead": lead} if lead else {}
     emit_std, emit_mean, truth_std, truth_mean, rmse = [], [], [], [], []
     for b0 in range(0, len(ics), batch):
         bics = ics[b0:b0 + batch]
         if family == "rsi":
-            win = _batch_windows(ds, bics, 0, W + 1, step)
+            win = _batch_windows(ds, bics, 1 - L, W + L, step)
         else:
             win = _batch_windows(ds, bics, 1, W, step)
         init_y = wrapper.pack_window_state(_to(win, device)).float()
         traj_len = W + rolls - 1 + int(bool(nocean))
-        cg, cs = _forcing_traj(ds, wrapper, bics, traj_len, step, device)
+        cg, cs = _forcing_traj(ds, wrapper, bics, traj_len + lead, step, device,
+                               first_offset=-lead)
         if trace_path:
             os.environ["RSI_TRACE_PATH"] = f"{trace_path}.ics{b0}.pt"
             if hasattr(sched, "_trace_buf"):
@@ -333,7 +354,8 @@ def probe_cascade(sched, model, wrapper, ds, ics, step, device, *, batch, family
         e_std, e_mean, t_std, t_mean, r = [], [], [], [], []
         t0 = time.time()
         for k0, x_k in sched.sample_rollout_generator(model, init_y, cg, cs,
-                                                      horizon=rolls, num_steps=num_steps):
+                                                      horizon=rolls, num_steps=num_steps,
+                                                      **lead_kw):
             k = k0 + 1
             em = sched.strip_ocean(x_k) if nocean else x_k
             tr = wrapper.pack_window_state(_to(_batch_windows(ds, bics, k, 1, step), device))[:, 0].float()
@@ -366,19 +388,22 @@ def probe_flush(sched, model, wrapper, ds, ics, step, device, *, batch, family, 
                 k0, shrink, offset, num_steps, seed=0):
     W = int(sched.W)
     nocean = int(getattr(sched, "nocean", 0) or 0)
+    L = int(getattr(sched, "anchor_lag", 1) or 1) if family == "rsi" else 1
+    lead = L - 1
     groups = _group_slices(wrapper)
     results = {}
     for b0 in range(0, len(ics), batch):
         bics = ics[b0:b0 + batch]
         if family == "rsi":
-            win = _batch_windows(ds, bics, 0, W + 1, step)
+            win = _batch_windows(ds, bics, 1 - L, W + L, step)
         else:
             win = _batch_windows(ds, bics, 1, W, step)
         init_y = wrapper.pack_window_state(_to(win, device)).float()
         n_state = init_y.shape[2]
         traj_len = W + k0 + rolls + 1 + int(bool(nocean))
-        cg, cs = _forcing_traj(ds, wrapper, bics, traj_len, step, device)
-        st = _Stream(sched, model, cg, cs, num_steps)
+        cg, cs = _forcing_traj(ds, wrapper, bics, traj_len + lead, step, device,
+                               first_offset=-lead)
+        st = _Stream(sched, model, cg, cs, num_steps, lead=lead)
 
         def grp_rms(d: torch.Tensor) -> torch.Tensor:     # d: (B, K, C, H, W) -> (K, G)
             return torch.stack([d[:, :, sl].float().pow(2).mean(dim=(0, 2, 3, 4)).sqrt()
