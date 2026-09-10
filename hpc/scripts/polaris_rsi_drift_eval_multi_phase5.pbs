@@ -44,6 +44,20 @@ RANKS_PER_JOB=$((NODES_PER_JOB * PPN))
 OBS=$AI_ROSSBY_DATA/norm_stats/obs_climatology_1996_2001
 export GPUS_PER_NODE=$PPN
 mapfile -t ALLNODES < <(sort -u "$PBS_NODEFILE")
+# Skip allocations that contain a known-bad host ($R/bad_nodes.txt) and
+# resubmit this job once or twice instead of losing a sub-job to it.
+if [ -f "$R/bad_nodes.txt" ]; then
+  HIT=$(grep -Fxf <(grep -vE "^\s*(#|$)" "$R/bad_nodes.txt" | awk "{print \$1}") <(printf "%s\n" "${ALLNODES[@]}" | sed "s/\..*//"))
+  if [ -n "$HIT" ]; then
+    RETRY=${EVAL_RETRY:-0}
+    echo "allocation contains blacklisted host(s): $HIT"
+    if [ "$RETRY" -lt 3 ]; then
+      NEW=$(qsub -N "$PBS_JOBNAME" -q "${PBS_QUEUE:-prod}" -l "select=${#ALLNODES[@]}:system=polaris" -l walltime=02:59:00 -v "EVAL_TAG=$TAG,EVAL_HORIZON=$HORIZON,EVAL_IC=$IC,EVAL_JOBS=$EVAL_JOBS,EVAL_RETRY=$((RETRY + 1))" "$R/polaris_rsi_drift_eval_multi_phase5.pbs" 2>&1)
+      echo "resubmitted as $NEW (retry $((RETRY + 1)))"
+    fi
+    exit 3
+  fi
+fi
 NNODES=${#ALLNODES[@]}
 NEED=$(( ${#JOBS[@]} * NODES_PER_JOB ))
 echo "=== $(date) | ${NNODES} nodes | ${#JOBS[@]} jobs x ${RANKS_PER_JOB} ranks | horizon $HORIZON | ${EVAL_JOBS} ==="

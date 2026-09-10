@@ -97,9 +97,20 @@ except Exception as e:
   fi
   echo "GPU preflight: all $NRANKS ranks ok"
 }
-if ! preflight; then
+# Known-bad hosts (one hostname per line in $R/bad_nodes.txt): the matmul
+# preflight passed on x3003c0s25b0n0 GPU 2 (job 7602052) and the model
+# forward still died there with the same illegal-instruction error, so the
+# allocation is also checked against the list and resubmitted if it hits.
+blacklisted () {
+  [ -f "$R/bad_nodes.txt" ] || return 1
+  local hit
+  hit=$(grep -Fxf <(grep -vE "^\s*(#|$)" "$R/bad_nodes.txt" | awk "{print \$1}") <(sort -u "$PBS_NODEFILE" | sed "s/\..*//"))
+  [ -n "$hit" ] && { echo "allocation contains blacklisted host(s): $hit"; return 0; }
+  return 1
+}
+if blacklisted || ! preflight; then
   RETRY=${FT_RETRY:-0}
-  if [ "$RETRY" -lt 2 ]; then
+  if [ "$RETRY" -lt 4 ]; then
     NEW=$(qsub -N "$PBS_JOBNAME" -v "FT_CKPT=$CKPT,FT_BASE=$BASE,FT_TARGET=$TARGET,FT_SHRINK=$SHRINK,FT_EXCLUDE=$EXCLUDE,FT_LEVEL=$LEVEL,FT_PF=$PF,FT_PFSTEPS=$PFSTEPS,FT_FRESH=$FRESH,EPOCHS_PER_LINK=$EPOCHS_PER_LINK,FT_NODES=$EXPECT_NODES,FT_RETRY=$((RETRY + 1))" "$R/polaris_rsi_ft_phase5.pbs" 2>&1)
     echo "bad GPU in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
