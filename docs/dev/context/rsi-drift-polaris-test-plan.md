@@ -668,6 +668,42 @@ Self-generated anchors are the fix; the shrink should be dropped from the
 recipe, and the level term is only worth re-testing on top of the
 pushforward if P22/P24 keep the residual -1.2 K level.
 
+**P22: two pushforward epochs (job chain 7601533 -> 7601656; eval 7602350),
+one year, paired (`fresh_noise_scale` 1.45) and plain sampler:**
+
+| | C22 control | P21 paired | P21 plain | **P22 paired** | P22 plain | ERDM |
+|---|---|---|---|---|---|---|
+| z500 bias-map RMSE / mean bias | 2094 / -1140 | 542 / -230 | 541 / -287 | **469 / +13** | 638 / -205 | 42 / -4 |
+| t2m bias-map RMSE / mean bias (K) | 11.50 / -5.41 | 1.59 / -1.19 | 1.84 / -1.42 | **0.72 / -0.24** | 1.73 / -0.87 | 0.21 / -0.01 |
+| t850 bias-map RMSE / mean bias (K) | 9.12 / -3.67 | 1.52 / -1.02 | 1.85 / -1.39 | **0.86 / +0.35** | 1.38 / -0.29 | 0.18 / -0.03 |
+| u250 bias-map RMSE / mean bias | 10.45 / -2.74 | 9.53 / +3.35 | 9.27 / +2.91 | 7.92 / +2.02 | 7.74 / +0.93 | 0.70 / 0.21 |
+| surface RMSE-vs-clim, mean steps 100-365 | 792 | 152 | 141 | 159 | 227 | 63 |
+| upper-air RMSE-vs-clim, mean steps 100-365 | 550 | 356 | 366 | 452 | 393 | 453 |
+| surface RMSE-vs-clim at 30 / 50 / 85 / 200 / 365 | 201 / 549 / 764 / 804 / 808 | 113 / 128 / 113 / 184 / 164 | 113 / 123 / 104 / 166 / 145 | 114 / 106 / 108 / 181 / 159 | 115 / 113 / 97 / 210 / **353** | 75 / 70 / 53 / 76 / 86 |
+| surface spread at 10 / 100 / 365 | 0.101 / 0.268 / 0.256 | 0.108 / 0.307 / 0.315 | 0.098 / 0.302 / 0.314 | 0.107 / 0.310 / 0.306 | 0.100 / 0.310 / **0.463** | 0.136 / 0.310 / 0.312 |
+| alpha skt / sp / t2m / q2m / u10 / v10 | 0.71 / 0.59 / 0.71 / 0.75 / 0.83 / 0.85 | -0.02 / 0.03 / -0.03 / 0.01 / 0.39 / 0.29 | -0.02 / 0.03 / -0.03 / 0.02 / 0.37 / 0.29 | **0.01 / 0.03 / -0.00 / -0.03 / 0.42 / 0.29** | 0.10 / 0.10 / 0.09 / 0.10 / 0.49 / 0.40 | ~0 |
+| alpha upper-air T / u / v / z / q | 0.78 / 0.84 / 0.85 / 0.75 / 0.83 | 0.32 / 0.50 / 0.22 / 0.25 / 0.30 | 0.34 / 0.46 / 0.20 / 0.23 / 0.35 | **0.26 / 0.45 / 0.28 / 0.27 / 0.22** | 0.33 / 0.51 / 0.39 / 0.33 / 0.31 | ~0 |
+| late amplitude: sfc+diag / trop. T / z / u / v / q | 0.38 / 0.36 / 0.35 / 0.38 / 0.35 / 0.41 | 0.91 / 1.07 / 0.85 / 0.83 / 0.83 / 1.14 | 0.91 / 1.07 / 0.96 / 0.83 / 0.79 / 1.05 | 0.91 / 1.04 / 0.83 / 0.84 / 0.83 / 1.33 | 0.65 / 0.69 / 0.59 / 0.60 / 0.57 / 0.77 | |
+| stratospheric T / q late amplitude | 2.56 / 1.93 | 0.60 / 3.23 | 0.62 / 3.05 | **0.63 / 1.47** | 1.25 / 2.11 | |
+| 10-day validation, surface RMSE step 1 / 6 / 10 | 1.95 / 15.1 / 116 (e20) | 1.99 / 13.4 / 58 | | **1.98 / 12.9 / 54** | | |
+
+Readings. (i) The second epoch removes the residual level: z500 +13 m2/s2
+and t2m -0.24 K against P21's -230 and -1.19 K, with the pattern alpha of
+the slow channels still at zero and the diagnostics at 0.13; the t2m
+bias-map RMSE is 0.72 K (control 11.5 K, ERDM 0.21 K) and the day-10 skill
+improves again (54). The plateau is unchanged (159 vs 152; the difference is
+one-member noise at this level), the u250 level is halved (+2.0 m/s), and the
+stratospheric humidity is back to normal (1.5x). Remaining: wind alphas of
+0.3-0.5, tropospheric q over-amplified (1.33), upper-air RMSE-vs-climatology
+452 (P21 356, ERDM 453). (ii) **The pairing now matters.** Under the plain
+sampler the two-epoch model creeps late in the year (surface RMSE 210 -> 353
+over days 200-365, spread 0.31 -> 0.46, stratospheric q 18x at roll 365) where
+the paired run stays flat: after two epochs the head has adapted to the
+anchor law it was trained on (its own chain with the 1.45 injection), so the
+inference sampler must use the same `fresh_noise_scale` as the training
+rolls. Production recipe: `loss.pushforward_rolls 2` with
+`loss.fresh_noise_scale 1.45`, sampled with `rsi_sstpred_e1_k145`.
+
 **Queued at hand-off (2026-09-10 00:30 UTC; the `small` queue is blocked by
 a 10-hour reservation until about 05:35 UTC):** P22 second epoch (jobs
 7601656 -> 7601657, `checkpoints_ft5_pf_b40` epoch 22); P24 (7602052 ->

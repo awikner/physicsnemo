@@ -143,9 +143,15 @@ win.
   -3.8 K) but stays at 422; a second epoch of pushforward + shrink is worse
   than the first (329 vs 290). Ranking by one-year plateau: pushforward 152
   << pushforward + shrink 290-329 < shrink + level 422 < shrink 455 << plain
-  795, ERDM 63. Two pushforward epochs, the same fine-tune on the finished
-  epoch 24 (the deployable candidate) and five-year runs are in the queue;
-  full tables in the plan's Phase 5 section.
+  795, ERDM 63. **Two pushforward epochs** remove the residual level (z500
+  +13 m2/s2, t2m -0.24 K; bias-map RMSE 0.72 K vs the control's 11.5 K and
+  ERDM's 0.21 K) at the same plateau (159), and the day-10 skill improves
+  again (54). After two epochs the head depends on the anchor law it was
+  trained on: the plain sampler creeps late in the year (353 at day 365)
+  where the paired one stays flat, so the inference `fresh_noise_scale` must
+  match the training rolls. The same fine-tune on the finished epoch 24 (the
+  deployable candidate) and five-year runs are in the queue; full tables in
+  the plan's Phase 5 section.
 
 Net verdict after the runs: Layer A as stated; Layer B is the off-manifold,
 no-restoring-force branch (brief H1 sharpened), entered when the fast
