@@ -1,0 +1,68 @@
+data:
+  root: /work2/11079/aasch/stampede3/data/plasim_sim52_pnemo
+  dt: 1
+  num_workers: 8
+model:
+  probabilistic: true
+  n_noise: 2
+  sfno:
+    embed_dim: 256
+    num_layers: 12
+    scale_factor: 1
+  head:
+    embed_dim: 128
+    num_layers: 4
+loss:
+  precip_weight: 5.0
+  diagnostic_weight: 1.0
+training:
+  batch_size: 32
+  beta1: 0.9
+  beta2: 0.95
+  weight_decay: 3.0e-06
+  max_grad_norm: 1.0
+  state_noise_sigma: 0.02
+  bf16: true
+  log_every: 50
+  valid_iters: 50
+  checkpoint_dir: /work2/11079/aasch/stampede3/runs/plasim_pnemo/modelA_r2
+  stages:
+  - name: r2_unroll8
+    unroll_steps: 8
+    ensemble_members: 2
+    batch_size: 2
+    grad_accum: 16
+    epochs: 3
+    lr: 5.0e-05
+    min_lr: 1.0e-06
+    loss:
+      diagnostic_weight: 1.0
+      daily_crps_weight: 20.0
+      daily_crps_samples: 8
+    max_iters: 30000
+  - name: r2_unroll16
+    unroll_steps: 16
+    ensemble_members: 2
+    batch_size: 1
+    grad_accum: 32
+    epochs: 2
+    lr: 3.0e-05
+    min_lr: 1.0e-06
+    loss:
+      diagnostic_weight: 1.0
+      daily_crps_weight: 20.0
+      daily_crps_samples: 8
+    max_iters: 30000
+  - name: r2_unroll32
+    unroll_steps: 32
+    ensemble_members: 2
+    batch_size: 1
+    grad_accum: 32
+    epochs: 2
+    lr: 2.0e-05
+    min_lr: 1.0e-06
+    loss:
+      diagnostic_weight: 1.0
+      daily_crps_weight: 20.0
+      daily_crps_samples: 4
+    max_iters: 20000

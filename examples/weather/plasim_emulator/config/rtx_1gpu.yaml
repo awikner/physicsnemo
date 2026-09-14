@@ -1,0 +1,73 @@
+# PlaSim sim52 6-hourly SFNO emulator - Model A (joint prognostic + diagnostic).
+#
+# Optimizer settings follow SFNO v11 so the comparison is like-for-like; what
+# changes is the diagnostic treatment (hurdle-Gamma instead of z-scored L2),
+# the precipitation weighting (v11 used constant channel weights), the per-step
+# noise channels, and the addition of a rollout fine-tuning stage (v11 trained
+# single-step only).
+
+data:
+  root: /work2/11079/aasch/stampede3/data/plasim_sim52_pnemo
+  dt: 1            # 1 = 6 h, the native output cadence - no resampling
+  num_workers: 8
+
+model:
+  probabilistic: true
+  n_noise: 2       # white-noise channels, resampled EVERY autoregressive step
+  sfno:
+    embed_dim: 256
+    num_layers: 12
+    scale_factor: 1
+    # grid types are pinned to legendre-gauss in model.py: PlaSim T42 output is
+    # on a Gaussian grid, so the SHT quadrature is exact.
+  head:            # Model B: separate SFNO diagnostic head (train_head.py)
+    embed_dim: 128
+    num_layers: 4
+
+loss:
+  precip_weight: 5.0        # pr_6h vs the other diagnostics (v11 used 1.0)
+  diagnostic_weight: 1.0    # diagnostic block vs the 52-channel state block
+
+training:
+  batch_size: 32           # 1x RTX PRO 6000 Blackwell 96GB -> global 32, matches v11
+  beta1: 0.9
+  beta2: 0.95
+  weight_decay: 3.0e-6
+  max_grad_norm: 1.0
+  state_noise_sigma: 0.02   # v11's white input noise, state channels only
+  bf16: true
+  log_every: 50
+  valid_iters: 50
+  checkpoint_dir: /work2/11079/aasch/stampede3/runs/plasim_pnemo/modelA_rtx1
+
+  stages:
+    - name: stage1_single
+      unroll_steps: 1
+      epochs: 50
+      lr: 8.0e-4
+      min_lr: 1.0e-5
+    - name: stage2_unroll2
+      unroll_steps: 2
+      epochs: 8
+      lr: 1.0e-4
+      min_lr: 1.0e-6
+    - name: stage3_unroll4
+      unroll_steps: 4
+      # unroll=4 holds 4x the rollout activations for backprop; batch 32 OOMs a
+      # 95 GB card. Shrink the batch and recover the effective batch by accumulation.
+      batch_size: 8
+      grad_accum: 4
+      epochs: 4
+      lr: 5.0e-5
+      min_lr: 1.0e-6
+    - name: stage4_ensemble
+      # Fixes ensemble collapse: swaps the L2 state loss for the energy score,
+      # a proper scoring rule whose spread term rewards using the noise channels.
+      # 2 members x unroll 2 = 4x rollout memory, so batch 8 + accum 4.
+      unroll_steps: 2
+      ensemble_members: 2
+      batch_size: 8
+      grad_accum: 4
+      epochs: 4
+      lr: 5.0e-5
+      min_lr: 1.0e-6
