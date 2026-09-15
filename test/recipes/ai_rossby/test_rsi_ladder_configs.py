@@ -163,3 +163,61 @@ def test_hn_is_training_only_and_absent_from_the_samplers():
         assert "hn_power" not in f.read_text(), f.name
     assert "hn_" not in "".join(
         k for k in _MIRRORED), "hn_* must stay out of the mirror list"
+
+
+# ---------------------------------------------------------------------------
+# Whitelisted sampler overrides: the post-hoc sweep surface (rung A5).
+# ---------------------------------------------------------------------------
+
+def _rollout_module():
+    import sys
+    sys.path.insert(0, str(_CONF.parent))
+    import rollout
+    return rollout
+
+
+def test_sampler_overrides_apply_sampling_knobs():
+    r = _rollout_module()
+    cfg = OmegaConf.load(_CONF / "sampler" / "rsi_a2l_sstpred.yaml")
+    out = r.merge_sampler_overrides(
+        cfg, OmegaConf.create({"eps_mode": "gamma2", "eps_scale": 0.02,
+                               "num_steps": 4}))
+    assert out.eps_mode == "gamma2"
+    assert out.eps_scale == pytest.approx(0.02)
+    assert out.num_steps == 4
+    # the original is not mutated, and the interpolant is untouched
+    assert cfg.eps_scale == pytest.approx(0.0)
+    assert out.anchor_lag == cfg.anchor_lag and out.gamma_0 == cfg.gamma_0
+
+
+@pytest.mark.parametrize("key,val", [
+    ("anchor_lag", 1), ("gamma_0", 0.5), ("h1_precond", "none"),
+    ("noise_scale_path", "/tmp/other.pt"), ("parameterization", "residual"),
+])
+def test_sampler_overrides_reject_interpolant_keys(key, val):
+    """These define the process the heads were regressed against; overriding
+    one from the CLI evaluates the checkpoint under a different model and the
+    shapes all still line up."""
+    r = _rollout_module()
+    cfg = OmegaConf.load(_CONF / "sampler" / "rsi_a2l_sstpred.yaml")
+    with pytest.raises(ValueError, match="sampling knobs"):
+        r.merge_sampler_overrides(cfg, OmegaConf.create({key: val}))
+
+
+def test_sampler_overrides_none_is_a_passthrough():
+    r = _rollout_module()
+    cfg = OmegaConf.load(_CONF / "sampler" / "rsi_a2l_sstpred.yaml")
+    assert r.merge_sampler_overrides(cfg, None) is cfg
+    assert r.merge_sampler_overrides(cfg, OmegaConf.create({})) is cfg
+
+
+def test_the_overridden_sampler_still_instantiates():
+    """An eps sweep value must produce a working scheduler, not just a dict."""
+    r = _rollout_module()
+    cfg = OmegaConf.load(_CONF / "sampler" / "rsi_a2l_sstpred.yaml")
+    cfg.noise_scale_path = None
+    out = r.merge_sampler_overrides(
+        cfg, OmegaConf.create({"eps_mode": "gamma2", "eps_scale": 0.05}))
+    sched = instantiate(out)
+    assert sched.eps_scale == pytest.approx(0.05) and sched.eps_mode == "gamma2"
+    assert sched.anchor_lag == 6

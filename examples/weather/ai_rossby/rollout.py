@@ -99,6 +99,43 @@ def _load_group(group: str, stem: str) -> DictConfig:
     return OmegaConf.load(path)
 
 
+#: Keys a caller may override on a sampler from the CLI. SAMPLING knobs only:
+#: how many steps to take, which solver, and how much stochastic forcing. The
+#: interpolant profiles (beta, gamma_0/gamma_1, delta_std, anchor_lag,
+#: parameterization, h1_precond, noise_scale_path, ...) define the process the
+#: heads were REGRESSED against -- changing one of those from the command line
+#: silently evaluates a checkpoint under a different model, so they must go
+#: through a named conf/sampler file that the mirror test can see
+#: (test_rsi_ladder_configs._MIRRORED).
+_SAMPLER_OVERRIDABLE = frozenset({
+    "num_steps", "solver", "final_denoise",
+    "eps_scale", "eps_mode", "eps_tmin", "eps_tmax",
+    "S_churn", "S_noise", "S_tmin", "S_tmax",
+})
+
+
+def merge_sampler_overrides(sampler_cfg: DictConfig, overrides) -> DictConfig:
+    """Apply whitelisted sampling-knob overrides to a loaded sampler config.
+
+    Exists so a post-hoc sweep (rung A5's eps ladder, or a steps/NFE curve) is
+    a CLI argument rather than N hand-copied 30-line sampler files that can
+    drift from the training config independently. ``_load_group`` reads the
+    yaml with a bare ``OmegaConf.load``, so ``defaults:`` is not processed and
+    thin per-value files are not an option.
+    """
+    if not overrides:
+        return sampler_cfg
+    bad = sorted(set(overrides) - _SAMPLER_OVERRIDABLE)
+    if bad:
+        raise ValueError(
+            f"sampler_overrides may only touch sampling knobs, got {bad}. "
+            f"Allowed: {sorted(_SAMPLER_OVERRIDABLE)}. The interpolant "
+            "profiles define the process the heads were regressed against -- "
+            "change them by writing a new conf/sampler/ file, not from the CLI."
+        )
+    return OmegaConf.merge(sampler_cfg, overrides)
+
+
 def _build_stage(spec: DictConfig, *, device, log) -> tuple[torch.nn.Module, object]:
     """Build one stage's wrapper + scheduler and load its checkpoint."""
     model_cfg = _load_group("model", str(spec.model))
@@ -110,7 +147,14 @@ def _build_stage(spec: DictConfig, *, device, log) -> tuple[torch.nn.Module, obj
     state = Module.from_checkpoint(ckpt).state_dict()
     wrapper.load_state_dict(state, strict=True)
     wrapper.eval()
-    scheduler = hydra.utils.instantiate(_load_group("sampler", str(spec.sampler)))
+    sampler_cfg = _load_group("sampler", str(spec.sampler))
+    overrides = spec.get("sampler_overrides", None)
+    if overrides:
+        sampler_cfg = merge_sampler_overrides(sampler_cfg, overrides)
+        log.info(
+            f"{spec.sampler}: sampler_overrides "
+            f"{OmegaConf.to_container(overrides, resolve=True)}")
+    scheduler = hydra.utils.instantiate(sampler_cfg)
     if hasattr(scheduler, "to"):
         scheduler = scheduler.to(device)
     log.info(
