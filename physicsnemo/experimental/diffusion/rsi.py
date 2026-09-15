@@ -10,6 +10,8 @@ import os
 import torch
 import torch.nn as nn
 
+from ._utils import high_noise_boost
+
 logger = logging.getLogger(__name__)
 
 # Per-slot loss decomposition cadence; 0 (default) disables. See compute_loss.
@@ -159,6 +161,9 @@ class RSIScheduler(nn.Module):
                  weighting="snr_bump",
                  P_mean=2.0,
                  P_std=1.2,
+                 hn_sigma=0.0,
+                 hn_power=0.0,
+                 hn_clip=0.0,
                  w_1=1.0,
                  w_z=1.0,
                  # ── sampling stochasticity (eps-family; 0 => PF-ODE) ──────
@@ -302,6 +307,27 @@ class RSIScheduler(nn.Module):
         self.weighting = weighting
         self.P_mean = P_mean
         self.P_std = P_std
+        # High-noise loss boost, in sigma_eff units (see
+        # _utils.high_noise_boost). Off by default: hn_power = 0 leaves
+        # loss_weight bit-identical. Only the snr_bump weighting has a
+        # sigma-like scalar to apply it to; the others raise rather than
+        # silently ignore the knob.
+        self.hn_sigma = float(hn_sigma)
+        self.hn_power = float(hn_power)
+        self.hn_clip = float(hn_clip)
+        if self.hn_power:
+            if self.hn_sigma <= 0.0:
+                raise ValueError(
+                    f"hn_power={self.hn_power} needs hn_sigma > 0 (got "
+                    f"{self.hn_sigma}): the boost is a power law ABOVE a floor, "
+                    "and without the floor it reweights the whole range"
+                )
+            if self.weighting != "snr_bump":
+                raise ValueError(
+                    f"hn_power > 0 needs weighting='snr_bump' (got "
+                    f"'{self.weighting}'): the boost is a function of "
+                    "sigma_eff, which only that weighting evaluates"
+                )
         self.w_1 = float(w_1)
         self.w_z = float(w_z)
 
@@ -391,11 +417,14 @@ class RSIScheduler(nn.Module):
         logger.info(
             "RSIScheduler initialized: W=%s, anchor_lag=%s, num_steps=%s, param=%s "
             "(h1_precond=%s), beta=%s, gamma=[%s -> %s] (%s), integrator=%s, "
-            "solver=%s, weighting=%s, eps_scale=%s, noise=%s, reduce_to_erdm=%s",
+            "solver=%s, weighting=%s hn=[sigma_eff>%s]^%s capped %s, "
+            "eps_scale=%s, noise=%s, reduce_to_erdm=%s",
             self.W, self.anchor_lag, self.num_steps, self.parameterization,
             self.h1_precond, self.beta_mode,
             self.gamma_0, self.gamma_1, self.gamma_mode, self.integrator,
-            self.solver, self.weighting, self.eps_scale, noise, self.reduce_to_erdm,
+            self.solver, self.weighting,
+            self.hn_sigma, self.hn_power, self.hn_clip,
+            self.eps_scale, noise, self.reduce_to_erdm,
         )
         if (self.fresh_noise_scale != 1.0 or self.anchor_shrink > 0.0
                 or self.pushforward_rolls > 0 or self.anchor_level_noise > 0.0):
@@ -859,7 +888,10 @@ class RSIScheduler(nn.Module):
             lam = (sig ** 2 + 1.0) / (sig ** 2)
             f = torch.exp(-(sig.log() - self.P_mean) ** 2 / (2.0 * self.P_std ** 2)) \
                 / (sig * self.P_std * math.sqrt(2.0 * math.pi))
-            return lam * f
+            boost = high_noise_boost(
+                sig, hn_sigma=self.hn_sigma, hn_power=self.hn_power,
+                hn_clip=self.hn_clip)
+            return lam * f if boost is None else lam * f * boost
         raise ValueError(f"unknown weighting '{self.weighting}'")
 
     def compute_loss(self, model, c_grid, c_scalar, y, return_parts=False):
@@ -978,6 +1010,19 @@ class RSIScheduler(nn.Module):
                         "rsi loss diag: h1/slot=%s z/slot=%s",
                         ["%.3e" % v for v in p1.tolist()],
                         ["%.3e" % v for v in pz.tolist()],
+                    )
+                    # The staircase coordinate itself: sigma_eff and the loss
+                    # weight per slot. The slot index is the noise-level bin,
+                    # so this is the per-sigma view the total loss hides -- the
+                    # measurement the high-noise boost (hn_*) is tuned on, and
+                    # the one the A0-vs-upstream comparison needed (2026-09-15:
+                    # equal totals, 5-8% worse on the two highest slots).
+                    logger.info(
+                        "rsi loss diag: sigma_eff/slot=%s weight/slot=%s "
+                        "weighted/slot=%s",
+                        ["%.3e" % v for v in self.sigma_eff(tau).mean(0).tolist()],
+                        ["%.3e" % v for v in weight.mean(0).tolist()],
+                        ["%.3e" % v for v in (p1 + pz).tolist()],
                     )
                     # Channel-resolved: which channels carry the loss right
                     # now (weighted, summed over slots+space, batch-mean).

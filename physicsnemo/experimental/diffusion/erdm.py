@@ -13,6 +13,8 @@ import os
 import torch
 import torch.nn as nn
 
+from ._utils import high_noise_boost
+
 logger = logging.getLogger(__name__)
 
 # Per-slot loss decomposition cadence; 0 (default) disables. See compute_loss.
@@ -62,6 +64,9 @@ class ERDMScheduler(nn.Module):
                  sigma_data=0.5,
                  P_mean=2.0,
                  P_std=1.2,
+                 hn_sigma=0.0,
+                 hn_power=0.0,
+                 hn_clip=0.0,
                  solver="heun",
                  S_churn=0.0,
                  S_tmin=0.0,
@@ -87,6 +92,17 @@ class ERDMScheduler(nn.Module):
         self.sigma_data = sigma_data
         self.P_mean = P_mean
         self.P_std = P_std
+        # High-noise loss boost (see _utils.high_noise_boost). Off by default:
+        # hn_power = 0 leaves loss_weight bit-identical.
+        self.hn_sigma = float(hn_sigma)
+        self.hn_power = float(hn_power)
+        self.hn_clip = float(hn_clip)
+        if self.hn_power and self.hn_sigma <= 0.0:
+            raise ValueError(
+                f"hn_power={self.hn_power} needs hn_sigma > 0 (got "
+                f"{self.hn_sigma}): the boost is a power law ABOVE a floor, and "
+                "without the floor it reweights the whole sigma range"
+            )
         self.solver = solver
 
         # Temporal noise prior (ERDM App. C.4, Eq. 24): AR(1) correlation of the
@@ -140,9 +156,11 @@ class ERDMScheduler(nn.Module):
 
         logger.info(
             "ERDMScheduler initialized: W=%s, num_steps=%s, rho=%s, sigma=[%s, %s], "
-            "sigma_data=%s, solver=%s, noise=%s, alpha=%s",
+            "sigma_data=%s, solver=%s, noise=%s, alpha=%s, "
+            "hn=[sigma>%s]^%s capped %s",
             self.W, self.num_steps, self.rho, self.sigma_min, self.sigma_max,
             self.sigma_data, self.solver, noise, self.alpha,
+            self.hn_sigma, self.hn_power, self.hn_clip,
         )
 
     # ------------------------------------------------------------------
@@ -373,11 +391,18 @@ class ERDMScheduler(nn.Module):
     # Training
     # ------------------------------------------------------------------
     def loss_weight(self, sigma):
-        """EDM unit-variance weight lambda(sigma) * lognormal emphasis f(sigma)."""
+        """EDM unit-variance weight lambda(sigma) * lognormal emphasis f(sigma).
+
+        Times the optional high-noise boost (``hn_*``), which is exactly 1
+        below ``hn_sigma`` and is skipped entirely when off.
+        """
         lam = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         f = torch.exp(-(sigma.log() - self.P_mean) ** 2 / (2.0 * self.P_std ** 2)) \
             / (sigma * self.P_std * math.sqrt(2.0 * math.pi))
-        return lam * f
+        boost = high_noise_boost(
+            sigma, hn_sigma=self.hn_sigma, hn_power=self.hn_power,
+            hn_clip=self.hn_clip)
+        return lam * f if boost is None else lam * f * boost
 
     def compute_loss(self, model, c_grid, c_scalar, y, return_parts=False):
         """ERDM training loss.

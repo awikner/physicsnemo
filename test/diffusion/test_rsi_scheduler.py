@@ -1324,3 +1324,208 @@ def test_anchor_lag_pushforward_readout_is_the_emitted_frame_at_lag_w():
         _, y_hat = sched.sample_window(model, x, cg[:, L - 1 : L - 1 + W], None,
                                        num_steps=2)
     torch.testing.assert_close(own[:, 0], y_hat[:, 0])
+
+
+# ---------------------------------------------------------------------------
+# High-noise loss boost (hn_sigma / hn_power / hn_clip). The 2026-09-15
+# finding: at global batch 40 an in-harness ERDM matched the upstream batch-4
+# checkpoint's TOTAL loss at epoch 17 (243.9 vs 242.0) while its day-10
+# rollout RMSE was 2.3x worse. Per window slot -- the slot index IS the
+# noise-level bin on the staircase -- it was 5-8% worse on the two highest
+# slots only, and those carry 27% and 1.8% of the weighted loss. The boost
+# restores part of the EDM-equivalent attention the staircase costs the
+# high-sigma end (a factor sigma^(1/rho - 1) = sigma^-1.1 at rho = -10).
+# ---------------------------------------------------------------------------
+
+_HN = dict(hn_sigma=10.0, hn_power=1.1, hn_clip=10.0)      # the A0-HN values
+_HN_A2L = dict(hn_sigma=3.5, hn_power=2.0, hn_clip=10.0)   # the A2-L-HN values
+
+
+def test_hn_boost_ratios_at_the_shipped_slot_sigmas():
+    """Pin the multiplier, because the whole point is its SHAPE: exactly 1
+    through the informative band, 5-10x in 50-500. These are the numbers the
+    A0-HN config is chosen on; a silent change of the profile changes what
+    the new training series means."""
+    from physicsnemo.experimental.diffusion._utils import high_noise_boost
+
+    sigma = torch.tensor([0.004, 0.015, 0.074, 0.49, 5.2, 10.0,
+                          16.0, 50.0, 81.0, 118.0, 300.0, 500.0])
+    got = high_noise_boost(sigma, **_HN)
+    expect = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.677, 5.873, 9.985, 10.0, 10.0, 10.0]
+    torch.testing.assert_close(got, torch.tensor(expect), rtol=2e-3, atol=0.0)
+    # exactly 1 below the floor, not just approximately
+    assert torch.equal(got[:6], torch.ones(6))
+
+
+def test_hn_off_returns_none_so_the_default_path_is_untouched():
+    from physicsnemo.experimental.diffusion._utils import high_noise_boost
+
+    sigma = torch.tensor([0.1, 10.0, 500.0])
+    assert high_noise_boost(sigma, hn_sigma=10.0, hn_power=0.0, hn_clip=10.0) is None
+    with pytest.raises(ValueError, match="hn_sigma"):
+        high_noise_boost(sigma, hn_sigma=0.0, hn_power=1.1, hn_clip=10.0)
+
+
+@pytest.mark.parametrize("ctor,kw", [
+    (ERDMScheduler, dict(window_size=6, sigma_data=1.0)),
+    (RSIScheduler, dict(window_size=6)),
+])
+def test_hn_default_is_bit_identical(ctor, kw):
+    """Default off must be BIT-identical, not merely close: the controls are
+    still training against these weights."""
+    plain, explicit = ctor(**kw), ctor(**kw, hn_sigma=10.0, hn_power=0.0, hn_clip=10.0)
+    t = torch.rand(8)
+    if ctor is ERDMScheduler:
+        a = plain.loss_weight(plain.sigma_schedule(t))
+        b = explicit.loss_weight(explicit.sigma_schedule(t))
+    else:
+        a = plain.loss_weight(plain.local_time(t))
+        b = explicit.loss_weight(explicit.local_time(t))
+    assert torch.equal(a, b)
+
+
+def test_hn_default_leaves_compute_loss_bit_identical():
+    W, C = 3, 3
+    y = torch.randn(1, W + 1, C, 8, 16)
+    model = _TwoHeadStub(C)
+    torch.manual_seed(0)
+    a = RSIScheduler(window_size=W, num_steps=2).compute_loss(model, None, None, y)
+    torch.manual_seed(0)
+    b = RSIScheduler(window_size=W, num_steps=2, hn_sigma=10.0, hn_power=0.0,
+                     hn_clip=10.0).compute_loss(model, None, None, y)
+    assert torch.equal(a, b)
+
+
+def test_hn_boost_is_finite_monotone_and_capped_over_the_full_schedule():
+    """Including RSI's beta-floor blow-up at tau -> 0, where sigma_eff reaches
+    1e3 and an uncapped boost would be 1e6."""
+    e = ERDMScheduler(window_size=6, sigma_data=1.0, **_HN)
+    t = torch.linspace(0.0, 1.0, 257)
+    w_e = e.loss_weight(e.sigma_schedule(t))
+    assert torch.isfinite(w_e).all() and (w_e > 0).all()
+
+    r = RSIScheduler(window_size=6, anchor_lag=6, gamma_0=1.0, gamma_1=0.04,
+                     h1_precond="edm", **_HN_A2L)
+    base = RSIScheduler(window_size=6, anchor_lag=6, gamma_0=1.0, gamma_1=0.04,
+                        h1_precond="edm")
+    tau = r.local_time(t)
+    ratio = r.loss_weight(tau) / base.loss_weight(tau)
+    assert torch.isfinite(ratio).all()
+    assert (ratio >= 1.0 - 1e-6).all() and (ratio <= _HN_A2L["hn_clip"] + 1e-6).all()
+    # monotone in sigma_eff: sort by sigma_eff and check the boost never falls
+    sig = r.sigma_eff(tau).flatten()
+    order = sig.argsort()
+    b = ratio.flatten()[order]
+    assert (b[1:] - b[:-1] >= -1e-5).all()
+
+
+def test_hn_boosts_only_the_back_slot_at_the_a2l_settings():
+    """The A2-L-HN config's whole claim: slots 1-5 untouched, slot 6 ~3.7x --
+    the same achieved back-slot reweighting as A0-HN's 3.9x, so the two new
+    runs stay a controlled pair even though the knob values differ (A2-L's
+    sigma_eff is a different coordinate from ERDM's sigma)."""
+    base = RSIScheduler(window_size=6, anchor_lag=6, gamma_0=1.0, gamma_1=0.04,
+                        h1_precond="edm")
+    hn = RSIScheduler(window_size=6, anchor_lag=6, gamma_0=1.0, gamma_1=0.04,
+                      h1_precond="edm", **_HN_A2L)
+    tau = base.local_time(torch.linspace(0.0, 1.0, 2001)[:-1])
+    w0, w1 = base.loss_weight(tau), hn.loss_weight(tau)
+    per_slot = [float(w1[:, w].mean() / w0[:, w].mean()) for w in range(6)]
+    for w in range(5):
+        # slot 5's sigma_eff tops out at 3.509, a hair above the 3.5 floor, so
+        # its mean boost is 1 + 4e-6 rather than exactly 1 -- the boost is
+        # continuous in sigma_eff by design, not slot-indexed.
+        assert per_slot[w] == pytest.approx(1.0, abs=1e-4), (w, per_slot)
+    assert per_slot[5] == pytest.approx(3.7, rel=0.1), per_slot
+
+
+def test_snr_bump_with_hn_reduces_to_erdm_loss_weight():
+    """The knob must be mirrored: the A1 reduction has to survive it, or the
+    two new rungs are not comparable through the same objective."""
+    kw = dict(window_size=6, sigma_min=0.002, sigma_max=500.0, rho=-10.0,
+              P_mean=2.0, P_std=1.2, **_HN)
+    rsi = RSIScheduler(reduce_to_erdm=True, weighting="snr_bump", delta_std=1.0, **kw)
+    erdm = ERDMScheduler(sigma_data=1.0, **kw)
+    t = torch.rand(8)
+    torch.testing.assert_close(
+        rsi.loss_weight(rsi.local_time(t)),
+        erdm.loss_weight(erdm.sigma_schedule(t)), rtol=1e-5, atol=1e-8)
+
+
+def test_a1_loss_reduces_to_erdm_exactly_with_hn():
+    """As test_a1_loss_reduces_to_erdm_exactly, with the boost on both sides."""
+    b, W, C, H, Wd = 2, 4, 3, 8, 16
+    kw = dict(window_size=W, sigma_min=0.002, sigma_max=500.0, rho=-10.0, **_HN)
+    D = _linear_denoiser(C)
+    erdm = ERDMScheduler(sigma_data=1.0, alpha=0.0, **kw)
+    rsi = RSIScheduler(reduce_to_erdm=True, parameterization="residual",
+                       label_mode="log_sigma_eff", delta_std=1.0, **kw)
+    y = torch.randn(b, W, C, H, Wd)
+    y_ext = torch.cat([torch.randn(b, 1, C, H, Wd), y], dim=1)
+    torch.manual_seed(5)
+    loss_erdm = erdm.compute_loss(_ERDMLinearStub(erdm, D), None, None, y)
+    torch.manual_seed(5)
+    loss_rsi = rsi.compute_loss(_RSILinearStub(D), None, None, y_ext)
+    torch.testing.assert_close(loss_rsi, loss_erdm, rtol=1e-4, atol=0.0)
+
+
+def test_hn_boost_raises_the_high_slot_share_of_the_loss():
+    """End to end through compute_loss: the weighted contribution of the back
+    slot must actually rise, which is the quantity the smoke run gates on."""
+    W, C = 6, 2
+    sched = RSIScheduler(window_size=W, anchor_lag=6, gamma_0=1.0, gamma_1=0.04,
+                         h1_precond="edm")
+    hn = RSIScheduler(window_size=W, anchor_lag=6, gamma_0=1.0, gamma_1=0.04,
+                      h1_precond="edm", **_HN_A2L)
+    y = torch.randn(1, 2 * W, C, 8, 16)
+    model = _TwoHeadStub(C)
+    torch.manual_seed(3)
+    a = sched.compute_loss(model, None, None, y)
+    torch.manual_seed(3)
+    b = hn.compute_loss(model, None, None, y)
+    assert b >= a, "the boost is >= 1 everywhere, so the loss cannot fall"
+
+
+@pytest.mark.parametrize("ctor", [ERDMScheduler, RSIScheduler])
+def test_hn_power_without_hn_sigma_raises(ctor):
+    with pytest.raises(ValueError, match="hn_sigma"):
+        ctor(window_size=3, hn_power=1.1)
+
+
+def test_hn_requires_snr_bump_weighting():
+    with pytest.raises(ValueError, match="snr_bump"):
+        RSIScheduler(window_size=3, weighting="uniform", **_HN)
+    # ...and is accepted with the default weighting
+    RSIScheduler(window_size=3, **_HN)
+
+
+def test_loss_diag_logs_the_per_slot_staircase(monkeypatch, caplog):
+    """RSI_LOSS_DIAG=<N>: the second line carries sigma_eff, the loss weight
+    and the total weighted loss per slot, and the values must match
+    loss_weight(tau) -- it is the measurement the hn_* knob is picked from."""
+    import logging
+
+    import physicsnemo.experimental.diffusion.rsi as rsi_mod
+
+    W, C = 6, 2
+    sched = RSIScheduler(window_size=W, num_steps=2, anchor_lag=6,
+                         gamma_0=1.0, gamma_1=0.04, h1_precond="edm")
+    y = torch.randn(1, 2 * W, C, 8, 16)
+    model = _TwoHeadStub(C)
+    with caplog.at_level(logging.INFO, logger=rsi_mod.__name__):
+        sched.compute_loss(model, None, None, y)
+        assert not [r for r in caplog.records if "loss diag" in r.getMessage()]
+        monkeypatch.setattr(rsi_mod, "_LOSS_DIAG_EVERY", 1)
+        monkeypatch.setattr(rsi_mod, "_LOSS_DIAG_CALLS", 0)
+        sched.compute_loss(model, None, None, y)
+    lines = [r.getMessage() for r in caplog.records if "loss diag" in r.getMessage()]
+    stair = [ln for ln in lines if "sigma_eff/slot=" in ln]
+    assert len(stair) == 1, lines
+    assert "weight/slot=" in stair[0] and "weighted/slot=" in stair[0]
+    # the logged weights are loss_weight(tau) averaged over the batch: the
+    # staircase is deterministic given t, so the ORDER must be monotone
+    # decreasing in sigma_eff for the shipped snr_bump profile
+    weights = [float(v) for v in
+               stair[0].split("weight/slot=[")[1].split("]")[0].replace("'", "").split(", ")]
+    assert len(weights) == W
+    assert weights[-1] < weights[0], weights      # back slot carries least

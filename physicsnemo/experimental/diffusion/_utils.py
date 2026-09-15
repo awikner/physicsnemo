@@ -12,6 +12,46 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+
+def high_noise_boost(sigma, *, hn_sigma, hn_power, hn_clip):
+    """Multiplier on a rolling scheduler's loss emphasis ABOVE ``hn_sigma``.
+
+        clamp((sigma / hn_sigma) ** hn_power, 1, hn_clip)
+
+    exactly 1 below ``hn_sigma``, so the informative mid-range is untouched to
+    the last bit, and capped so the tail cannot dominate.
+
+    WHY (measured 2026-09-15). ERDM/RSI hand every training instance a FIXED
+    staircase of noise levels (one global t ~ U(0,1), slot w at
+    tau_w = (W-w+t)/W) and fold EDM's log-normal sampling density into the loss
+    as a weight instead. The induced density of u = ln(sigma) inside a slot is
+    |dtau/du| ~ sigma^(1/rho), so at rho = -10 the staircase spends
+    sigma^(-1.1) of EDM-equivalent attention per unit ln(sigma): 21x down at
+    sigma 118, 104x down at sigma 500 relative to the peak at sigma = e^P_mean.
+    With the shipped weight the top window slot (sigma 16-500) -- the one every
+    free-run frame is generated from -- carries under 2% of the loss. At global
+    batch 40 (a tenth of upstream's optimizer updates per epoch) that slot is
+    learned so slowly that an in-harness ERDM matched upstream's TOTAL loss at
+    epoch 17 (243.9 vs 242.0) while its day-10 rollout RMSE was 2.3x worse.
+    ``hn_power = 1 - 1/rho`` (1.1) is the exponent that restores EDM-equivalent
+    attention; the clip says "restore at most hn_clip-fold".
+
+    Returns ``None`` when the knob is off (``hn_power == 0``), so callers skip
+    the multiply entirely and the default path stays bit-identical.
+    """
+    if not hn_power:
+        return None
+    if hn_sigma <= 0.0:
+        raise ValueError(
+            f"high_noise_boost needs hn_sigma > 0, got {hn_sigma}: an unfloored "
+            "power law would reweight the whole range, not the high-noise band"
+        )
+    r = (sigma.float() / float(hn_sigma)).clamp(min=1.0) ** float(hn_power)
+    if hn_clip > 0.0:
+        r = r.clamp(max=float(hn_clip))
+    return r.to(sigma.dtype)
+
+
 def get_log_uniform_t(t_final = 0.999, scale=1.3, n_t = 10, device = "cpu"):
     t_s = []
     t_0 = 0.0
