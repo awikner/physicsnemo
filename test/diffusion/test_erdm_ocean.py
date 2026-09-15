@@ -394,3 +394,29 @@ def test_compute_loss_gradients_reach_the_model_through_the_ocean_block():
     assert model.conv.weight.grad is not None
     assert torch.isfinite(model.conv.weight.grad).all()
     assert model.conv.weight.grad.abs().sum() > 0
+
+
+def test_loss_diag_logs_per_slot_terms(monkeypatch, caplog):
+    """ERDM_LOSS_DIAG=<N>: every N calls the weighted loss, raw error and
+    sigma per window slot are logged; off by default (no log lines)."""
+    import logging
+
+    import physicsnemo.experimental.diffusion.erdm as erdm_mod
+
+    s = ERDMScheduler(window_size=3, num_steps=2, noise="gaussian")
+
+    class _Stub(torch.nn.Module):
+        def forward(self, x, c_noise, c_grid, c_scalar):
+            return torch.zeros_like(x)
+
+    y = torch.randn(2, 3, 4, 8, 16)
+    with caplog.at_level(logging.INFO, logger=erdm_mod.__name__):
+        s.compute_loss(_Stub(), None, None, y)
+        assert not [r for r in caplog.records if "erdm loss diag" in r.getMessage()]
+        monkeypatch.setattr(erdm_mod, "_LOSS_DIAG_EVERY", 1)
+        monkeypatch.setattr(erdm_mod, "_LOSS_DIAG_CALLS", 0)
+        s.compute_loss(_Stub(), None, None, y)
+    lines = [r.getMessage() for r in caplog.records if "erdm loss diag" in r.getMessage()]
+    assert len(lines) == 1
+    assert "weighted/slot=" in lines[0] and "sigma/slot=" in lines[0]
+    assert lines[0].count("e+") + lines[0].count("e-") >= 9      # 3 slots x 3 lists

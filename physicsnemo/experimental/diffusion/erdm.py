@@ -8,11 +8,16 @@
 
 import logging
 import math
+import os
 
 import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
+
+# Per-slot loss decomposition cadence; 0 (default) disables. See compute_loss.
+_LOSS_DIAG_EVERY = int(os.environ.get("ERDM_LOSS_DIAG", "0") or 0)
+_LOSS_DIAG_CALLS = 0
 
 # Elucidated Rolling Diffusion Model (ERDM), https://arxiv.org/abs/2506.20024
 #
@@ -410,6 +415,26 @@ class ERDMScheduler(nn.Module):
         else:
             per_frame_mse = err2.sum(dim=[2, 3, 4])         # (b, W)
             ocean_mse = None
+
+        # Diagnostic decomposition, off unless ERDM_LOSS_DIAG=<N> is exported:
+        # every N calls, log the weighted loss, the raw squared error and the
+        # noise level PER WINDOW SLOT (batch means). On the rolling staircase
+        # the slot index is the noise-level bin -- slot W is the sigma_max end
+        # that free-run generation starts from and slot 1 the sigma_min end --
+        # so this is the per-sigma view the aggregate loss hides (2026-09-15:
+        # A0 matched upstream's total loss at epoch 17 while its day-10 skill
+        # was 2.3x worse).
+        if _LOSS_DIAG_EVERY > 0:
+            global _LOSS_DIAG_CALLS
+            _LOSS_DIAG_CALLS += 1
+            if _LOSS_DIAG_CALLS % _LOSS_DIAG_EVERY == 0:
+                with torch.no_grad():
+                    logger.info(
+                        "erdm loss diag: weighted/slot=%s mse/slot=%s sigma/slot=%s",
+                        ["%.3e" % v for v in (weight * per_frame_mse).mean(0).tolist()],
+                        ["%.3e" % v for v in per_frame_mse.mean(0).tolist()],
+                        ["%.3e" % v for v in sigma.mean(0).tolist()],
+                    )
 
         # (1/W) sum_w weight_w * ||.||^2, averaged over the batch.
         loss = (weight * per_frame_mse).mean()
