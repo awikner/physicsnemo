@@ -24,7 +24,8 @@ from omegaconf import OmegaConf
 _AI_ROSSBY_DIR = Path(__file__).resolve().parents[2].parent / "examples" / "weather" / "ai_rossby"
 sys.path.insert(0, str(_AI_ROSSBY_DIR))
 
-from train_loop import make_scheduler  # noqa: E402
+from train import _flatten_optimizer_cfg  # noqa: E402
+from train_loop import _make_muon_optimizer, make_scheduler  # noqa: E402
 from physicsnemo.experimental.models.amip_si.wrappers import _muon_groups  # noqa: E402
 
 LR, SPE = 5.0e-4, 100   # peak lr; a small stand-in for the real 1315 steps/epoch
@@ -66,6 +67,51 @@ def test_package_optimizer_accepts_the_group():
                           muon_momentum=0.85)
     opt = muon.MuonWithAuxAdam(groups)
     assert next(g for g in opt.param_groups if g["use_muon"])["momentum"] == pytest.approx(0.85)
+
+
+def test_the_recipe_config_forwards_muon_momentum():
+    """The MIDDLE link of the pipe. `_muon_groups` (above) and
+    `_make_muon_optimizer` both handled the key correctly, and both were
+    tested -- but `_flatten_optimizer_cfg` silently dropped it between them,
+    so every `++training.optimizer.muon_momentum=...` from a job script was a
+    no-op from the batch-40 campaign's start until 2026-09-15."""
+    base = {"type": "Muon", "lr": LR, "weight_decay": 0.01}
+    assert "muon_momentum" not in _flatten_optimizer_cfg(OmegaConf.create(base))
+    flat = _flatten_optimizer_cfg(OmegaConf.create({**base, "muon_momentum": 0.85}))
+    assert flat.muon_momentum == pytest.approx(0.85)
+    # the multiplier next to it still works (guards a copy-paste in the block)
+    flat = _flatten_optimizer_cfg(
+        OmegaConf.create({**base, "muon_momentum": 0.85, "muon_lr_multiplier": 10}))
+    assert flat.muon_momentum == pytest.approx(0.85)
+    assert flat.muon_lr_multiplier == pytest.approx(10.0)
+
+
+def test_momentum_reaches_muon_param_groups_end_to_end(monkeypatch):
+    """config dict -> _flatten_optimizer_cfg -> _make_muon_optimizer ->
+    model.muon_param_groups(**kwargs). Stubbed at the last hop so the test
+    needs neither the `muon` package nor a process group."""
+    seen = {}
+
+    class _StubModel:
+        def muon_param_groups(self, **kw):
+            seen.update(kw)
+            mw, aw = _params()
+            return _muon_groups(mw, aw, adam_betas=(0.9, 0.95), **kw)
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setitem(
+        sys.modules, "muon",
+        type(sys)("muon"),
+    )
+    sys.modules["muon"].MuonWithAuxAdam = lambda groups: groups   # identity
+
+    cfg = _flatten_optimizer_cfg(OmegaConf.create(
+        {"type": "Muon", "lr": LR, "weight_decay": 0.01,
+         "muon_lr_multiplier": 10, "muon_momentum": 0.85}))
+    groups = _make_muon_optimizer(_StubModel(), cfg)
+    assert seen["muon_momentum"] == pytest.approx(0.85)
+    assert seen["muon_lr_multiplier"] == pytest.approx(10.0)
+    assert next(g for g in groups if g["use_muon"])["momentum"] == pytest.approx(0.85)
 
 
 # ---------------------------------------------------------------------------

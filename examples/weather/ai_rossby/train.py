@@ -463,6 +463,17 @@ def _flatten_optimizer_cfg(opt_cfg: DictConfig) -> DictConfig:
     # the Muon-governed trunk.
     if opt_cfg.get("muon_lr_multiplier", None) is not None:
         flat["muon_lr_multiplier"] = float(opt_cfg.muon_lr_multiplier)
+    # Muon's momentum. The package default is 0.95 (a ~20-update average,
+    # right for upstream's batch 4); the bundle recipe asks for 0.85 because
+    # global batch 40 sits ~7x past the measured gradient-noise scale, so the
+    # long average only adds lag. DROPPED HERE until 2026-09-15: every
+    # `++training.optimizer.muon_momentum=...` on the batch-40 chains was a
+    # silent no-op and those runs all trained at the 0.95 default. The far end
+    # of the pipe (`train_loop._make_muon_optimizer` -> `wrappers._muon_groups`)
+    # was already correct and unit-tested, which is exactly why the gap
+    # survived: both ends passed, the middle link was missing.
+    if opt_cfg.get("muon_momentum", None) is not None:
+        flat["muon_momentum"] = float(opt_cfg.muon_momentum)
     if opt_cfg.get("betas", None) is not None:
         flat["betas"] = list(opt_cfg.get("betas"))
     return OmegaConf.create(flat)

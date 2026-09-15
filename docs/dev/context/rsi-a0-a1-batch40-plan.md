@@ -28,6 +28,15 @@ Read from `erdm_sstpred_raw/model_epoch=24.ckpt` (`hyper_parameters`,
 | backbone | DiT dim 1024, 16 heads / 8 temporal, 20 blocks, scalar_dim 2, c_grid_dim 5, downsample 4, cross layers 4 / heads 8, input_embed budget (256 / 128, column encoder, d_level 16, conv2 boundary encoder, pool stats, static bias, source norm), global_cond, output_head mix / 2 experts / flat / d_level 16 | `model/amip_erdm_sst_pred.yaml` (identical; the translator mapped all 371 tensors one for one) |
 | contract | 153 channels: 6 surface, 5 x 26 upper air, 15 diagnostics, 2 predicted ocean channels (SST and sea ice, monthly-interp); forcings DSWRF lead, SST, sea ice, plus 2 constants; no SST-anomaly channel, no scalar forcing | `amip_erdm_sst_pred.yaml` + the dataset overrides every RSI run used (`sst_anomaly_channel none`, `scalar_forcing none`, normalized + spatially-smoothed constants) |
 | data | 1979-2014 (train_year_end 2015 exclusive), 6-hourly store, 24 h stride, window_train, 13,143 steps per epoch at batch 4 | `amip_dailyavg_coarse_train7914` + boundary store, 1,315 steps per epoch at batch 40 |
+> **Correction 2026-09-15 (Muon momentum).** `examples/weather/ai_rossby/train.py::_flatten_optimizer_cfg`
+> forwarded `muon_lr_multiplier` and `betas` but DROPPED `muon_momentum`, so the
+> `++training.optimizer.muon_momentum=...` override in every batch-40 job script
+> never reached the optimizer. All batch-40 chains (`prod24_b40`,
+> `prod24_bundle_b40`, the Phase-5 fine-tunes, A0, A2-L) therefore trained at the
+> package default **0.95**, including the ones labelled `bundle` (which intended
+> 0.85). The plumbing is fixed and `ABL_MOMENTUM` now defaults to 0.95 for both
+> recipes, so the fix is a no-op for the in-flight chains.
+
 | optimizer | Muon with aux AdamW: Muon group lr 5e-4 (10 x base), AdamW group lr 5e-5, betas (0.9, 0.95), eps 1e-10, weight decay 0.01 on both, Muon momentum 0.95 | `training.optimizer` Muon, `muon_lr_multiplier 10`, `weight_decay 0.01`; momentum via `muon_momentum` (wrapper default 0.95) |
 | schedule | StepLR, gamma 0.95 per epoch (lr at the epoch-24 checkpoint 1.39e-4 Muon / 1.39e-5 AdamW) | `scheduler.type StepLR sl_gamma 0.95` (what `checkpoints_prod24_b40` used) |
 | precision | 32-true (fp32 storage, TF32 matmuls) | `training.amp none` + `matmul_precision high` |
