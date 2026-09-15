@@ -141,7 +141,7 @@ cfg `erdm` for A0, `a2l` for A2-L, `RSI_TRACE_PATH` on): one-year at epochs
 bias, spread, ten-day validation. A2-L predictions: anchor/emitted amplitude
 ratio 1.0 from roll 1 (by construction), no fast-wind onset, day-1 skill near
 ERDM with the slow channels ahead. A0 is checked against the upstream
-ep17/ep23/ep24 evaluations on disk (`$R/eval_bias5yr_e17..e24`) at epochs 12
+ep17/ep23/ep24 evaluations on disk (`$R/eval_erdm_bias5yr_e17..e24`; the `eval_bias5yr_e17..e24` directories are the lag-1 RSI epochs) at epochs 12
 and 24 as in [rsi-a0-a1-batch40-plan](rsi-a0-a1-batch40-plan.md) section 6.
 
 ## 5. Gotchas met

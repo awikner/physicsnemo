@@ -159,7 +159,7 @@ batch size:
 | epochs | 24, two per 3 h link, 12 links each plus one spare blacklist-aware link |
 
 Matching A0 against upstream. Upstream checkpoints exist for epochs 17-24 and
-their five-year evaluations are on disk (`$R/eval_bias5yr_e17..e24`, plateau
+their five-year evaluations are on disk (`$R/eval_erdm_bias5yr_e17..e24`, plateau
 63-67, alpha 0). At epoch 12 there is no upstream checkpoint, so the check is
 (a) the 10-day validation curve of A0 against the upstream epoch-17 and
 epoch-20 validation numbers we have (2.28 / 3.58 / 19.5 / 81 surface RMSE at
