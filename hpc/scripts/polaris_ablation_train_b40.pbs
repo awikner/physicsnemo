@@ -44,6 +44,11 @@
 #   ABL_MAX_ITERS cap the stage at this many batches per epoch (default 0 =
 #                off): a smoke run then reaches the epoch-end checkpoint and
 #                the in-training rollout validation within its 30 minutes
+#   ABL_EXTRA    extra Hydra overrides, "|"-separated (qsub -v cannot carry
+#                commas or spaces), e.g. to score an UPSTREAM checkpoint with
+#                the in-training validator: point ABL_CKPT at a dir holding
+#                RollingDiTWrapper.0.<N>.mdlus, ABL_TARGET=N+1 ABL_MAX_ITERS=1
+#                ABL_EXTRA="++training.optimizer.lr=1e-12|++training.ema.enabled=false"
 #   ABL_RETRY    internal, counts preflight/blacklist resubmissions
 #
 # Exit codes: 0 done/nothing to do, 1 config, 3 bad allocation (resubmitted
@@ -74,6 +79,7 @@ SEED=${ABL_SEED:-0}
 VAL_EVERY=${ABL_VAL_EVERY:-1}
 RECIPE=${ABL_RECIPE:-upstream}
 MAX_ITERS=${ABL_MAX_ITERS:-0}
+EXTRA_RAW=${ABL_EXTRA:-}
 EPOCHS_PER_LINK=2
 EXPECT_NODES=${ABL_NODES:-10}
 case "$ABL" in
@@ -132,7 +138,7 @@ except Exception as e:
 if blacklisted || ! preflight; then
   RETRY=${ABL_RETRY:-0}
   if [ "$RETRY" -lt 4 ]; then
-    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_EXTRA=$EXTRA_RAW,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
     echo "bad GPU / blacklisted host in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
   exit 3
@@ -153,7 +159,7 @@ holder_alive () {   # $1 = PBS job id; true while PBS lists it in a non-finished
   st=$(qstat -f "$1" 2>/dev/null | awk '/job_state/ {print $3}')
   [ -n "$st" ] && [ "$st" != F ] && [ "$st" != X ]
 }
-RESUB_VARS="ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_RETRY=${ABL_RETRY:-0}"
+RESUB_VARS="ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_EXTRA=$EXTRA_RAW,ABL_RETRY=${ABL_RETRY:-0}"
 if [ -f "$LOCK" ]; then
   HOLDER=$(awk '{print $1}' "$LOCK")
   if [ -n "$HOLDER" ] && [ "$HOLDER" != "$J" ] && holder_alive "$HOLDER"; then
@@ -182,6 +188,7 @@ case "$RECIPE" in
   *) echo "FATAL: ABL_RECIPE must be upstream or bundle, got '$RECIPE'"; exit 1 ;;
 esac
 CAP=(); [ "$MAX_ITERS" -gt 0 ] && CAP=("++training.stages.0.max_iterations=$MAX_ITERS")
+EXTRA=(); [ -n "$EXTRA_RAW" ] && { IFS="|" read -r -a EXTRA <<< "$EXTRA_RAW"; echo "extra overrides: ${EXTRA[*]}"; }
 timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     --cpu-bind depth -d 8 \
     bash hpc/scripts/polaris_rank_env.sh \
@@ -208,7 +215,7 @@ timeout 10200 mpiexec -n "$NRANKS" --ppn "$PPN" --hostfile "$PBS_NODEFILE" \
     ++training.optimizer.muon_lr_multiplier=10 \
     "++training.optimizer.muon_momentum=$MOMENTUM" \
     ++training.ema.decay=0.99 \
-    "${SCHED[@]}" "${CAP[@]}" \
+    "${SCHED[@]}" "${CAP[@]}" "${EXTRA[@]}" \
     "++training.max_epochs=$NEPOCH" "++training.stages.0.num_epochs=$NEPOCH" \
     "++validation.every_n_epochs=$VAL_EVERY" \
     "++validation.rollout.climatology.surface_path=$AI_ROSSBY_DATA/norm_stats/val_clim_coarse/climatology_surface.pt" \
