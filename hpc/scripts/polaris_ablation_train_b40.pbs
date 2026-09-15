@@ -12,6 +12,12 @@
 #            ERDM_sst_pred scheduler) on model/amip_erdm_sst_pred (single head)
 #   ABL=a1   RSI in the exact ERDM reduction (loss/rsi_a1.yaml) on
 #            model/amip_rsi_sst_pred (two heads, H1 inert)
+#   ABL=a0hn  A0 plus the high-noise loss boost (loss/erdm_v2_hn.yaml): the
+#            corrected member of the 2026-09-15 pair. See that config for the
+#            measurement -- A0 matched upstream's TOTAL loss at epoch 17 while
+#            its day-10 RMSE was 2.3x worse, the deficit confined to the two
+#            highest-sigma window slots, which carry under 30% of the weight.
+#   ABL=a2lhn A2-L plus the same boost in sigma_eff units (loss/rsi_a2l_hn.yaml).
 #   ABL=a2l  RSI with the lag-W sample anchor (loss/rsi_a2l.yaml, proposal
 #            v0.2: anchor_lag 6, state head + EDM readout, W-step noise
 #            scales sigma_c_sstpred153_lag6.pt) on model/amip_rsi_sst_pred.
@@ -34,13 +40,31 @@
 # 20 levels, two epochs per 3 h link; every link resumes from the last
 # checkpoint pair and exits when the target epoch exists. Env knobs:
 #
-#   ABL          a0 | a1 | a2l (required)
+#   ABL          a0 | a0hn | a1 | a2l | a2lhn (required)
 #   ABL_RECIPE   upstream (default) | bundle
 #   ABL_TARGET   last epoch (default 24)
 #   ABL_CKPT     checkpoint dir (default checkpoints_${ABL}_sstpred_b40)
 #   ABL_SEED     training seed (default 0, the A2 bundle run's)
 #   ABL_VAL_EVERY validation cadence in epochs (default 1, as upstream)
 #   ABL_NODES    expected node count (default 10; 1 for a debug smoke run)
+#   ABL_CHAIN    remaining links to submit AFTER this one (default 0). A link
+#                with ABL_CHAIN=N submits ONE successor (afterany on itself,
+#                ABL_CHAIN=N-1) once it owns the lock, so a run occupies at
+#                most one queued slot instead of N -- the `small` queue caps a
+#                user at ~12 queued+held jobs, which two 12-link chains plus
+#                the controls would exceed. Submit a whole run with
+#                `ABL_CHAIN=11` on a single qsub.
+#   ABL_LOSS_DIAG per-slot loss decomposition every N batches (default 0 =
+#                off): exports ERDM_LOSS_DIAG / RSI_LOSS_DIAG, which log
+#                sigma (or sigma_eff), the loss weight and the weighted loss
+#                per window slot. This is what the hn_* values are tuned on.
+#   ABL_MOMENTUM Muon momentum (default 0.95). Until 2026-09-15 this knob
+#                never reached the optimizer (train.py::_flatten_optimizer_cfg
+#                dropped it), so a0/a1/a2l at BOTH recipes trained at the 0.95
+#                package default -- the `bundle` label did not imply 0.85. The
+#                default here is therefore 0.95 for both recipes, so fixing the
+#                plumbing changes nothing for the in-flight chains; pass 0.85
+#                explicitly to get the bundle recipe's intended value.
 #   ABL_MAX_ITERS cap the stage at this many batches per epoch (default 0 =
 #                off): a smoke run then reaches the epoch-end checkpoint and
 #                the in-training rollout validation within its 30 minutes
@@ -79,17 +103,25 @@ SEED=${ABL_SEED:-0}
 VAL_EVERY=${ABL_VAL_EVERY:-1}
 RECIPE=${ABL_RECIPE:-upstream}
 MAX_ITERS=${ABL_MAX_ITERS:-0}
+MOMENTUM=${ABL_MOMENTUM:-0.95}
+CHAIN=${ABL_CHAIN:-0}
+LOSS_DIAG=${ABL_LOSS_DIAG:-0}
+export ERDM_LOSS_DIAG=$LOSS_DIAG   # read at import by erdm.py / rsi.py
+export RSI_LOSS_DIAG=$LOSS_DIAG
 EXTRA_RAW=${ABL_EXTRA:-}
 EPOCHS_PER_LINK=2
 EXPECT_NODES=${ABL_NODES:-10}
 case "$ABL" in
-  a0)  MODEL=amip_erdm_sst_pred; LOSS=erdm_v2; RUN=erdm_sstpred_a0_b40 ;;
-  a1)  MODEL=amip_rsi_sst_pred;  LOSS=rsi_a1;  RUN=rsi_sstpred_a1_b40 ;;
-  a2l) MODEL=amip_rsi_sst_pred;  LOSS=rsi_a2l; RUN=rsi_sstpred_a2l_b40
-       if [ ! -f "$AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153_lag6.pt" ]; then
-         echo "FATAL: a2l needs $AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153_lag6.pt (make_rsi_delta_scales.py --lag 6 --contract sst_pred)"; exit 1
-       fi ;;
-  *) echo "FATAL: ABL must be a0, a1 or a2l, got '$ABL'"; exit 1 ;;
+  a0)    MODEL=amip_erdm_sst_pred; LOSS=erdm_v2;    RUN=erdm_sstpred_a0_b40 ;;
+  a0hn)  MODEL=amip_erdm_sst_pred; LOSS=erdm_v2_hn; RUN=erdm_sstpred_a0hn_b40 ;;
+  a1)    MODEL=amip_rsi_sst_pred;  LOSS=rsi_a1;     RUN=rsi_sstpred_a1_b40 ;;
+  a2l|a2lhn)
+         MODEL=amip_rsi_sst_pred;  RUN=rsi_sstpred_${ABL}_b40
+         if [ "$ABL" = a2lhn ]; then LOSS=rsi_a2l_hn; else LOSS=rsi_a2l; fi
+         if [ ! -f "$AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153_lag6.pt" ]; then
+           echo "FATAL: $ABL needs $AI_ROSSBY_DATA/norm_stats/sigma_c_sstpred153_lag6.pt (make_rsi_delta_scales.py --lag 6 --contract sst_pred)"; exit 1
+         fi ;;
+  *) echo "FATAL: ABL must be a0, a0hn, a1, a2l or a2lhn, got '$ABL'"; exit 1 ;;
 esac
 mkdir -p "$CKPT"
 GC_LEVELS=$(cat "$CKPT/grad_checkpoint_levels" 2>/dev/null || echo 14)
@@ -138,7 +170,7 @@ except Exception as e:
 if blacklisted || ! preflight; then
   RETRY=${ABL_RETRY:-0}
   if [ "$RETRY" -lt 4 ]; then
-    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_EXTRA=$EXTRA_RAW,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
+    NEW=$(qsub -N "$PBS_JOBNAME" -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_MOMENTUM=$MOMENTUM,ABL_CHAIN=$CHAIN,ABL_LOSS_DIAG=$LOSS_DIAG,ABL_EXTRA=$EXTRA_RAW,ABL_RETRY=$((RETRY + 1))" "$R/polaris_ablation_train_b40.pbs" 2>&1)
     echo "bad GPU / blacklisted host in the allocation -- resubmitted as $NEW (retry $((RETRY + 1)))"
   fi
   exit 3
@@ -159,7 +191,7 @@ holder_alive () {   # $1 = PBS job id; true while PBS lists it in a non-finished
   st=$(qstat -f "$1" 2>/dev/null | awk '/job_state/ {print $3}')
   [ -n "$st" ] && [ "$st" != F ] && [ "$st" != X ]
 }
-RESUB_VARS="ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_EXTRA=$EXTRA_RAW,ABL_RETRY=${ABL_RETRY:-0}"
+RESUB_VARS="ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_MOMENTUM=$MOMENTUM,ABL_CHAIN=$CHAIN,ABL_LOSS_DIAG=$LOSS_DIAG,ABL_EXTRA=$EXTRA_RAW,ABL_RETRY=${ABL_RETRY:-0}"
 if [ -f "$LOCK" ]; then
   HOLDER=$(awk '{print $1}' "$LOCK")
   if [ -n "$HOLDER" ] && [ "$HOLDER" != "$J" ] && holder_alive "$HOLDER"; then
@@ -177,14 +209,26 @@ fi
 echo "$J $(date -u +%FT%TZ) $(hostname)" > "$LOCK"
 trap 'rm -f "$LOCK"' EXIT
 
+# --- self-feeding chain. Submitted only once this link OWNS the lock, and
+# --- with afterany on itself, so a run never has more than one queued job (the
+# --- `small` queue caps queued+held per user, and the controls are using those
+# --- slots). A deferred or bad-allocation link resubmits with the same CHAIN
+# --- count via RESUB_VARS above, so the successor count is preserved.
+if [ "$CHAIN" -gt 0 ]; then
+  NEXT=$(qsub -N "$PBS_JOBNAME" -W depend=afterany:"$J" \
+    -v "ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_MOMENTUM=$MOMENTUM,ABL_CHAIN=$((CHAIN - 1)),ABL_LOSS_DIAG=$LOSS_DIAG,ABL_EXTRA=$EXTRA_RAW" \
+    "$R/polaris_ablation_train_b40.pbs" 2>&1)
+  echo "chain: submitted successor $NEXT ($((CHAIN - 1)) link(s) to follow it)"
+fi
+
 LR=5.0e-4        # LINEAR scaling: 5e-5 * 10 (safe only with the warmup)
 case "$RECIPE" in
   upstream) SCHED=(++training.stages.0.scheduler.type=StepLR ++training.stages.0.scheduler.sl_gamma=0.95
-                   ++training.stages.0.scheduler.num_warmup_epochs=1); MOMENTUM=0.95 ;;
+                   ++training.stages.0.scheduler.num_warmup_epochs=1) ;;
   bundle)   SCHED=(++training.stages.0.scheduler.type=LinearWarmupCosineAnnealingLR
                    ++training.stages.0.scheduler.num_warmup_epochs=1
                    "++training.stages.0.scheduler.cosine_total_epochs=$TARGET"
-                   ++training.stages.0.scheduler.eta_min=5.0e-5); MOMENTUM=0.85 ;;
+                   ++training.stages.0.scheduler.eta_min=5.0e-5) ;;
   *) echo "FATAL: ABL_RECIPE must be upstream or bundle, got '$RECIPE'"; exit 1 ;;
 esac
 CAP=(); [ "$MAX_ITERS" -gt 0 ] && CAP=("++training.stages.0.max_iterations=$MAX_ITERS")
@@ -229,7 +273,9 @@ grep -am1 "world_size=" "$L"; grep -am1 "steps_per_epoch=" "$L"; grep -am1 "fast
 grep -am1 "Scheduler initialized" "$L" | cut -c1-300
 grep -am1 "anchor_lag=" "$L" | grep -o "anchor_lag=[^,]*, anchor_frames=[^,]*, history_frames=[^)]*)" | head -1
 grep -a -E "epoch [0-9]+ batch" "$L" | head -2; grep -a -E "epoch [0-9]+ batch" "$L" | tail -2
-grep -a "valid:" "$L" | tail -2 | cut -c1-400
+grep -a "valid:" "$L" | tail -2 | cut -c1-1200
+grep -a "valid-cal:" "$L" | tail -1 | cut -c1-1200
+grep -a "loss diag" "$L" | tail -4 | cut -c1-400
 grep -a -E "Error|Traceback|SIGSEGV|SIGABRT|out of memory|non-finite" "$L" | head -6
 NOW=$(ls "$CKPT"/RollingDiTWrapper.0.*.mdlus 2>/dev/null | sed -E 's/.*\.0\.([0-9]+)\.mdlus$/\1/' | sort -n | tail -1)
 echo "=== epochs complete: ${NOW:-0} / ${TARGET} ==="

@@ -18,6 +18,7 @@ import warnings
 from pathlib import Path
 
 import pytest
+import torch
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
@@ -38,6 +39,9 @@ _MIRRORED = (
 _PAIRS = [
     ("rsi_a1", "rsi_a1_sstpred"),
     ("rsi_a2l", "rsi_a2l_sstpred"),
+    # A2-L-HN trains against a reweighted loss but is SAMPLED by the same
+    # process, so it shares A2-L's sampler: the weighting is training-only.
+    ("rsi_a2l_hn", "rsi_a2l_sstpred"),
 ]
 
 
@@ -91,3 +95,71 @@ def test_eval_sampler_mirrors_its_training_scheduler(loss_name, sampler_name):
     a, b = _loss(loss_name), _sampler(sampler_name)
     for k in _MIRRORED:
         assert getattr(a, k) == getattr(b, k), (k, getattr(a, k), getattr(b, k))
+
+
+# ---------------------------------------------------------------------------
+# The corrected batch-40 pair (2026-09-15): the high-noise loss boost.
+# ---------------------------------------------------------------------------
+
+_HN_ERDM = dict(hn_sigma=10.0, hn_power=1.1, hn_clip=10.0)
+_HN_RSI = dict(hn_sigma=3.5, hn_power=2.0, hn_clip=10.0)
+
+
+def test_a0hn_is_erdm_v2_plus_the_boost():
+    """erdm_v2_hn must differ from erdm_v2 in the three hn_* keys and NOTHING
+    else -- it is the corrected arm of a controlled pair."""
+    base, hn = _loss("erdm_v2"), _loss("erdm_v2_hn")
+    for k, v in _HN_ERDM.items():
+        assert getattr(hn, k) == pytest.approx(v), k
+        assert getattr(base, k) == 0.0, f"the control must carry no boost ({k})"
+    for k in ("W", "num_steps", "sigma_min", "sigma_max", "rho", "sigma_data",
+              "P_mean", "P_std", "solver", "S_churn", "S_noise", "S_tmin",
+              "S_tmax", "alpha", "ocean_loss_weight"):
+        assert getattr(hn, k) == getattr(base, k), k
+
+
+def test_a2lhn_is_rsi_a2l_plus_the_boost():
+    base, hn = _loss("rsi_a2l"), _loss("rsi_a2l_hn")
+    for k, v in _HN_RSI.items():
+        assert getattr(hn, k) == pytest.approx(v), k
+        assert getattr(base, k) == 0.0, f"the control must carry no boost ({k})"
+    for k in _MIRRORED + ("weighting", "P_mean", "P_std", "w_1", "w_z",
+                          "pushforward_rolls", "anchor_noise", "eps_scale"):
+        assert getattr(hn, k) == getattr(base, k), k
+
+
+def test_the_boost_actually_reweights_the_back_slot_in_both_configs():
+    """The pair's claim: both configs multiply the TOP slot's mean loss weight
+    by ~3 and leave the lower slots untouched, so a0hn vs a2lhn is a
+    controlled pair even though the knob values live in different coordinates
+    (ERDM sigma vs RSI sigma_eff).
+
+    This is the mean WEIGHT ratio over a uniform-t grid -- directly computable
+    from the configs. The change in each slot's share of the realized weighted
+    LOSS also depends on how the model's error varies with sigma inside the
+    slot, so it is measured by the frozen-weight smoke run (ERDM_LOSS_DIAG=1)
+    rather than asserted here; projected ~19% for slot 6 against 5.6% now."""
+    for name, base_name, expect in (("erdm_v2_hn", "erdm_v2", 3.05),
+                                    ("rsi_a2l_hn", "rsi_a2l", 3.71)):
+        base, hn = _loss(base_name), _loss(name)
+        t = torch.linspace(0.0, 1.0, 2001)[:-1]
+        if name.startswith("erdm"):
+            w0 = base.loss_weight(base.sigma_schedule(t))
+            w1 = hn.loss_weight(hn.sigma_schedule(t))
+        else:
+            tau = base.local_time(t)
+            w0, w1 = base.loss_weight(tau), hn.loss_weight(tau)
+        per_slot = [float(w1[:, w].mean() / w0[:, w].mean()) for w in range(6)]
+        assert per_slot[5] == pytest.approx(expect, rel=0.05), (name, per_slot)
+        for w in range(4):
+            assert per_slot[w] == pytest.approx(1.0, abs=1e-3), (name, w, per_slot)
+
+
+def test_hn_is_training_only_and_absent_from_the_samplers():
+    """A sampler yaml carrying hn_* would be a silent claim that the weighting
+    changes the sampled process. It does not."""
+    for f in sorted((_CONF / "sampler").glob("*.yaml")):
+        assert "hn_sigma" not in f.read_text(), f.name
+        assert "hn_power" not in f.read_text(), f.name
+    assert "hn_" not in "".join(
+        k for k in _MIRRORED), "hn_* must stay out of the mirror list"

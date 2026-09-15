@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A0-HN -- erdm_v2 plus the HIGH-NOISE LOSS BOOST. Byte-equal to
+# erdm_v2.yaml except the three hn_* keys.
+#
+# WHY (measured 2026-09-15). The in-harness batch-40 ERDM (A0) at epoch 17
+# matched the upstream batch-4 checkpoint's TOTAL training loss through this
+# very objective -- 243.9 vs 242.0 over 60 batches, and its own epoch mean was
+# still falling -- while its 10-day rollout RMSE was 2.3x worse (131 vs 58) and
+# its 6-day 5x worse (112 vs 23), with day-1 skill equal. Scoring both weight
+# sets on IDENTICAL noise draws with ERDM_LOSS_DIAG=1 localized the whole
+# deficit to the two highest window slots: per-slot loss ratios A0/upstream
+# were 1.01 / 0.98 / 0.99 / 0.99 at sigma 0.004-0.5 and 1.047 / 1.063 at
+# sigma ~5 and sigma 16-500. Those two slots carry 27% and 1.8% of the
+# weighted loss, so a 6% deficit in the regime every free-run frame is
+# GENERATED from is invisible in the total.
+#
+# The cause is structural, not a bug. ERDM hands each training instance a
+# fixed staircase of noise levels and folds EDM's log-normal sampling density
+# into the loss as a weight; the induced density of ln(sigma) inside a slot is
+# |dtau/dln sigma| ~ sigma^(1/rho), so at rho = -10 the staircase spends
+# sigma^-1.1 of EDM-equivalent attention per unit ln(sigma) -- 21x down at
+# sigma 118, 104x at 500, relative to the peak at sigma = e^P_mean = 7.4. At
+# global batch 40 (a tenth of upstream's optimizer updates per epoch) that
+# under-attended regime is simply the last thing learned.
+#
+# The boost restores part of it: multiplier clamp((sigma/10)^1.1, 1, 10),
+# i.e. EXACTLY 1 for sigma <= 10 (slots 1-4 and most of slot 5, verified to
+# the bit), 1.68 at 16, 5.87 at 50, 9.99 at 81, 10 (capped) above.
+#
+# Two different quantities -- do not confuse them:
+#   * the top slot's mean LOSS WEIGHT rises x3.05, computable from this config
+#     alone (pinned by test_the_boost_actually_reweights_the_back_slot_in_both_configs);
+#   * its share of the realized weighted LOSS is projected 5.6% -> ~19%, which
+#     also depends on how the model's error varies with sigma inside the slot,
+#     so it is MEASURED by the frozen-weight smoke (ABL_LOSS_DIAG=1) before the
+#     chain launches rather than asserted here.
+# Projected total loss x1.17, so no lr retune (gnorm p50 1.2e5 against
+# grad_clip_norm 1e6 leaves ~3x headroom). hn_power = 1 - 1/rho is the
+# exponent that would restore EDM equivalence exactly; hn_clip says "restore
+# at most 10-fold".
+#
+# Pair with model=amip_erdm_sst_pred, recipe upstream, and compare against the
+# uncorrected A0 control (checkpoints_a0_sstpred_b40) at matched epochs.
+# Sampler-side nothing changes: the weighting is training-only, so an A0-HN
+# checkpoint is scored with the shipped sampler/erdm_v2.yaml.
+defaults:
+  - erdm_v2
+  - _self_
+
+hn_sigma: 10.0
+hn_power: 1.1
+hn_clip: 10.0

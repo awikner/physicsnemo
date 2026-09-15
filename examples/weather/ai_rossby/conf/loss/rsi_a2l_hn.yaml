@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 The University of Chicago.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ablation A2-L-HN -- rsi_a2l (lag-W sample anchor) plus the HIGH-NOISE LOSS
+# BOOST, the RSI half of the corrected batch-40 pair. Byte-equal to
+# rsi_a2l.yaml except the three hn_* keys.
+#
+# The boost is the same knob and the same helper as loss/erdm_v2_hn.yaml (see
+# that file for the measurement that motivates it), but it is applied in
+# SIGMA_EFF units -- sigma_eff(tau) = gamma(tau) / (beta(tau) * delta_std),
+# the scalar that plays sigma's role in RSI's snr_bump weighting -- and
+# sigma_eff is a different coordinate from ERDM's sigma. Measured per-slot
+# profile at the A2-L settings (gamma 1.0 -> 0.04 geometric, W = 6):
+#
+#   slot            1       2       3       4       5       6
+#   sigma_eff   .04-.08 .08-.18 .18-.40  .40-1.0  1.0-3.5  3.5-1e3
+#   weight        0.481   0.530   0.409   0.231   0.122   0.037
+#
+# i.e. RSI's weighting is already nearly FLAT (13x front-to-back, against
+# ERDM's ~2700x): the severity of the A0 finding is mostly an artifact of
+# ERDM's rho = -10 schedule, not of rolling training as such. Consequently the
+# A0-HN values (hn_sigma 10, hn_power 1.1) would be nearly inert here -- slot
+# 6's weight mass sits at sigma_eff 3.5-10, right at the f peak, and the huge
+# sigma_eff values only occur in a vanishing tau sliver near the beta floor.
+#
+# hn_sigma 3.5 / hn_power 2.0 / hn_clip 10 instead gives slots 1-5 x1.000 and
+# slot 6 x3.71 in mean loss weight (verified in
+# test_hn_boosts_only_the_back_slot_at_the_a2l_settings), against A0-HN's x3.05 in the same
+# quantity -- within 20%, so a0hn and a2lhn remain a controlled pair. Exponent 2 is the sigma_eff-coordinate
+# analogue of A0's 1.1: near tau -> 0 the staircase Jacobian is
+# |dtau/dln sigma_eff| ~ tau ~ 1/sigma_eff.
+#
+# Pair with model=amip_rsi_sst_pred, recipe bundle, and compare against the
+# uncorrected A2-L control (checkpoints_a2l_sstpred_b40) at matched epochs.
+# The weighting is training-only: an A2-L-HN checkpoint is scored with the
+# shipped sampler/rsi_a2l_sstpred.yaml (pinned by test_rsi_ladder_configs).
+defaults:
+  - rsi_a2l
+  - _self_
+
+hn_sigma: 3.5
+hn_power: 2.0
+hn_clip: 10.0

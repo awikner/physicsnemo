@@ -62,20 +62,35 @@ NNODES=${#ALLNODES[@]}
 NEED=$(( ${#JOBS[@]} * NODES_PER_JOB ))
 echo "=== $(date) | ${NNODES} nodes | ${#JOBS[@]} jobs x ${RANKS_PER_JOB} ranks | horizon $HORIZON | ${EVAL_JOBS} ==="
 if [ "$NNODES" -lt "$NEED" ]; then echo "FATAL: need $NEED nodes, have $NNODES"; exit 1; fi
-sampler_for () { case "$1" in k120*) echo rsi_sstpred_e1_k120 ;; k145*) echo rsi_sstpred_e1_k145 ;; k180*) echo rsi_sstpred_e1_k180 ;; fd) echo rsi_sstpred_e1_fd ;; a2l*) echo rsi_a2l_sstpred ;; a1*) echo rsi_a1_sstpred ;; erdm*) echo erdm_v2 ;; *) echo rsi_sstpred_e1 ;; esac; }
+# NOTE: `case` takes the FIRST match, so the hn globs must precede the plain
+# ones -- `a2l*` would otherwise swallow `a2lhn*`, and `a0hn*` must not fall
+# through to the RSI default.
+sampler_for () { case "$1" in k120*) echo rsi_sstpred_e1_k120 ;; k145*) echo rsi_sstpred_e1_k145 ;; k180*) echo rsi_sstpred_e1_k180 ;; fd) echo rsi_sstpred_e1_fd ;; a2lhn*|a2l*) echo rsi_a2l_sstpred ;; a1*) echo rsi_a1_sstpred ;; a0hn*|erdm*) echo erdm_v2 ;; *) echo rsi_sstpred_e1 ;; esac; }
 # cfg "erdm" scores an in-harness ERDM checkpoint (rung A0) through the ERDM
 # combined cascade; "a1" scores an A1 checkpoint through the RSI cascade with
 # the reduction sampler; "a2l" scores an A2-L (lag-W sample anchor, proposal
 # v0.2) checkpoint with the lag-6 sampler -- 12 init frames and 5 pre-IC
 # boundary frames, both read off the scheduler by rollout.py. Everything else
 # is the lag-1 RSI A2 cascade.
-model_for () { case "$1" in erdm*) echo amip_combined_sst_pred ;; *) echo amip_combined_rsi_sstpred ;; esac; }
-loss_for () { case "$1" in erdm*) echo erdm_v2 ;; a2l*) echo rsi_a2l ;; a1*) echo rsi_a1 ;; *) echo rsi ;; esac; }
+model_for () { case "$1" in a0hn*|erdm*) echo amip_combined_sst_pred ;; *) echo amip_combined_rsi_sstpred ;; esac; }
+loss_for () { case "$1" in a0hn*) echo erdm_v2_hn ;; erdm*) echo erdm_v2 ;; a2lhn*) echo rsi_a2l_hn ;; a2l*) echo rsi_a2l ;; a1*) echo rsi_a1 ;; *) echo rsi ;; esac; }
+# Post-hoc eps-family sweep (rung A5): a cfg suffix picks eps_scale, applied
+# through the whitelisted sampler_overrides merge (rollout._build_stage) so no
+# new conf/sampler file is needed per value. eps_mode=gamma2 is the only
+# runnable mode -- the shipped scalar mode's drift is stiff as 1/(Gamma S_c)
+# and diverges on channels with S_c < 1.
+eps_for () { case "$1" in *eps005) echo 0.005 ;; *eps01) echo 0.01 ;; *eps02) echo 0.02 ;; *eps05) echo 0.05 ;; *eps1) echo 0.1 ;; *) echo 0 ;; esac; }
 steps_for () { case "$1" in ns4) echo 4 ;; *) echo 2 ;; esac; }
 seed_for () { case "$1" in *s1) echo 1 ;; *) echo 0 ;; esac; }
 launch_cfg () {
   local name="$1" CKDIR="$2" EP="$3" cfg="$4" hosts="$5" out="$6"
   mkdir -p "$out"
+  local EPS; EPS=$(eps_for "$cfg"); local EPSOV=()
+  if [ "$EPS" != 0 ]; then
+    EPSOV=("++model.forecaster.sampler_overrides.eps_mode=gamma2"
+           "++model.forecaster.sampler_overrides.eps_scale=$EPS")
+    echo "  ${name}: eps-family sweep eps_scale=$EPS (gamma2)"
+  fi
   mpiexec -n "$RANKS_PER_JOB" --ppn "$PPN" --hosts "$hosts" --cpu-bind depth -d 8 \
       bash hpc/scripts/polaris_rank_env.sh \
       bash -c 'export RSI_TRACE_PATH="$0/trace_rank${RANK}.pt"; export RSI_TRACE_EVERY=50; exec "$@"' "$out" \
@@ -84,6 +99,7 @@ launch_cfg () {
       run_name=${TAG}_${name} \
       "model=$(model_for "$cfg")" "++model.forecaster.sampler=$(sampler_for "$cfg")" \
       "loss=$(loss_for "$cfg")" loss.window_size=6 dataset=amip_dailyavg_coarse_multiyear \
+      "${EPSOV[@]}" \
       validation=eval_suite "seed=$(seed_for "$cfg")" wandb.enabled=False \
       "++dataset.zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_coarse" \
       "++dataset.boundary_zarr_path=$AI_ROSSBY_DATA/amip_dailyavg_boundary" \
