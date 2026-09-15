@@ -1529,3 +1529,145 @@ def test_loss_diag_logs_the_per_slot_staircase(monkeypatch, caplog):
                stair[0].split("weight/slot=[")[1].split("]")[0].replace("'", "").split(", ")]
     assert len(weights) == W
     assert weights[-1] < weights[0], weights      # back slot carries least
+
+
+# ---------------------------------------------------------------------------
+# eps-family mode. The shipped "scalar" eps is not runnable at real
+# per-channel scales: the drift carries Gamma^-1 = 1/(gamma S_c) while the
+# noise is white in state units, so drift and diffusion disagree by Gamma^-2
+# and the slow channels diverge (report item A5). "gamma2" sets
+# eps_c = eps_scale Gamma_c^2, diagonal in Gamma's own basis, which is the
+# structural analogue of ERDM's churn (noise proportional to each slot's own
+# sigma, never stiff).
+# ---------------------------------------------------------------------------
+
+def _scales(tmp_path, vals=(0.02, 0.1, 0.4)):
+    """A per-channel scale artifact spanning the real measured range
+    (sigma_c_sstpred153_lag6.pt: 0.017 to 1.35, median ~0.6)."""
+    path = tmp_path / "S.pt"
+    torch.save(torch.tensor(list(vals))[:, None, None], path)
+    return str(path)
+
+
+def test_eps_mode_default_is_the_shipped_scalar():
+    assert RSIScheduler(window_size=3).eps_mode == "scalar"
+    with pytest.raises(ValueError, match="eps_mode"):
+        RSIScheduler(window_size=3, eps_mode="churn")
+
+
+@pytest.mark.parametrize("mode", ["scalar", "gamma2"])
+def test_eps_zero_is_bit_identical_to_the_pf_ode_in_both_modes(mode):
+    """eps_scale = 0 must not even draw the noise, or the RNG stream shifts
+    and every deterministic comparison against the controls breaks."""
+    model = _TwoHeadStub(channels=3).eval()
+    init = torch.randn(1, 4, 3, 8, 16)
+    torch.manual_seed(11)
+    ref = RSIScheduler(window_size=3, num_steps=2).sample_rollout(
+        model, init, None, None, horizon=3)
+    torch.manual_seed(11)
+    got = RSIScheduler(window_size=3, num_steps=2, eps_scale=0.0,
+                       eps_mode=mode).sample_rollout(model, init, None, None, horizon=3)
+    assert torch.equal(got, ref)
+    assert RSIScheduler(window_size=3, eps_scale=0.0, eps_mode=mode).eps_kick(
+        torch.zeros(1, 3, 2, 4, 4), torch.zeros(1, 3), torch.ones(1, 3),
+        torch.zeros(1, 3, 2, 4, 4)) is None
+
+
+def test_eps_kick_gamma2_is_the_closed_form(tmp_path):
+    """-eps dtau Gamma zhat + sqrt(2 eps dtau) Gamma dW, recomputed."""
+    W, C, eps = 3, 3, 0.1
+    sched = RSIScheduler(window_size=W, eps_scale=eps, eps_mode="gamma2",
+                         gamma_0=1.0, gamma_1=0.04,
+                         noise_scale_path=_scales(tmp_path))
+    x = torch.randn(1, W, C, 4, 8)
+    zhat = torch.randn(1, W, C, 4, 8)
+    tau = sched.local_time(torch.zeros(1))
+    tau_next = tau + 1.0 / (W * 2)
+    torch.manual_seed(4)
+    got = sched.eps_kick(x, tau, tau_next, zhat)
+    torch.manual_seed(4)
+    noise = sched.get_noise(x)
+    dtau = (tau_next - tau).clamp(min=0.0)
+    e = sched._eps(tau)
+    want = (-sched.w5(e * dtau) * sched.gamma_apply(zhat, tau)
+            + sched.w5((2.0 * e * dtau).sqrt()) * sched.gamma_apply(noise, tau))
+    torch.testing.assert_close(got, want)
+
+
+def test_eps_kick_gamma2_scales_with_the_channel_scale(tmp_path):
+    """WHY the mode exists: the kick must follow Gamma, i.e. the per-channel
+    increment scale. Channel 0 (S_c 0.02) must be kicked 20x less than
+    channel 2 (S_c 0.4) -- the scalar mode kicks them identically while
+    pulling on channel 0's drift 20x HARDER."""
+    W, C = 3, 3
+    x = torch.zeros(1, W, C, 8, 16)
+    zhat = torch.randn(1, W, C, 8, 16)
+    kicks = {}
+    for mode in ("scalar", "gamma2"):
+        sched = RSIScheduler(window_size=W, eps_scale=0.1, eps_mode=mode,
+                             gamma_0=1.0, gamma_1=0.04,
+                             noise_scale_path=_scales(tmp_path))
+        tau = sched.local_time(torch.zeros(1))
+        torch.manual_seed(0)
+        k = sched.eps_kick(x, tau, tau + 1.0 / (W * 2), zhat)
+        kicks[mode] = [float(k[:, :, c].pow(2).mean().sqrt()) for c in range(C)]
+    # gamma2: kick rms tracks S_c (0.02 : 0.4 = 1 : 20)
+    assert kicks["gamma2"][0] / kicks["gamma2"][2] == pytest.approx(0.05, rel=0.2), kicks
+    # scalar: the noise term is channel-blind, so the slow channel is kicked
+    # as hard as the fast one while its drift coefficient is 20x larger
+    assert kicks["scalar"][0] / kicks["scalar"][2] > 5.0, kicks
+
+
+def test_eps_mode_gamma2_stays_bounded_where_scalar_diverges(tmp_path):
+    """The A5 finding, reproduced in the real scheduler at real scales and
+    fixed. With a zero-output network the kick is the ONLY forcing, so this
+    isolates it: across a 25x eps range gamma2 holds every channel at its
+    eps = 0 amplitude, while scalar blows the slow channel (S_c = 0.02) up by
+    ~100x."""
+    W, C = 3, 3
+    path = _scales(tmp_path)
+
+    class _Zero(torch.nn.Module):
+        def forward(self, x, label, c_grid, c_scalar):
+            return torch.cat([torch.zeros_like(x)] * 2, dim=2)
+
+    init = torch.randn(1, W + 1, C, 8, 16)
+
+    def run(mode, eps):
+        sched = RSIScheduler(window_size=W, num_steps=2, eps_scale=eps,
+                             eps_mode=mode, gamma_0=1.0, gamma_1=0.04,
+                             h1_precond="edm", noise_scale_path=path)
+        torch.manual_seed(1)
+        with torch.no_grad():
+            out = sched.sample_rollout(_Zero(), init, None, None, horizon=50)
+        assert torch.isfinite(out).all(), (mode, eps)
+        return float(out[:, :, 0].abs().max()), float(out.abs().max())
+
+    base_slow, base_all = run("gamma2", 0.0)
+    for eps in (0.02, 0.1, 0.5):
+        slow, all_ = run("gamma2", eps)
+        # insensitive to eps: the kick rides Gamma, which is bounded
+        assert slow == pytest.approx(base_slow, rel=0.05), (eps, slow, base_slow)
+        _assert_bounded(torch.tensor([all_]), what=f"gamma2 eps={eps}")
+    # and the contrast: scalar at eps 0.5 runs the slow channel away
+    slow_scalar, _ = run("scalar", 0.5)
+    assert slow_scalar > 20.0 * base_slow, (slow_scalar, base_slow)
+
+
+def test_eps_mode_gamma2_works_with_a_spectral_gamma(tmp_path):
+    """gamma_apply routes through the spectral filter when a spectrum is
+    loaded, so the kick must inherit the band structure for free."""
+    W, C, H, Wd = 3, 2, 8, 16
+    sched = RSIScheduler(window_size=W, num_steps=2, eps_scale=0.05,
+                         eps_mode="gamma2", spectral_sharpness=2.0,
+                         grid=(H, Wd), gamma_0=1.0, gamma_1=0.04)
+
+    class _Zero(torch.nn.Module):
+        def forward(self, x, label, c_grid, c_scalar):
+            return torch.cat([torch.zeros_like(x)] * 2, dim=2)
+
+    init = torch.randn(1, W + 1, C, H, Wd)
+    torch.manual_seed(2)
+    with torch.no_grad():
+        out = sched.sample_rollout(_Zero(), init, None, None, horizon=8)
+    _assert_bounded(out, what="gamma2 + spectral Gamma rollout")

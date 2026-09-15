@@ -19,5 +19,12 @@ defaults:
   - _self_
 
 eps_scale: 0.05
+# How eps(tau) is shaped. gamma2 = eps_scale * Gamma(tau)^2, diagonal in
+# Gamma's basis: the drift is then -eps_scale dtau Gamma zhat and the noise
+# sqrt(2 eps_scale dtau) Gamma dW, both bounded and mutually consistent. The
+# legacy "scalar" mode is NOT runnable at real per-channel scales (its drift is
+# stiff as 1/(gamma S_c) against channel-blind noise and diverges for the slow
+# channels). Inert while eps_scale is 0.
+eps_mode: gamma2
 eps_tmin: 0.0
 eps_tmax: 1.0

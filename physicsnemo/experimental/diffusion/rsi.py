@@ -168,6 +168,7 @@ class RSIScheduler(nn.Module):
                  w_z=1.0,
                  # ── sampling stochasticity (eps-family; 0 => PF-ODE) ──────
                  eps_scale=0.0,
+                 eps_mode="scalar",
                  fresh_noise_scale=1.0,
                  eps_tmin=0.0,
                  eps_tmax=1.0,
@@ -343,6 +344,14 @@ class RSIScheduler(nn.Module):
             raise ValueError(f"fresh_noise_scale must be > 0, got {fresh_noise_scale}")
         self.eps_tmin = float(eps_tmin)
         self.eps_tmax = float(eps_tmax)
+        # How eps(tau) is shaped. "scalar" is the shipped form and is NOT
+        # runnable on real per-channel scales (see eps_kick); "gamma2" is the
+        # ERDM-churn analogue. eps_scale = 0 makes both bit-identical to the
+        # probability-flow ODE.
+        if eps_mode not in ("scalar", "gamma2"):
+            raise ValueError(
+                f"eps_mode must be 'scalar' or 'gamma2', got '{eps_mode}'")
+        self.eps_mode = eps_mode
 
         # ── ERDM reduction ────────────────────────────────────────────────
         self.reduce_to_erdm = bool(reduce_to_erdm)
@@ -418,13 +427,13 @@ class RSIScheduler(nn.Module):
             "RSIScheduler initialized: W=%s, anchor_lag=%s, num_steps=%s, param=%s "
             "(h1_precond=%s), beta=%s, gamma=[%s -> %s] (%s), integrator=%s, "
             "solver=%s, weighting=%s hn=[sigma_eff>%s]^%s capped %s, "
-            "eps_scale=%s, noise=%s, reduce_to_erdm=%s",
+            "eps_scale=%s (%s), noise=%s, reduce_to_erdm=%s",
             self.W, self.anchor_lag, self.num_steps, self.parameterization,
             self.h1_precond, self.beta_mode,
             self.gamma_0, self.gamma_1, self.gamma_mode, self.integrator,
             self.solver, self.weighting,
             self.hn_sigma, self.hn_power, self.hn_clip,
-            self.eps_scale, noise, self.reduce_to_erdm,
+            self.eps_scale, self.eps_mode, noise, self.reduce_to_erdm,
         )
         if (self.fresh_noise_scale != 1.0 or self.anchor_shrink > 0.0
                 or self.pushforward_rolls > 0 or self.anchor_level_noise > 0.0):
@@ -1223,6 +1232,55 @@ class RSIScheduler(nn.Module):
             torch.zeros_like(tau),
         )
 
+    def eps_kick(self, x, tau_cur, tau_next, zhat):
+        """Euler-Maruyama eps-family increment over ``[tau_cur, tau_next]``.
+
+        Returns ``None`` when the SDE is off (``eps_scale <= 0``), in which
+        case no noise is drawn either, so the PF-ODE trajectory AND its RNG
+        stream are untouched.
+
+        ``eps_mode``:
+
+        ``"scalar"``
+            ``eps(tau) = eps_scale``, the shipped form. The drift carries
+            ``Gamma^{-1}``, i.e. ``1/(gamma(tau) S_c)``, while the noise is
+            white in state units -- an anisotropic OU whose drift and
+            diffusion disagree by ``Gamma^{-2}``. At the real per-channel
+            scales (``S_c`` 0.02-0.4) that is a drift stiffness of order 1e3
+            and the rollout goes non-finite for every slow channel within ~13
+            rolls at ``eps_scale`` as low as 0.02 (both drift-campaign probes;
+            report item A5, "not runnable"). Kept only so the diagnosis is
+            reproducible.
+        ``"gamma2"``
+            ``eps_c(tau) = eps_scale * Gamma_c(tau)^2``, diagonal in Gamma's
+            own basis (per channel, or per spectral band when a spectrum is
+            loaded). The drift becomes ``-eps_scale dtau Gamma zhat`` and the
+            noise ``sqrt(2 eps_scale dtau) Gamma dW``: both bounded by Gamma,
+            and consistent with each other, so the marginals are preserved in
+            the exact-score limit (proposal v0.2 sec 3.5, which explicitly
+            allows a per-band eps diagonal in Gamma's basis). This is the
+            structural analogue of ERDM's churn, which injects noise
+            proportional to each slot's own sigma and never sees the same
+            stiffness.
+
+        ``zhat`` must be the STEP-START latent estimate: Gamma spans orders of
+        magnitude across a step, so pairing tau_cur's Gamma with the Heun
+        corrector's zhat is not a small error (see sample_window).
+        """
+        eps = self._eps(tau_cur)
+        if eps is None:
+            return None
+        dtau = (tau_next - tau_cur).clamp(min=0.0)
+        noise = self.get_noise(x)
+        if self.eps_mode == "gamma2":
+            kick = (-self.w5(eps * dtau) * self.gamma_apply(zhat, tau_cur)
+                    + self.w5((2.0 * eps * dtau).sqrt())
+                    * self.gamma_apply(noise, tau_cur))
+        else:
+            kick = (self.w5(eps * dtau) * self.score(tau_cur, zhat)
+                    + self.w5((2.0 * eps * dtau).sqrt()) * noise)
+        return kick.to(x.dtype)
+
     def _step(self, x_eval, tau_eval, tau_cur, tau_next, h1, zhat):
         """Transport increment over [tau_cur, tau_next] from one head evaluation.
 
@@ -1311,14 +1369,13 @@ class RSIScheduler(nn.Module):
             else:
                 x = x_euler
 
-            # eps-family stochastic forcing (marginal-preserving in the exact-
-            # score limit). eps_scale = 0 leaves the PF-ODE path bit-identical.
-            eps = self._eps(tau_cur)
-            if eps is not None:
-                dtau = (tau_next - tau_cur).clamp(min=0.0)
-                s = self.score(tau_cur, zhat_start).to(x.dtype)
-                x = x + self.w5(eps * dtau) * s \
-                    + self.w5((2.0 * eps * dtau).sqrt()) * self.get_noise(x)
+            # eps-family stochastic forcing (marginal-preserving in the
+            # exact-score limit). eps_scale = 0 leaves the PF-ODE path
+            # bit-identical -- including the RNG stream, since no noise is
+            # drawn at all.
+            kick = self.eps_kick(x, tau_cur, tau_next, zhat_start)
+            if kick is not None:
+                x = x + kick
 
             tau_last = tau_next
 
