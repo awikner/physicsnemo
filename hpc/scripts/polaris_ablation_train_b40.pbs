@@ -46,6 +46,10 @@
 #                the in-training rollout validation within its 30 minutes
 #   ABL_RETRY    internal, counts preflight/blacklist resubmissions
 #
+# Exit codes: 0 done/nothing to do, 1 config, 3 bad allocation (resubmitted
+# unless ABL_RETRY reached 4), 4 deferred behind the live trainer of the same
+# checkpoint dir ($CKPT/.train_lock; resubmitted with afterany on it).
+#
 #PBS -A lighthouse-uchicago
 #PBS -q prod
 #PBS -l select=10:system=polaris
@@ -133,6 +137,39 @@ if blacklisted || ! preflight; then
   fi
   exit 3
 fi
+
+# --- one trainer per checkpoint directory. A retry submitted above carries no
+# --- dependency, so the chain's next link (afterany on THIS job) becomes
+# --- eligible the moment this job exits and can start alongside the retry;
+# --- on 2026-09-12/13 four copies of the A0 15->17 link and three of the A2-L
+# --- 20->22 link trained the same directory at once. The lock holds the PBS
+# --- id of the live trainer; a link that finds a live holder re-queues itself
+# --- to run AFTER the holder (a minute of allocation, no epochs lost) and a
+# --- lock whose job PBS no longer lists (walltime kill, node failure) is stale
+# --- and taken over.
+LOCK="$CKPT/.train_lock"
+holder_alive () {   # $1 = PBS job id; true while PBS lists it in a non-finished state
+  local st
+  st=$(qstat -f "$1" 2>/dev/null | awk '/job_state/ {print $3}')
+  [ -n "$st" ] && [ "$st" != F ] && [ "$st" != X ]
+}
+RESUB_VARS="ABL=$ABL,ABL_RECIPE=$RECIPE,ABL_TARGET=$TARGET,ABL_CKPT=$CKPT,ABL_SEED=$SEED,ABL_VAL_EVERY=$VAL_EVERY,ABL_NODES=$EXPECT_NODES,ABL_MAX_ITERS=$MAX_ITERS,ABL_RETRY=${ABL_RETRY:-0}"
+if [ -f "$LOCK" ]; then
+  HOLDER=$(awk '{print $1}' "$LOCK")
+  if [ -n "$HOLDER" ] && [ "$HOLDER" != "$J" ] && holder_alive "$HOLDER"; then
+    NEW=$(qsub -N "$PBS_JOBNAME" -W depend=afterany:"$HOLDER" -v "$RESUB_VARS" "$R/polaris_ablation_train_b40.pbs" 2>&1)
+    case "$NEW" in
+      *.polaris-pbs*) ;;
+      *) # the holder finished between the check and the qsub: no dependency needed
+         NEW=$(qsub -N "$PBS_JOBNAME" -v "$RESUB_VARS" "$R/polaris_ablation_train_b40.pbs" 2>&1) ;;
+    esac
+    echo "$CKPT is being trained by job $HOLDER -- deferred: resubmitted as $NEW to run after it"
+    exit 4
+  fi
+  echo "stale lock from job ${HOLDER:-?} (not in PBS) -- taking over"
+fi
+echo "$J $(date -u +%FT%TZ) $(hostname)" > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
 
 LR=5.0e-4        # LINEAR scaling: 5e-5 * 10 (safe only with the warmup)
 case "$RECIPE" in
