@@ -304,7 +304,7 @@ values the ablation config intended (0.1-0.5) it would read as a null.
 | A2 | code / proposal deviation | `rsi.py:534` (`c_in`), `:569` (`z_precond`), `:622-627` (H1 skip) | EDM coefficients use scalar `gamma(tau)`; the latent std is `gamma * S_c` (`gamma_apply`, `:445-452`). Proposal section 3.4 prescribes per-band `c_in = Var[x]^-1/2`, `c_out` from `Var(v*)`, skip "near tau = 0 the anchor is"; the `:610-621` comment's "unit-variance residual" is false at the anchor slot (`Var(F_1*)` 0.30-0.37). Invisible to the A1 parity tests (`reduce_to_erdm` is exactly `S_c = 1`). Consequences: (i) H1 skip: a level-copying head's relative shortfall `e` contracts the copied-forward anchor by 0.41 e per roll, but only for small `S_c` (0.14 e at `S_c` 0.63, reversed at 1.0), and only if there is no restoring force; (ii) latent skip: an *error amplifier*, per-roll level gain `1 - 0.078 S_c e` for a latent-head error `e`, zero bias at the optimum, 6-300x weaker than (i), and unable to reach surface pressure's rate (ceiling 0.13%/roll vs 0.5-5% observed); (iii) `c_in` under-scales slow channels by up to 1.41x (train/inference-consistent). The per-channel-correct skip `1/(1 + gamma^2 S_c^2)` equals the shipped one at `S_c = 1`, so the fix is a no-op for the fastest channels; and it is **not an inference-only patch**: swapping it into a head trained against the scalar skip flips the sign and gives per-roll level *growth* (1.009-1.012 at `S_c` 0.17-0.35). | Amplifier for a slow-channel level bias, conditional on H1; not the ordering-setter, not the RSI/ERDM discriminator. | **confirmed** code fact (3 lenses); drift leverage refuted as stated; severity medium |
 | A3 | code | `rsi.py:495-508` vs `:1060` | `anchor_noise` is train-only (its only caller is `compute_loss`; a value in a sampler yaml is dead) and models the wrong mismatch: the inference anchor law is `a = lam y + w` with `lam = 1 - Var(y|x) < 1` (a *shrink* plus ~1 `S_c` of independent noise), while the implemented family is `a = y + s S_c z'` with total variance `> 1`; the two families meet only at `s = 0`. Its unit is `S_c`, not `Gamma_0` (so at `rsi.yaml`'s default `gamma_0 = 0.5` a value of 1 is 2x `Gamma_0`), and it ignores `self.spectral` (white and 2.8x too large under a spectral `Gamma`). Neither of the proposal's mitigations (anchor perturbation; self-generated-anchor fine-tune) is in the shipped run or the recipe. | Dispersion: monotonically worse (oracle spread 0.645 -> 0.601/0.512/0.362/0.271 at s = 0.5/1/2/3; at the ablation's intended 0.1-0.5 only -0.3 to -7%). First moment: neutral in the oracle, marginal in the trained toy (alpha 0.027 -> 0.042). | **confirmed** (2 lenses) |
 | A4 | formulation | `rsi.py:677-716` `loss_weight`, `sigma_eff` | Per-slot weight mass `E_t[omega]` = 0.481/0.530/0.409/0.231/0.122/0.037 (shares 26.6/29.3/22.6/12.8/6.8/2.06%), a bump peaked at tau = 0.786 (not monotone); `omega(1/12) = 0.036`, `omega(0) = 7.8e-8`; `lambda c_out^2` ranges 0.20-1.00 (exactly 1 at tau = 1), a 4.9x deviation from EDM's identity. With an exact stub head, *all* the compounding level-gain leverage of a relative `F_1` shortfall sits in slot 6 (0.386/roll at tau = 1/12 plus 0.021 at tau = 0; every slot with tau >= 1/6 gives a one-time offset and zero compounding). **But "starved" is the wrong reading**: in the units the network regresses (`omega c_out^2`) slot 6 is the most heavily weighted slot (8.5x slot 1), it carries 22-28% of the actual loss, and the shortfall that would give the observed 5%/roll (e = 12%) would cost 2.8% of the loss, about 4 epochs of the observed decline. ERDM at its shipped `sigma_data = 1` gives its own back slot 0.28% of the weight (7x less than RSI), so slot weighting is not the RSI/ERDM discriminator. The genuine hiding place is the raw channel sum: residuals scale as `S_c^2`, so surface pressure's entire loss is ~0.5% of the total and a level bias there is invisible to the optimizer. The one real weight hole is the fresh slot's t = 0 evaluation (`c_skip = 0.5`, `omega = 7.8e-8`). | Enabler for slow-channel bias via channel weighting, not slot weighting. | **corrected** (1 of 2 lenses refuted the "starved/orthogonal" payload; numbers confirmed) |
-| A5 | formulation | `rsi.py:927-936, :1013-1020` | eps-family step adds scalar-eps isotropic noise in state units against a score `-zhat/(gamma S_c)`: formally marginal-preserving, but the explicit step is stiff by `1/(gamma S_c)^2` and diverges for slow channels at `eps_scale` 0.02-0.5 even with an exact score (both probes). Ablation A5 as written is not runnable. | none for the evaluated run (eps 0) | confirmed by both probes |
+| A5 | formulation | `rsi.py:927-936, :1013-1020` | eps-family step adds scalar-eps isotropic noise in state units against a score `-zhat/(gamma S_c)`: formally marginal-preserving, but the explicit step is stiff by `1/(gamma S_c)^2` and diverges for slow channels at `eps_scale` 0.02-0.5 even with an exact score (both probes). Ablation A5 as written is not runnable. | none for the evaluated run (eps 0) | confirmed by both probes; **FIXED 2026-09-15 by `eps_mode="gamma2"`, see below** |
 | A6 | config | `conf/loss/rsi_a1.yaml`, `rsi_a3.yaml`, `rsi_a4.yaml` | Set `parameterization: residual` while inheriting `h1_precond: edm` from `rsi.yaml`; `RSIScheduler.__init__` (`rsi.py:195-200`) raises. The ERDM-parity control and the residual ablation cannot be instantiated as shipped. | none directly; the ladder never ran | **confirmed** locally (instantiation raises) |
 | A7 | code | `train_diffusion.py:862` | `load_checkpoint` is called without `metadata_dict` and nothing calls `ModelEMA.load_state_dict`, although the shadow is saved in `metadata["ema"]` (`:1196`) and the comment at `:1008-1010` says a resumed stage "will hydrate it". Each 2-epoch chained link rebuilds the EMA inside its 6-epoch warmup (effective decay 1/7, 2/7), so the evaluated "EMA weights" are ~live weights. | none for the drift (ERDM control used a genuine EMA; RSI used live-ish weights, both fine) | **confirmed** by reading |
 | A8 | code | `rollout.py:163-172, :479` | `_save_state` calls `eps_prev.cpu()`; RSI's `stream_init` returns `(x, None)`, so the streaming rollout driver crashes at its first state save for RSI. | none (5-year eval used another path); blocks Campaign B | confirmed by reading |
@@ -684,3 +684,57 @@ Full notes with quotes: session scratchpad `literature/notes.md`.
   `~/.claude/projects/-home-awikner-repos-physicsnemo-rsi-diagnosis/717427ea-b5f4-4521-8a19-78d7f01d7320/subagents/workflows/wf_97753f5c-e47/journal.jsonl`
   (follow-up verification). Result rows carry an `agentId`; the matching
   `agent-<id>.jsonl` holds the prompt that names the finding and lens.
+
+---
+
+## Addendum 2026-09-15: A5 is runnable after all (`eps_mode="gamma2"`)
+
+The diagnosis above localized the defect correctly but stopped at "not
+runnable". The mismatch is specific and removable: the eps step added
+`eps*dtau*score + sqrt(2*eps*dtau)*white_noise`, where
+`score = -zhat/(Gamma)` carries `1/(gamma S_c)` while the noise term is white
+in state units. Drift and diffusion therefore disagree by `Gamma^-2`, so the
+step is not a discretization of any SDE with those marginals: it is an
+anisotropic OU whose restoring force is ~1e3 times its noise on the slow
+channels.
+
+Setting `eps_c(tau) = eps_scale * Gamma_c(tau)^2` -- diagonal in Gamma's own
+basis, which proposal v0.2 sec 3.5 explicitly allows -- gives drift
+`-eps_scale*dtau*Gamma*zhat` and noise `sqrt(2*eps_scale*dtau)*Gamma*dW`.
+Both are bounded by Gamma and mutually consistent. It is the structural
+analogue of ERDM's churn, which injects noise proportional to each slot's own
+sigma and is never stiff. Implemented as `RSIScheduler.eps_kick` with
+`eps_mode` in {"scalar" (shipped, kept for reproducibility), "gamma2"};
+`eps_scale = 0` draws no noise in either mode, so the PF-ODE path and its RNG
+stream are bit-identical.
+
+**Oracle toy, exact-score head, horizon 1200, 32 members, S_c = (1.0, 0.63,
+0.32, 0.14)** (`oracle_toy.py --experiments E2 --e2-only eps`):
+
+| variant | non-finite at | internal variance ratio | member spread | alpha |
+|---|---|---|---|---|
+| `eps_scale 0.003` scalar | -- | .500 .461 .452 .443 | .708 .680 .671 .671 | ~0 |
+| `eps_scale 0.03` scalar | **step 76** | nan | nan | nan |
+| `eps_scale 0.5` scalar | **step 12** | nan | nan | nan |
+| `eps_scale 2.0` scalar | **step 9** | nan | nan | nan |
+| `eps_scale 0.03` gamma2 | -- | .501 .460 .451 .434 | .709 .679 .671 .664 | ~0 |
+| `eps_scale 0.5` gamma2 | -- | .563 .499 .472 .463 | .751 .706 .686 .683 | ~0 |
+| `eps_scale 2.0` gamma2 | -- | **.707 .602 .549 .539** | **.842 .775 .738 .738** | ~0 |
+
+Two conclusions:
+
+1. **gamma2 is stable where scalar is unusable.** Finite at every eps tried, up
+   to 2.0 -- 60x the largest scalar value that survives.
+2. **It is a genuine dispersion knob.** Internal variance and member spread
+   rise monotonically toward the ERDM control's ~1.0 while the five-year
+   shrinkage alpha stays at ~0 on every channel: it moves spread, not the mean,
+   exactly as the proposal's M3 predicts. The residual gap at eps 2.0 is Layer
+   A (the fresh slot's missing posterior variance), not the sampler.
+3. **Scale for the real sweep:** useful eps in gamma2 units is O(0.5-2), not
+   O(0.05). A ladder of {0, 0.1, 0.5, 1.0, 2.0} is the right first sweep on a
+   real checkpoint; the earlier plan's {0.005 ... 0.1} would have measured
+   almost nothing.
+
+Also fixed while running this: `InstrumentedRSI.sample_window` in the toy had
+not tracked the `anchor_bnd_win` argument added by the anchor-lag work, so the
+toy could not run at all against current `rsi.py`.

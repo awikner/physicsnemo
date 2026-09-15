@@ -97,6 +97,10 @@ RSI_KW = dict(
     gamma_profile="geometric", delta_std=1.0, time_eps=1.0e-3,
     label_mode="tau", anchor_noise=0.0, weighting="snr_bump",
     P_mean=2.0, P_std=1.2, w_1=1.0, w_z=1.0, eps_scale=0.0,
+    # eps_mode: the shipped default. "scalar" is the form the A5 rung was
+    # written with and is what diverges below; "gamma2" is the fix (eps ~
+    # Gamma^2, diagonal in Gamma's basis).
+    eps_mode="scalar",
     eps_tmin=0.0, eps_tmax=1.0, noise="gaussian", l_max=90,
     ocean_loss_weight=1.0,
 )
@@ -377,12 +381,19 @@ class InstrumentedRSI(RSIScheduler):
         return self
 
     def sample_window(self, model, x, c_grid_win, c_scalar_win, num_steps=None,
-                      ocean_win=None):
+                      ocean_win=None, anchor_bnd_win=None):
+        # Signature must track RSIScheduler.sample_window: the anchor-lag work
+        # (proposal v0.2) added anchor_bnd_win, and a subclass that drops a
+        # kwarg its parent now passes fails only when the toy is actually run.
         x_out, y_hat = super().sample_window(
-            model, x, c_grid_win, c_scalar_win, num_steps, ocean_win=ocean_win)
+            model, x, c_grid_win, c_scalar_win, num_steps, ocean_win=ocean_win,
+            anchor_bnd_win=anchor_bnd_win)
         self._last_x = x_out
         if getattr(self, "record", False):
-            self.rec_anchor.append(y_hat[:, -1].mean(dim=(-1, -2)).clone())
+            # the fresh slot's anchor: slot W - anchor_lag of the readout
+            # (== the emitted frame at lag W)
+            self.rec_anchor.append(
+                y_hat[:, self.W - self.anchor_lag].mean(dim=(-1, -2)).clone())
             sl = x_out.mean(dim=(-1, -2))            # (b, W, C)
             self.rec_slot_mean.append(sl.mean(0).clone())
             self.rec_slot_std.append(sl.std(0).clone())
@@ -843,6 +854,19 @@ def main():
             "e_eps_scale0.03": dict(sched_kw=dict(eps_scale=0.03)),
             "e_eps_scale0.5": dict(sched_kw=dict(eps_scale=0.5)),
             "e_eps_scale2.0": dict(sched_kw=dict(eps_scale=2.0)),
+            # The eps_mode="gamma2" counterparts of the four rows above. With
+            # an EXACT score the eps-family is marginal-preserving for any
+            # eps >= 0, so these must hold var_internal_ratio_vs_control ~ 1
+            # on every channel -- including S_c = 0.14 -- while the scalar
+            # rows go non-finite. That contrast is the whole finding: A5 was
+            # unrunnable because of the drift/diffusion mismatch, not because
+            # stochastic sampling is wrong for this family.
+            "e2_eps_gamma2_0.03": dict(
+                sched_kw=dict(eps_scale=0.03, eps_mode="gamma2")),
+            "e2_eps_gamma2_0.5": dict(
+                sched_kw=dict(eps_scale=0.5, eps_mode="gamma2")),
+            "e2_eps_gamma2_2.0": dict(
+                sched_kw=dict(eps_scale=2.0, eps_mode="gamma2")),
             "f_anchor_noise1": dict(sched_kw=dict(anchor_noise=1.0),
                                     oracle_sigma_a=1.0),
             "f_anchor_noise2": dict(sched_kw=dict(anchor_noise=2.0),
