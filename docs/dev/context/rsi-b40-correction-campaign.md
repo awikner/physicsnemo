@@ -190,6 +190,38 @@ Also in this campaign: with the real `noise_scale_path` artifact (S_c = 0.02,
 channel at its eps=0 amplitude (2.81 / 2.36 / 2.17) across eps 0.02-0.5 while
 `scalar` runs the S_c=0.02 channel from 2.81 to 257.
 
+### First real calibration numbers (A2-L epoch 22)
+
+The metrics ran on the real model at their first epoch end (job 7626136, the
+epoch-22 weights frozen, 4 ICs x 10 members). `crps < nrmse` at every lead, as
+required, and `rankbias` is ~0.004-0.015 everywhere, so the ensemble is
+unbiased. The spread-skill ratio, finally dimensionless:
+
+| lead | ssr surface | ssr upper air | ssr diagnostic | rankout surface |
+|---|---|---|---|---|
+| day 1 | 0.726 | 0.710 | 0.741 | 0.260 |
+| day 3 | 0.726 | 0.710 | 0.759 | 0.288 |
+| day 6 | 0.873 | 0.904 | 0.854 | 0.259 |
+| day 10 | **1.067** | **1.074** | 0.974 | 0.212 |
+
+(1.0 = calibrated; `rankout` reference 2/(E+1) = 0.182.)
+
+**This reframes the whole dispersion question.** A2-L is NOT globally
+under-dispersed. It is ~27% under-dispersed at days 1-3 and essentially
+calibrated -- marginally OVER-dispersed -- by day 10, with a mild excess of
+envelope outliers throughout consistent with the short-lead deficit. Every
+earlier "RSI is under-dispersed" statement rested on comparing absolute
+spreads with ERDM at 2.3x different error; in matched units the deficit is
+real but confined to short lead and is not the long-lead problem it was taken
+for.
+
+Consequence for the eps sweep: a GLOBAL eps increase is the wrong instrument,
+because it would push day 10 further past 1.0 while fixing days 1-3. The
+knobs to reach for are the ones that act early -- `eps_tmin`/`eps_tmax`
+restricted to the high-tau (early-lead) part of the sweep, or the fresh-slot
+latent -- and the sweep should be scored on the short-lead `ssr` with day-10
+`ssr` and `crps` as the guard rails.
+
 ## 4. A silent hyperparameter bug
 
 `train.py::_flatten_optimizer_cfg` forwarded `muon_lr_multiplier` and `betas`

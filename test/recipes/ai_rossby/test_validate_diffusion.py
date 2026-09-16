@@ -792,3 +792,43 @@ def test_member_union_is_a_reshape_without_member_split():
     u = v._member_union(x)
     assert u.shape == (2, 4, 3, 8, 8)
     torch.testing.assert_close(u.reshape(8, 3, 8, 8), x)
+
+
+@pytest.mark.parametrize("cls", [StreamingLatWeightedCRPS, StreamingRankHistogram])
+def test_the_calibration_accumulators_handle_the_5d_upper_air_shape(cls):
+    """The stub dataset here is surface-only (4D), but the real upper-air
+    field carries a LEVEL axis -- (n_ic, E, C, L, H, W) members against
+    (n_ic, C, L, H, W) truth. A reduce-dims or lat-broadcast bug would show up
+    only there, and the running control chains execute this code at every
+    epoch end."""
+    torch.manual_seed(0)
+    n_ic, E, C, L, H, W = 2, 8, 5, 26, 8, 12
+    m = torch.randn(n_ic, E, C, L, H, W)
+    y = torch.randn(n_ic, C, L, H, W)
+    lat = torch.rand(H)
+    a = cls(n_steps=1, n_channels=C, device=torch.device("cpu"))
+    a.update(0, m, y, lat)
+    out = a.finalize()
+    assert out.shape[-1] == C and torch.isfinite(out).all()
+
+
+def test_crps_matches_the_naive_estimator_on_the_5d_shape():
+    torch.manual_seed(1)
+    n_ic, E, C, L, H, W = 2, 6, 3, 4, 8, 12
+    m = torch.randn(n_ic, E, C, L, H, W)
+    y = torch.randn(n_ic, C, L, H, W)
+    lat = torch.rand(H)
+    acc = StreamingLatWeightedCRPS(n_steps=1, n_channels=C,
+                                   device=torch.device("cpu"))
+    acc.update(0, m, y, lat)
+    got = acc.finalize()[0]
+    t1 = (m - y.unsqueeze(1)).abs().mean(1)
+    pair = torch.zeros_like(t1)
+    for i in range(E):
+        for j in range(E):
+            pair += (m[:, i] - m[:, j]).abs()
+    naive = t1 - pair / (2 * E * (E - 1))
+    w = lat.view(1, 1, 1, H, 1)
+    want = ((naive * w).sum(dim=(0, 2, 3, 4))
+            / w.expand_as(naive).sum(dim=(0, 2, 3, 4)))
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
