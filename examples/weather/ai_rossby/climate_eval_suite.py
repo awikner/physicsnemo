@@ -826,22 +826,47 @@ def check_deterministic_ensemble(perturber, ensemble_size: int) -> None:
         )
 
 
-def derive_spread_skill(rmse_acc: dict, log_steps: Sequence[int]) -> dict[str, float]:
+def derive_spread_skill(rmse_acc: dict, log_steps: Sequence[int],
+                        ensemble_size: int | None = None) -> dict[str, float]:
     """spread/skill ratios from the flat metric dict — pure post-processing.
 
     Emitted by the runner whenever ``ensemble_size > 1`` (the drive's spread
     metrics fill automatically then); the old EnsembleEnvelopeValidator ran a
     whole extra rollout to compute exactly this.
+
+    TWO keys per (step, group), and they mean different things:
+
+    ``spread_skill_ratio_step{S}_{group}``
+        the legacy ratio, kept byte-for-byte so saved results do not silently
+        change meaning. It divides a NORMALIZED-unit spread by a PHYSICAL-unit
+        RMSE for surface/upper_air, and under ``truth_source=obs_climatology``
+        its denominator is the RMSE against climatology rather than forecast
+        skill. It is not a calibration number and should not be read as one.
+    ``spread_skill_ratio_norm_step{S}_{group}``
+        the real thing, present only when the drive emitted ``nrmse_*`` (i.e.
+        the calibration metrics were on): both terms normalized, and corrected
+        by ``sqrt((E+1)/(E-1))`` for the biased member variance and the
+        calibrated-ensemble mean error. 1.0 = calibrated.
     """
     ratios: dict[str, float] = {}
+    factor = 1.0
+    if ensemble_size is not None and ensemble_size > 1:
+        factor = math.sqrt((ensemble_size + 1.0) / (ensemble_size - 1.0))
     for group in ("surface", "upper_air", "diagnostic"):
         for step in log_steps:
             spread_key = f"spread_step{step}_{group}"
             rmse_key = f"rmse_step{step}_{group}"
+            nrmse_key = f"nrmse_step{step}_{group}"
             if spread_key in rmse_acc and rmse_key in rmse_acc:
                 rmse = rmse_acc[rmse_key]
                 ratios[f"spread_skill_ratio_step{step}_{group}"] = (
                     rmse_acc[spread_key] / rmse if rmse > 0 else float("nan")
+                )
+            if spread_key in rmse_acc and nrmse_key in rmse_acc:
+                nrmse = rmse_acc[nrmse_key]
+                ratios[f"spread_skill_ratio_norm_step{step}_{group}"] = (
+                    rmse_acc[spread_key] / nrmse * factor
+                    if nrmse > 0 else float("nan")
                 )
     return ratios
 
@@ -1172,7 +1197,7 @@ class EvalSuiteRunner:
 
         if self.drive.ensemble_size > 1:
             results["spread_skill"] = derive_spread_skill(
-                rmse_acc, self.drive.log_steps
+                rmse_acc, self.drive.log_steps, self.drive.ensemble_size
             )
         if partial:
             results["_partial"] = True

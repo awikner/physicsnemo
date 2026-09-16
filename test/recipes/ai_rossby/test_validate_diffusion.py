@@ -585,3 +585,210 @@ def test_lag_one_scheduler_is_not_handed_traj_lead():
     assert v.traj_lead == 0
     v.run(nn.Identity(), epoch=0)          # the fake has no traj_lead parameter
     assert s.seen["c_grid"].shape[1] == 3 + 3 - 1
+
+
+# ---------------------------------------------------------------------------
+# Calibration metrics (2026-09-15). The shipped `spread` is the lat-weighted
+# RMS member std in NORMALIZED units while `rmse` is PHYSICAL for
+# surface/upper_air, so their ratio was never a spread-skill ratio and the
+# RSI-vs-ERDM "under-dispersion" was an absolute-spread comparison between
+# models whose errors differ 2.3x. These are the metrics that can actually
+# answer the question.
+# ---------------------------------------------------------------------------
+
+import math  # noqa: E402
+
+from validate_diffusion import (  # noqa: E402
+    StreamingLatWeightedCRPS,
+    StreamingRankHistogram,
+)
+
+
+class _NoisyRollingScheduler(_RecordingRollingScheduler):
+    """Emits truth + sigma * N(0,1) per member, so the ensemble law is known.
+
+    ``_RecordingRollingScheduler`` is deterministic, which cannot exercise a
+    calibration metric at all: every member is identical, the spread is 0 and
+    the rank of the truth is degenerate.
+    """
+
+    def __init__(self, window_size=3, sigma=1.0, shift=0.0):
+        super().__init__(window_size=window_size)
+        self.sigma, self.shift = sigma, shift
+
+    def sample_rollout(self, model, init_window, c_grid_traj, c_scalar_traj,
+                       horizon, num_steps=None):
+        self.calls.append(num_steps)
+        B, W, C, H, Wd = init_window.shape
+        # init_window is the ORACLE future window, so frame k of the truth is
+        # init_window[:, k]; emit it plus per-member noise.
+        out = torch.empty(B, horizon, C, H, Wd)
+        for k in range(horizon):
+            base = init_window[:, min(k, W - 1)]
+            out[:, k] = base + self.shift + self.sigma * torch.randn_like(base)
+        return out
+
+
+def _cal_validator(scheduler, *, horizon, ensemble_size, calibration=True):
+    return DiffusionRolloutValidator(
+        _StubDataset(),
+        wrapper=_StubWrapper(),
+        inference_scheduler=scheduler,
+        log_steps=list(range(1, horizon + 1)),
+        device=torch.device("cpu"),
+        horizon=horizon,
+        max_initial_conditions=4,
+        batch_size=4,
+        ic_stride=1,
+        sampler_num_steps=2,
+        ensemble_size=ensemble_size,
+        calibration_metrics=calibration,
+    )
+
+
+def test_calibration_off_leaves_the_metric_keys_exactly_as_before():
+    """The regression guard for every downstream parser and saved
+    eval_suite.pt: with the flag off, not one key changes."""
+    v = _cal_validator(_RecordingRollingScheduler(window_size=3), horizon=2,
+                       ensemble_size=4, calibration=False)
+    out = v.run(nn.Identity(), epoch=0)
+    assert out is not None
+    prefixes = {k.split("_")[0] for k in out}
+    assert prefixes <= {"rmse", "acc", "spread"}, sorted(out)
+    for bad in ("nrmse", "ssr", "crps", "rankout", "rankbias"):
+        assert not any(k.startswith(bad) for k in out), bad
+
+
+def test_calibration_on_adds_exactly_the_documented_families():
+    v = _cal_validator(_NoisyRollingScheduler(window_size=3, sigma=0.5),
+                       horizon=2, ensemble_size=8)
+    out = v.run(nn.Identity(), epoch=0)
+    for fam in ("nrmse", "ssr", "crps", "rankout", "rankbias"):
+        assert f"{fam}_step1_surface" in out, fam
+        assert math.isfinite(out[f"{fam}_step1_surface"]), fam
+
+
+def test_crps_never_exceeds_the_mean_absolute_error_of_the_mean():
+    """A mathematical requirement: CRPS of an ensemble is bounded by the MAE
+    of its mean plus its spread term. A violation means the pair term has the
+    wrong sign or normalization -- the one thing a sorted-identity
+    implementation can get subtly wrong."""
+    v = _cal_validator(_NoisyRollingScheduler(window_size=3, sigma=0.5),
+                       horizon=3, ensemble_size=8)
+    out = v.run(nn.Identity(), epoch=0)
+    for step in (1, 2, 3):
+        assert out[f"crps_step{step}_surface"] > 0.0
+        # CRPS is in the same (normalized) units as nrmse and must be smaller:
+        # it is an average absolute error minus a positive spread term.
+        assert out[f"crps_step{step}_surface"] < out[f"nrmse_step{step}_surface"]
+
+
+def test_crps_accumulator_matches_the_naive_pairwise_estimator():
+    """Pins the sorted-member identity against the O(E^2) definition."""
+    torch.manual_seed(0)
+    n_ic, E, C, H, W = 2, 8, 3, 4, 6
+    m = torch.randn(n_ic, E, C, H, W)
+    y = torch.randn(n_ic, C, H, W)
+    lat = torch.rand(H)
+    acc = StreamingLatWeightedCRPS(n_steps=1, n_channels=C,
+                                   device=torch.device("cpu"))
+    acc.update(0, m, y, lat)
+    got = acc.finalize()[0]
+
+    t1 = (m - y.unsqueeze(1)).abs().mean(1)
+    pair = torch.zeros_like(t1)
+    for i in range(E):
+        for j in range(E):
+            pair += (m[:, i] - m[:, j]).abs()
+    naive = t1 - pair / (2 * E * (E - 1))          # the FAIR estimator
+    w = lat.view(1, 1, H, 1)
+    want = ((naive * w).sum(dim=(0, 2, 3))
+            / w.expand_as(naive).sum(dim=(0, 2, 3)))
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+
+
+def test_crps_of_a_zero_spread_ensemble_is_the_mean_absolute_error():
+    n_ic, E, C, H, W = 2, 6, 2, 4, 4
+    y = torch.randn(n_ic, C, H, W)
+    m = (y + 0.3).unsqueeze(1).expand(n_ic, E, C, H, W).contiguous()
+    lat = torch.ones(H)
+    acc = StreamingLatWeightedCRPS(n_steps=1, n_channels=C,
+                                   device=torch.device("cpu"))
+    acc.update(0, m, y, lat)
+    # pair term vanishes, so crps == |pred - truth| == 0.3
+    torch.testing.assert_close(acc.finalize()[0], torch.full((C,), 0.3),
+                               rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("E", [8, 16])
+def test_the_spread_skill_correction_makes_a_calibrated_ensemble_read_one(E):
+    """The factor is sqrt((E+1)/(E-1)), NOT sqrt((E+1)/E): the spread
+    accumulator uses var(unbiased=False) (estimating sigma^2 (E-1)/E) and a
+    calibrated ensemble's mean error is sigma^2 (E+1)/E, so the two
+    corrections compose. Calibrated here means the truth is an INDEPENDENT
+    draw from the members' own law -- not their mean."""
+    torch.manual_seed(0)
+    n, H, W, sig = 4000, 4, 6, 0.7
+    truth = sig * torch.randn(n, 1, H, W)
+    mem = sig * torch.randn(n, E, 1, H, W)
+    spread = float(mem.var(dim=1, unbiased=False).mean().sqrt())
+    nrmse = float(((mem.mean(1) - truth) ** 2).mean().sqrt())
+    raw = spread / nrmse
+    assert raw == pytest.approx(math.sqrt((E - 1) / (E + 1)), rel=0.02)
+    corrected = raw * math.sqrt((E + 1) / (E - 1))
+    assert corrected == pytest.approx(1.0, abs=0.02)
+
+
+def test_rank_summary_is_uniform_for_a_calibrated_ensemble_and_biased_when_shifted():
+    torch.manual_seed(0)
+    n, E, H, W, sig = 3000, 10, 4, 6, 0.7
+    truth = sig * torch.randn(n, 1, H, W)
+    mem = sig * torch.randn(n, E, 1, H, W)
+    lat = torch.ones(H)
+    rh = StreamingRankHistogram(n_steps=1, n_channels=1,
+                                device=torch.device("cpu"))
+    rh.update(0, mem, truth, lat)
+    out, bias = (float(v) for v in rh.finalize()[:, 0, 0])
+    assert out == pytest.approx(2.0 / (E + 1), rel=0.15), out
+    assert abs(bias) < 0.02, bias
+    # an ensemble shifted LOW leaves the truth high in the ranking
+    rh2 = StreamingRankHistogram(n_steps=1, n_channels=1,
+                                 device=torch.device("cpu"))
+    rh2.update(0, mem - 2.0 * sig, truth, lat)
+    out2, bias2 = (float(v) for v in rh2.finalize()[:, 0, 0])
+    assert bias2 > 0.2 and out2 > out
+
+
+def test_nrmse_is_the_normalized_twin_of_rmse():
+    """With no normalizer the two must agree exactly, which is what makes
+    nrmse the right denominator for the spread ratio."""
+    v = _cal_validator(_NoisyRollingScheduler(window_size=3, sigma=0.4),
+                       horizon=2, ensemble_size=4)
+    assert v.normalizer is None
+    out = v.run(nn.Identity(), epoch=0)
+    for step in (1, 2):
+        assert out[f"nrmse_step{step}_surface"] == pytest.approx(
+            out[f"rmse_step{step}_surface"], rel=1e-6)
+
+
+def test_a_truth_echoing_scheduler_scores_zero_nrmse_and_crps():
+    """Guards the wiring: the calibration metrics must be fed the same frames
+    and the same truth as rmse."""
+    v = _cal_validator(_OracleEchoScheduler(window_size=3), horizon=3,
+                       ensemble_size=4)
+    out = v.run(nn.Identity(), epoch=0)
+    for step in (1, 2, 3):
+        assert out[f"nrmse_step{step}_surface"] == pytest.approx(0.0, abs=1e-6)
+        assert out[f"crps_step{step}_surface"] == pytest.approx(0.0, abs=1e-6)
+        # a zero-spread ensemble at zero error is perfectly "calibrated" only
+        # in the degenerate sense; the ratio is 0/0-guarded, not asserted
+
+
+def test_member_union_is_a_reshape_without_member_split():
+    v = _cal_validator(_NoisyRollingScheduler(window_size=3), horizon=1,
+                       ensemble_size=4)
+    assert not v.member_split
+    x = torch.randn(2 * 4, 3, 8, 8)      # (n_ic * E, C, H, W)
+    u = v._member_union(x)
+    assert u.shape == (2, 4, 3, 8, 8)
+    torch.testing.assert_close(u.reshape(8, 3, 8, 8), x)

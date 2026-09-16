@@ -57,6 +57,17 @@ rollout:
   # max(log_steps) <= horizon, and its IC-admissibility math already accounts
   # for ``window_size + horizon - 2 + nocean`` future rows.
   horizon: 10
+  # Calibration metrics (2026-09-15): per group, the NORMALIZED-unit
+  # ensemble-mean RMSE (`nrmse`), the bias- and unit-reconciled spread/skill
+  # ratio (`ssr`, 1.0 = calibrated), fair ensemble CRPS (`crps`) and a rank
+  # summary (`rankout` vs the calibrated 2/(E+1), `rankbias`). They ride the
+  # existing single-reduction path, so the cost is a few extra reductions per
+  # scored frame; crps/rank need ensemble_size > 1 and are skipped otherwise.
+  # WHY: the shipped `spread` is in normalized units while `rmse` is physical
+  # for surface/upper_air, so no calibration statement could be made about
+  # either scheduler family -- the RSI-vs-ERDM "under-dispersion" compared
+  # absolute spreads between models whose errors differ 2.3x.
+  calibration: True
   # Validation-time diffusion sampler — independent of training.
   sampler:
     # ``null`` falls back to the inference scheduler's own ``num_steps``.

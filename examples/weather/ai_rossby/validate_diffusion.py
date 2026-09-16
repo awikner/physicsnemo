@@ -206,6 +206,148 @@ def _downsample_state_window(window: dict, factor: int) -> dict:
     return out
 
 
+class StreamingLatWeightedCRPS:
+    r"""Per-(step, channel) lat-weighted FAIR ensemble CRPS.
+
+        crps = (1/E) sum_i |x_i - y|
+               - (1/(E(E-1))) sum_k (2k - (E-1)) x_(k)
+
+    The second term is the sorted-member identity for
+    ``(1/(2E(E-1))) sum_ij |x_i - x_j|`` -- one sort instead of an O(E^2)
+    field-sized pairwise tensor (E = 10 over 153x45x90 would be ~250 MB).
+
+    The ``(E-1)`` denominator is the FAIR (unbiased) estimator, not the
+    plug-in one: the biased version rewards under-dispersion, which is
+    precisely the thing being measured here.
+
+    CRPS is a PROPER score, so it is the tie-breaker when a dispersion knob
+    (fresh_noise_scale, the eps family) trades spread against accuracy: the
+    spread/skill ratio alone can be driven to 1 by adding noise that makes the
+    forecast worse.
+
+    Needs the member UNION, so under member-split the caller gathers first
+    (``_member_union``).
+    """
+
+    def __init__(
+        self,
+        *,
+        n_steps: int,
+        n_channels: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ):
+        shape = (n_steps, n_channels)
+        self.sum_crps_w = torch.zeros(shape, device=device, dtype=dtype)
+        self.weight_total = torch.zeros(shape, device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def update(
+        self,
+        step_index: int,
+        pred_members: torch.Tensor,
+        truth: torch.Tensor,
+        lat_weights: torch.Tensor,
+    ) -> None:
+        """``pred_members``: ``(n_ic, E, C, [L,] H, W)`` (the union);
+        ``truth``: ``(n_ic, C, [L,] H, W)``. Both normalized."""
+        m = pred_members.float()
+        E = m.shape[1]
+        if E < 2:
+            return
+        y = truth.float().unsqueeze(1)
+        term1 = (m - y).abs().mean(dim=1)                       # (n_ic, C, ...)
+        srt = m.sort(dim=1).values
+        k = torch.arange(E, device=m.device, dtype=m.dtype)
+        coef = (2.0 * k - (E - 1)).view(1, E, *([1] * (m.ndim - 2)))
+        term2 = (coef * srt).sum(dim=1) / (E * (E - 1))
+        crps = term1 - term2
+        weight_shape = [1] * crps.ndim
+        weight_shape[-2] = lat_weights.shape[0]
+        w = lat_weights.view(weight_shape)
+        reduce_dims = [d for d in range(crps.ndim) if d != 1]
+        self.sum_crps_w[step_index] += (crps * w).sum(dim=reduce_dims).detach()
+        self.weight_total[step_index] += (
+            w.expand_as(crps).sum(dim=reduce_dims).detach())
+
+    def finalize(self, *, local_only: bool = False) -> torch.Tensor:
+        # Clones, not in-place: see StreamingLatWeightedRMSE.finalize.
+        c = self.sum_crps_w.clone()
+        w = self.weight_total.clone()
+        if not local_only:
+            _all_reduce_sum(c)
+            _all_reduce_sum(w)
+        return c / w.clamp(min=1e-12)
+
+
+class StreamingRankHistogram:
+    r"""Lat-weighted rank statistics of the truth within the ensemble.
+
+    ``rank = #{i : x_i < y}`` in ``[0, E]``. Two lat-weighted sums per
+    (step, channel) rather than the full ``E+1`` bins, because the
+    validator's contract is a FLAT dict of scalars and 11 bins x 4 steps x 3
+    groups is not a log line:
+
+    * ``rankout`` -- the outlier rate ``1{rank in {0, E}}``; a calibrated
+      ensemble gives ``2/(E+1)`` (0.18 at E = 10). Above that the ensemble is
+      under-dispersed, below it over-dispersed.
+    * ``rankbias`` -- mean ``rank/E - 0.5``; 0 for an unbiased ensemble,
+      positive when the truth sits high in the ensemble (forecast too low).
+
+    Ties have measure zero on continuous fields, so no rank randomization.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_steps: int,
+        n_channels: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ):
+        shape = (n_steps, n_channels)
+        self.sum_out_w = torch.zeros(shape, device=device, dtype=dtype)
+        self.sum_rank_w = torch.zeros(shape, device=device, dtype=dtype)
+        self.weight_total = torch.zeros(shape, device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def update(
+        self,
+        step_index: int,
+        pred_members: torch.Tensor,
+        truth: torch.Tensor,
+        lat_weights: torch.Tensor,
+    ) -> None:
+        m = pred_members.float()
+        E = m.shape[1]
+        if E < 2:
+            return
+        y = truth.float().unsqueeze(1)
+        rank = (m < y).sum(dim=1).float()                       # (n_ic, C, ...)
+        out = ((rank == 0) | (rank == E)).float()
+        norm = rank / float(E) - 0.5
+        weight_shape = [1] * rank.ndim
+        weight_shape[-2] = lat_weights.shape[0]
+        w = lat_weights.view(weight_shape)
+        reduce_dims = [d for d in range(rank.ndim) if d != 1]
+        self.sum_out_w[step_index] += (out * w).sum(dim=reduce_dims).detach()
+        self.sum_rank_w[step_index] += (norm * w).sum(dim=reduce_dims).detach()
+        self.weight_total[step_index] += (
+            w.expand_as(rank).sum(dim=reduce_dims).detach())
+
+    def finalize(self, *, local_only: bool = False) -> torch.Tensor:
+        """``(2, n_steps, n_channels)``: the outlier rate and the rank bias."""
+        o = self.sum_out_w.clone()
+        r = self.sum_rank_w.clone()
+        w = self.weight_total.clone()
+        if not local_only:
+            _all_reduce_sum(o)
+            _all_reduce_sum(r)
+            _all_reduce_sum(w)
+        wc = w.clamp(min=1e-12)
+        return torch.stack([o / wc, r / wc])
+
+
 @dataclass
 class StepContext:
     """Everything a scorer may need for one (frame, channel-group) — computed
@@ -226,6 +368,11 @@ class StepContext:
     lat_weights: torch.Tensor
     ensemble_size: int
     local_ensemble_size: int
+    # (B, E, C, [L,] H, W) member UNION, normalized; None unless the
+    # calibration metrics are on and E > 1. CRPS and rank statistics are
+    # permutation-invariant in the member axis, so the gather order is
+    # irrelevant. Last because it carries a default.
+    pred_members: Optional[torch.Tensor] = None
 
 
 class DiffusionRolloutValidator:
@@ -320,6 +467,7 @@ class DiffusionRolloutValidator:
         sampler_num_steps: "Optional[int | Sequence[int]]" = None,
         seed: int = 0,
         split_ensemble_across_ranks: bool = False,
+        calibration_metrics: bool = True,
         scorers: Sequence = (),
         on_frame_scored: Optional[Callable[[int], None]] = None,
         ic_indices: Optional[Sequence[int]] = None,
@@ -544,6 +692,38 @@ class DiffusionRolloutValidator:
                 n_channels=sample["diagnostic"].shape[0],
                 device=device,
             )
+
+        # Calibration metrics (2026-09-15). The shipped `spread` is the RMS
+        # member std in NORMALIZED units while `rmse` is in PHYSICAL units for
+        # surface/upper_air, so their ratio is not a spread-skill ratio and no
+        # calibration statement could be made about either scheduler family --
+        # the RSI-vs-ERDM "under-dispersion" was an absolute-spread comparison
+        # between models with 2.3x different error. These add, per group, the
+        # normalized-unit ensemble-mean RMSE (`nrmse`, the matching
+        # denominator), the bias- and unit-reconciled spread/skill ratio
+        # (`ssr`, 1.0 = calibrated), fair ensemble CRPS (`crps`, the proper
+        # score that keeps a dispersion knob honest) and a two-number rank
+        # summary (`rankout`, `rankbias`).
+        self.calibration = bool(calibration_metrics)
+        self.nrmse_surface = self.nrmse_upper_air = self.nrmse_diagnostic = None
+        self.crps_surface = self.crps_upper_air = self.crps_diagnostic = None
+        self.rank_surface = self.rank_upper_air = self.rank_diagnostic = None
+        if self.calibration:
+            n_diag = (self.rmse_diagnostic.sum_sq_w.shape[1]
+                      if self.rmse_diagnostic is not None else 0)
+            groups = [("surface", self.n_surface)]
+            if self.has_upper_air:
+                groups.append(("upper_air", self.n_upper_var))
+            if n_diag:
+                groups.append(("diagnostic", n_diag))
+            for name, n_ch in groups:
+                setattr(self, f"nrmse_{name}", StreamingLatWeightedRMSE(
+                    n_steps=n_log, n_channels=n_ch, device=device))
+                if ensemble_size > 1:
+                    setattr(self, f"crps_{name}", StreamingLatWeightedCRPS(
+                        n_steps=n_log, n_channels=n_ch, device=device))
+                    setattr(self, f"rank_{name}", StreamingRankHistogram(
+                        n_steps=n_log, n_channels=n_ch, device=device))
 
         # Spread metrics (only when ensemble_size > 1).
         self.spread_surface = None
@@ -879,6 +1059,27 @@ class DiffusionRolloutValidator:
             dist.all_reduce(sq, op=dist.ReduceOp.SUM)
         return sq / float(self.ensemble_size)
 
+    def _member_union(self, pred_ensemble: torch.Tensor) -> torch.Tensor:
+        """``(n_ic, E, ...)`` over the member UNION across ranks.
+
+        Without member-split every member is local and this is a reshape. With
+        it, each rank holds ``local_E`` members of every IC; one all-gather
+        concatenates them on the member axis. The statistics that consume this
+        (CRPS, rank) are permutation-invariant in that axis, so the gather
+        order does not matter. Collective symmetry across ranks follows from
+        every rank building the same contexts in the same order -- the same
+        argument as :meth:`_cross_rank_ensemble_mean`.
+        """
+        rest = pred_ensemble.shape[1:]
+        n_ic = pred_ensemble.shape[0] // self.local_ensemble_size
+        local = pred_ensemble.view(n_ic, self.local_ensemble_size, *rest)
+        if not self.member_split:
+            return local
+        local = local.contiguous()
+        parts = [torch.empty_like(local) for _ in range(self._world_size)]
+        dist.all_gather(parts, local)
+        return torch.cat(parts, dim=1)
+
     def _build_ctx(
         self,
         m_idx: int,
@@ -903,6 +1104,10 @@ class DiffusionRolloutValidator:
             if self.ensemble_size > 1
             else None
         )
+        pred_members = (
+            self._member_union(pred_ensemble)
+            if (self.calibration and self.ensemble_size > 1) else None
+        )
         pred_phys, truth_phys = self._denorm_pred_truth(kind, pred_mean, truth)
         return StepContext(
             step=self.log_steps[m_idx],
@@ -911,6 +1116,7 @@ class DiffusionRolloutValidator:
             pred_ensemble=pred_ensemble,
             pred_mean=pred_mean,
             pred_var=pred_var,
+            pred_members=pred_members,
             pred_phys=pred_phys,
             truth=truth,
             truth_phys=truth_phys,
@@ -927,6 +1133,20 @@ class DiffusionRolloutValidator:
         acc = getattr(self, f"acc_{ctx.kind}", None)
         if acc is not None:
             acc.update(ctx.m_idx, ctx.pred_mean, ctx.truth, ctx.lat_weights)
+        # Calibration family: all in NORMALIZED units, so ssr = spread/nrmse
+        # is dimensionless and comparable across models and channel groups.
+        nrmse = getattr(self, f"nrmse_{ctx.kind}", None)
+        if nrmse is not None:
+            nrmse.update(ctx.m_idx, ctx.pred_mean, ctx.truth, ctx.lat_weights)
+        if ctx.pred_members is not None:
+            crps = getattr(self, f"crps_{ctx.kind}", None)
+            if crps is not None:
+                crps.update(ctx.m_idx, ctx.pred_members, ctx.truth,
+                            ctx.lat_weights)
+            rank = getattr(self, f"rank_{ctx.kind}", None)
+            if rank is not None:
+                rank.update(ctx.m_idx, ctx.pred_members, ctx.truth,
+                            ctx.lat_weights)
         spread = getattr(self, f"spread_{ctx.kind}", None)
         if spread is not None and ctx.pred_var is not None:
             # Member-UNION variance in both split modes — a rank-local var
@@ -1318,6 +1538,39 @@ class DiffusionRolloutValidator:
         _emit("spread", self.spread_surface, "surface")
         _emit("spread", self.spread_upper_air, "upper_air")
         _emit("spread", self.spread_diagnostic, "diagnostic")
+
+        # ---- calibration family -------------------------------------------
+        for group in ("surface", "upper_air", "diagnostic"):
+            _emit("nrmse", getattr(self, f"nrmse_{group}"), group)
+            _emit("crps", getattr(self, f"crps_{group}"), group)
+            rank = getattr(self, f"rank_{group}")
+            if rank is not None:
+                vals = rank.finalize(local_only=local_only)   # (2, steps, ch)
+                for prefix, i in (("rankout", 0), ("rankbias", 1)):
+                    per_step = vals[i].mean(dim=1)
+                    for j, step in enumerate(self.log_steps):
+                        results[f"{prefix}_step{step}_{group}"] = float(
+                            per_step[j].item())
+            spread = getattr(self, f"spread_{group}")
+            nrmse = getattr(self, f"nrmse_{group}")
+            if spread is None or nrmse is None or self.ensemble_size < 2:
+                continue
+            # Spread/skill, reconciled twice over:
+            #   * the spread accumulator uses var(unbiased=False), estimating
+            #     sigma^2 (E-1)/E;
+            #   * a calibrated ensemble's MEAN error satisfies
+            #     E[rmse_mean^2] = sigma^2 (E+1)/E.
+            # So spread/nrmse -> sqrt((E-1)/(E+1)) when calibrated, and the
+            # matching factor is sqrt((E+1)/(E-1)) -- NOT sqrt((E+1)/E) alone.
+            # Per-channel ratio first: a ratio of channel means is not the
+            # mean of per-channel ratios.
+            E = float(self.ensemble_size)
+            factor = math.sqrt((E + 1.0) / (E - 1.0))
+            sp = spread.finalize(local_only=local_only)
+            nr = nrmse.finalize(local_only=local_only)
+            ratio = (sp / nr.clamp(min=1e-12) * factor).mean(dim=1)
+            for j, step in enumerate(self.log_steps):
+                results[f"ssr_step{step}_{group}"] = float(ratio[j].item())
         return results
 
 

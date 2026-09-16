@@ -488,6 +488,7 @@ def _build_validator(
         step_size=step_size,
         normalizer=normalizer,
         sampler_num_steps=sampler_num_steps,
+        calibration_metrics=bool(rollout_cfg.get("calibration", True)),
         seed=int(cfg.seed),
         climatology_surface=clim.get("surface"),
         climatology_upper_air=clim.get("upper_air"),
@@ -1279,10 +1280,21 @@ def main(cfg: DictConfig) -> None:
                     if ema is not None:
                         ema.restore(inner_model)
                 if dist.rank == 0:
+                    _CAL = ("nrmse", "ssr", "crps", "rankout", "rankbias")
                     summary = " ".join(
                         f"{k}={v:.4e}" for k, v in metrics.items()
+                        if k.split("_")[0] not in _CAL
                     )
                     logger.info(f"epoch {global_epoch} valid: {summary}")
+                    # Second line: the calibration family. Split out because
+                    # one line with 8 families x 4 steps x 3 groups reaches
+                    # ~2 kB and the job scripts truncate their greps.
+                    cal = " ".join(
+                        f"{k}={v:.4e}" for k, v in metrics.items()
+                        if k.split("_")[0] in _CAL
+                    )
+                    if cal:
+                        logger.info(f"epoch {global_epoch} valid-cal: {cal}")
 
             global_epoch += 1
 
