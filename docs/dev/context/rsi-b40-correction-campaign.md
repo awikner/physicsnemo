@@ -80,11 +80,23 @@ equivalence exactly.
 | | A0-HN (`conf/loss/erdm_v2_hn.yaml`) | A2-L-HN (`conf/loss/rsi_a2l_hn.yaml`) |
 |---|---|---|
 | coordinate | ERDM sigma | RSI sigma_eff = gamma/(beta delta_std) |
-| hn_sigma / hn_power / hn_clip | 10.0 / 2.0 / 30.0 | 3.5 / 3.0 / 30.0 |
-| multiplier | 1.000 to sigma 10, 2.56 at 16, 9 at 30, 25 at 50, 30 above 55 | 1.000 to sigma_eff 3.5 |
-| top slot mean weight | **x8.14** | **x8.52** |
+| hn_sigma / hn_power / hn_clip | 10.0 / 2.0 / 30.0 | 3.5 / 1.0 / 3.0 |
+| multiplier | 1.000 to sigma 10, 2.56 at 16, 9 at 30, 25 at 50, 30 above 55 | 1.000 to sigma_eff 3.5, 1.43 at 5, 2 at 7, 3 above 10.5 |
+| top slot: share of the loss | 1.44% -> **13.9%** (x11.19) | 8.23% -> **14.2%** (x1.85) |
+| top slot mean weight | x8.14 | x1.77 |
 | slots 1-4 | exactly 1 | exactly 1 |
-| total loss | x1.158 (measured) | x1.155 (projected) |
+| total loss | x1.158 | x1.070 |
+
+**Both measured on frozen weights, and the two corrections differ 6x on
+purpose.** A2-L's top slot already carries **8.2% +- 0.3% of its realized
+weighted loss (312 samples, job 7626157) against ERDM's 1.44% (104 samples,
+job 7626106)** -- 5.7x more attention to the regime free-run generation starts
+from. That is the measured form of "RSI's weighting is already nearly flat",
+and it means A2-L barely has the pathology A0-HN exists to fix. Matching the
+two runs on the ENDPOINT (~14% each) therefore needs very different
+multipliers; matching the multiplier instead would have put 46% of A2-L's loss
+on one slot and inflated its total loss x1.71. An intermediate attempt at
+3.5/3.0/30 did exactly that and was discarded.
 
 **The exponents were picked from a measurement, and the first attempt was too
 weak.** The frozen-weight smoke (job 7626106, the A0 epoch-17 weights, 104

@@ -102,7 +102,7 @@ def test_eval_sampler_mirrors_its_training_scheduler(loss_name, sampler_name):
 # ---------------------------------------------------------------------------
 
 _HN_ERDM = dict(hn_sigma=10.0, hn_power=2.0, hn_clip=30.0)
-_HN_RSI = dict(hn_sigma=3.5, hn_power=3.0, hn_clip=30.0)
+_HN_RSI = dict(hn_sigma=3.5, hn_power=1.0, hn_clip=3.0)
 
 
 def test_a0hn_is_erdm_v2_plus_the_boost():
@@ -129,10 +129,11 @@ def test_a2lhn_is_rsi_a2l_plus_the_boost():
 
 
 def test_the_boost_actually_reweights_the_back_slot_in_both_configs():
-    """The pair's claim: both configs multiply the TOP slot's mean loss weight
-    by ~3 and leave the lower slots untouched, so a0hn vs a2lhn is a
-    controlled pair even though the knob values live in different coordinates
-    (ERDM sigma vs RSI sigma_eff).
+    """Both configs lift the TOP slot and leave the lower ones untouched. The
+    MULTIPLIERS differ 5x on purpose: measured on frozen weights, ERDM's top
+    slot carries 1.44% of the realized loss and A2-L's already carries 8.2%,
+    so matching the ENDPOINT (~14% each) means very different corrections.
+    Matching the multiplier instead would put 46% of A2-L's loss on one slot.
 
     This is the mean WEIGHT ratio over a uniform-t grid -- directly computable
     from the configs. The change in each slot's share of the realized weighted
@@ -140,7 +141,7 @@ def test_the_boost_actually_reweights_the_back_slot_in_both_configs():
     slot; measured for A0-HN on the epoch-17 weights (job 7626106, 104 paired
     samples): slot 6 x11.19, share 1.44% -> 13.9%, total loss x1.158."""
     for name, base_name, expect in (("erdm_v2_hn", "erdm_v2", 8.14),
-                                    ("rsi_a2l_hn", "rsi_a2l", 8.52)):
+                                    ("rsi_a2l_hn", "rsi_a2l", 1.77)):
         base, hn = _loss(base_name), _loss(name)
         t = torch.linspace(0.0, 1.0, 2001)[:-1]
         if name.startswith("erdm"):

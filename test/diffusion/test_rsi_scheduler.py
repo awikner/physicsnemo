@@ -1338,7 +1338,7 @@ def test_anchor_lag_pushforward_readout_is_the_emitted_frame_at_lag_w():
 # ---------------------------------------------------------------------------
 
 _HN = dict(hn_sigma=10.0, hn_power=2.0, hn_clip=30.0)      # the A0-HN values
-_HN_A2L = dict(hn_sigma=3.5, hn_power=3.0, hn_clip=30.0)   # the A2-L-HN values
+_HN_A2L = dict(hn_sigma=3.5, hn_power=1.0, hn_clip=3.0)    # the A2-L-HN values
 #: the first attempt, kept as a unit test of the helper's math: it pins the
 #: shape of the power law independently of whatever the shipped configs use
 _HN_POW11 = dict(hn_sigma=10.0, hn_power=1.1, hn_clip=10.0)
@@ -1445,7 +1445,7 @@ def test_hn_boosts_only_the_back_slot_at_the_a2l_settings():
         # its mean boost is 1 + 4e-6 rather than exactly 1 -- the boost is
         # continuous in sigma_eff by design, not slot-indexed.
         assert per_slot[w] == pytest.approx(1.0, abs=1e-4), (w, per_slot)
-    assert per_slot[5] == pytest.approx(8.52, rel=0.05), per_slot
+    assert per_slot[5] == pytest.approx(1.77, rel=0.05), per_slot
 
 
 def test_snr_bump_with_hn_reduces_to_erdm_loss_weight():

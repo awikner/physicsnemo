@@ -25,18 +25,34 @@
 # 6's weight mass sits at sigma_eff 3.5-10, right at the f peak, and the huge
 # sigma_eff values only occur in a vanishing tau sliver near the beta floor.
 #
-# hn_sigma 3.5 / hn_power 3.0 / hn_clip 30 instead gives slots 1-5 x1.000 and
-# slot 6 **x8.52** in mean loss weight (pinned by
-# test_hn_boosts_only_the_back_slot_at_the_a2l_settings), matching A0-HN's
-# x8.14 in the same quantity -- so a0hn and a2lhn remain a controlled pair,
-# with comparable projected top-slot shares (15.2% here, 13.9% measured
-# there) and comparable total-loss cost (x1.155 vs x1.158).
+# hn_sigma 3.5 / hn_power 1.0 / hn_clip 3.0 -- a MUCH gentler boost than
+# A0-HN's, and measured, not guessed. Frozen-weight profile of the A2-L
+# epoch-22 weights over 312 (batch, rank) samples (job 7626157, ABL=a2l with
+# ABL_LOSS_DIAG=1, i.e. the control loss):
 #
-# Both exponents were raised from their first values (A0 1.1 -> 2.0, here
-# 2.0 -> 3.0) after the frozen-weight smoke showed the original pair lifted
-# slot 6 by only ~3.8x: the top slot's weight mass sits well below the cap,
-# so the power law, not the cap, is the binding constraint. See
-# conf/loss/erdm_v2_hn.yaml for the measured table.
+#   slot            1       2       3       4       5       6
+#   sigma_eff   0.058   0.121   0.266   0.643   1.89    28.2
+#   weight      0.479   0.531   0.412   0.234   0.124   0.039
+#   share of
+#   the loss    8.18%  18.45%  24.77%  22.29%  18.08%  8.23%  (+-0.3%)
+#
+# **A2-L's top slot already carries 8.2% of the realized weighted loss --
+# 5.7x ERDM's 1.44%.** It barely has the pathology that motivates A0-HN, which
+# is the measured form of "RSI's weighting is already nearly flat". So the
+# correction it needs is small: this setting lifts slot 6 x1.85 to a 14.2%
+# share, matching A0-HN's measured 13.9%, for a total-loss cost of x1.07
+# (A0-HN pays x1.158). Slots 1-5 stay at exactly x1.000; the mean loss WEIGHT
+# ratio on slot 6 is x1.77 (pinned by
+# test_hn_boosts_only_the_back_slot_at_the_a2l_settings).
+#
+# The pair is therefore controlled where it matters -- both runs end with
+# ~14% of the loss on their highest-noise slot -- even though the correction
+# MAGNITUDES differ 6x, because their starting points differ 5.7x. An earlier
+# attempt at 3.5/3.0/30 (matching A0's multiplier instead of its endpoint)
+# would have put 46% of A2-L's loss on one slot and inflated the total x1.71.
+#
+# Multiplier: 1.000 up to sigma_eff 3.5, 1.43 at 5, 2 at 7, 3 (capped) above
+# 10.5.
 #
 # Pair with model=amip_rsi_sst_pred, recipe bundle, and compare against the
 # uncorrected A2-L control (checkpoints_a2l_sstpred_b40) at matched epochs.
@@ -47,5 +63,5 @@ defaults:
   - _self_
 
 hn_sigma: 3.5
-hn_power: 3.0
-hn_clip: 30.0
+hn_power: 1.0
+hn_clip: 3.0
