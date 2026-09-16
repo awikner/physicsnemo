@@ -25,12 +25,18 @@
 # 6's weight mass sits at sigma_eff 3.5-10, right at the f peak, and the huge
 # sigma_eff values only occur in a vanishing tau sliver near the beta floor.
 #
-# hn_sigma 3.5 / hn_power 2.0 / hn_clip 10 instead gives slots 1-5 x1.000 and
-# slot 6 x3.71 in mean loss weight (verified in
-# test_hn_boosts_only_the_back_slot_at_the_a2l_settings), against A0-HN's x3.05 in the same
-# quantity -- within 20%, so a0hn and a2lhn remain a controlled pair. Exponent 2 is the sigma_eff-coordinate
-# analogue of A0's 1.1: near tau -> 0 the staircase Jacobian is
-# |dtau/dln sigma_eff| ~ tau ~ 1/sigma_eff.
+# hn_sigma 3.5 / hn_power 3.0 / hn_clip 30 instead gives slots 1-5 x1.000 and
+# slot 6 **x8.52** in mean loss weight (pinned by
+# test_hn_boosts_only_the_back_slot_at_the_a2l_settings), matching A0-HN's
+# x8.14 in the same quantity -- so a0hn and a2lhn remain a controlled pair,
+# with comparable projected top-slot shares (15.2% here, 13.9% measured
+# there) and comparable total-loss cost (x1.155 vs x1.158).
+#
+# Both exponents were raised from their first values (A0 1.1 -> 2.0, here
+# 2.0 -> 3.0) after the frozen-weight smoke showed the original pair lifted
+# slot 6 by only ~3.8x: the top slot's weight mass sits well below the cap,
+# so the power law, not the cap, is the binding constraint. See
+# conf/loss/erdm_v2_hn.yaml for the measured table.
 #
 # Pair with model=amip_rsi_sst_pred, recipe bundle, and compare against the
 # uncorrected A2-L control (checkpoints_a2l_sstpred_b40) at matched epochs.
@@ -41,5 +47,5 @@ defaults:
   - _self_
 
 hn_sigma: 3.5
-hn_power: 2.0
-hn_clip: 10.0
+hn_power: 3.0
+hn_clip: 30.0

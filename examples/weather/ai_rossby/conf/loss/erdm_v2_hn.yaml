@@ -27,21 +27,36 @@
 # global batch 40 (a tenth of upstream's optimizer updates per epoch) that
 # under-attended regime is simply the last thing learned.
 #
-# The boost restores part of it: multiplier clamp((sigma/10)^1.1, 1, 10),
-# i.e. EXACTLY 1 for sigma <= 10 (slots 1-4 and most of slot 5, verified to
-# the bit), 1.68 at 16, 5.87 at 50, 9.99 at 81, 10 (capped) above.
+# The boost restores part of it: multiplier clamp((sigma/10)^2, 1, 30), i.e.
+# EXACTLY 1 for sigma <= 10 (slots 1-4 and most of slot 5, verified to the
+# bit), 2.56 at 16, 9 at 30, 25 at 50, 30 (capped) above 55.
 #
-# Two different quantities -- do not confuse them:
-#   * the top slot's mean LOSS WEIGHT rises x3.05, computable from this config
-#     alone (pinned by test_the_boost_actually_reweights_the_back_slot_in_both_configs);
-#   * its share of the realized weighted LOSS is projected 5.6% -> ~19%, which
-#     also depends on how the model's error varies with sigma inside the slot,
-#     so it is MEASURED by the frozen-weight smoke (ABL_LOSS_DIAG=1) before the
-#     chain launches rather than asserted here.
-# Projected total loss x1.17, so no lr retune (gnorm p50 1.2e5 against
-# grad_clip_norm 1e6 leaves ~3x headroom). hn_power = 1 - 1/rho is the
-# exponent that would restore EDM equivalence exactly; hn_clip says "restore
-# at most 10-fold".
+# MEASURED, not projected. The exponent was picked from the frozen-weight
+# smoke (job 7626106: the A0 epoch-17 weights, 104 paired (batch, rank)
+# samples, ABL_LOSS_DIAG=1). Because the boost is a deterministic function of
+# the logged per-slot sigma, the control arm is recoverable exactly from the
+# same samples -- no second job and no sampling noise between the arms:
+#
+#   slot                1      2      3      4      5      6
+#   mean sigma      0.004  0.016  0.077   0.518   5.53    129
+#   control share%   0.02   1.16  21.46   49.43  26.49   1.44
+#   with this boost  0.02   1.05  19.53   44.97  25.27  13.91   <- slot 6
+#   per-slot ratio  1.000  1.000  1.000   1.000  1.042  11.19
+#   total loss ratio 1.158
+#
+# The first attempt (hn_power 1.1 = 1 - 1/rho, the exponent that restores EDM
+# equivalence asymptotically, capped at 10) delivered only x3.79 on slot 6
+# (share 1.44% -> 5.21%): slot 6's WEIGHT MASS sits at sigma 16-60, where a
+# sigma^1.1 law is worth just 1.7-6x, while the samples that reach the cap
+# carry almost no weight. Hence exponent 2 and cap 30 -- chosen so the total
+# loss ratio stays inside the x1.17 budget the plan allowed (no lr retune;
+# gnorm p50 1.2e5 against grad_clip_norm 1e6 leaves ~3x headroom).
+#
+# Two quantities not to confuse: the top slot's mean LOSS WEIGHT rises x8.14
+# (computable from this config alone, pinned by
+# test_the_boost_actually_reweights_the_back_slot_in_both_configs), while its
+# share of the realized weighted LOSS rises x11.19 to 13.9% -- the difference
+# is how the model's error varies with sigma inside the slot.
 #
 # Pair with model=amip_erdm_sst_pred, recipe upstream, and compare against the
 # uncorrected A0 control (checkpoints_a0_sstpred_b40) at matched epochs.
@@ -52,5 +67,5 @@ defaults:
   - _self_
 
 hn_sigma: 10.0
-hn_power: 1.1
-hn_clip: 10.0
+hn_power: 2.0
+hn_clip: 30.0

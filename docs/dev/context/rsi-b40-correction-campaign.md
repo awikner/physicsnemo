@@ -80,10 +80,32 @@ equivalence exactly.
 | | A0-HN (`conf/loss/erdm_v2_hn.yaml`) | A2-L-HN (`conf/loss/rsi_a2l_hn.yaml`) |
 |---|---|---|
 | coordinate | ERDM sigma | RSI sigma_eff = gamma/(beta delta_std) |
-| hn_sigma / hn_power / hn_clip | 10.0 / 1.1 / 10.0 | 3.5 / 2.0 / 10.0 |
-| multiplier | 1.000 to sigma 10, 1.68 at 16, 5.87 at 50, 10 above 81 | 1.000 to sigma_eff 3.5 |
-| top slot mean weight | **x3.05** | **x3.71** |
+| hn_sigma / hn_power / hn_clip | 10.0 / 2.0 / 30.0 | 3.5 / 3.0 / 30.0 |
+| multiplier | 1.000 to sigma 10, 2.56 at 16, 9 at 30, 25 at 50, 30 above 55 | 1.000 to sigma_eff 3.5 |
+| top slot mean weight | **x8.14** | **x8.52** |
 | slots 1-4 | exactly 1 | exactly 1 |
+| total loss | x1.158 (measured) | x1.155 (projected) |
+
+**The exponents were picked from a measurement, and the first attempt was too
+weak.** The frozen-weight smoke (job 7626106, the A0 epoch-17 weights, 104
+paired (batch, rank) samples, `ABL_LOSS_DIAG=1`) gives an exactly paired
+control, because the boost is a deterministic function of the logged per-slot
+sigma and can be divided back out of the same samples:
+
+| slot | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| mean sigma | 0.004 | 0.016 | 0.077 | 0.518 | 5.53 | 129 |
+| control share of the weighted loss | 0.02% | 1.16% | 21.5% | 49.4% | 26.5% | **1.44%** |
+| ratio at hn_power 1.1, clip 10 (first try) | 1.000 | 1.000 | 1.000 | 1.000 | 1.020 | **3.79** |
+| ratio at hn_power 2.0, clip 30 (shipped) | 1.000 | 1.000 | 1.000 | 1.000 | 1.042 | **11.19** |
+| shipped share | 0.02% | 1.05% | 19.5% | 45.0% | 25.3% | **13.9%** |
+
+`hn_power = 1 - 1/rho = 1.1` is the exponent that restores EDM equivalence
+asymptotically, but slot 6's WEIGHT MASS sits at sigma 16-60, where a
+sigma^1.1 law is worth only 1.7-6x; the samples that reach the cap carry
+almost no weight. So the power law, not the cap, was the binding constraint.
+Exponent 2 with cap 30 lifts the slot 11.2x for a total-loss cost of x1.158 --
+inside the x1.17 budget that keeps the learning rate untouched.
 
 **A2-L's weighting was already nearly flat** — measured per-slot mean weight
 0.481 / 0.530 / 0.409 / 0.231 / 0.122 / 0.037, i.e. 13x front to back against
