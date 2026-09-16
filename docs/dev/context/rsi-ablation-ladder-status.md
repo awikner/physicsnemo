@@ -7,6 +7,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # RSI ablation ladder: which rungs have actually been trained (2026-09-10)
 
+> **Update 2026-09-15.** Two new rungs, **A0-HN** and **A2-L-HN**
+> (`conf/loss/erdm_v2_hn.yaml`, `conf/loss/rsi_a2l_hn.yaml`): the controls
+> above match upstream's training loss but not its rollout skill, because the
+> rolling staircase under-weights the high-sigma slots that free-run
+> generation starts from. **A5 is runnable after all** --
+> `eps_mode="gamma2"` fixes the drift/diffusion mismatch that made the
+> eps-family diverge, and the toy shows it moves spread monotonically with the
+> climate unchanged. Calibration metrics (`ssr`, `crps`, rank) now exist, so
+> "under-dispersed" can finally be measured rather than asserted from
+> mixed-unit spreads. Full account:
+> [rsi-b40-correction-campaign](rsi-b40-correction-campaign.md).
+
 > **Update 2026-09-10 (evening), proposal v0.2.** The ladder was revised:
 > lag-1 RSI (every run below) is now the *diagnostic* rung A2, the core rung
 > is **A2-L** (lag-W sample anchor, `loss/rsi_a2l.yaml`, `anchor_lag: 6`),
