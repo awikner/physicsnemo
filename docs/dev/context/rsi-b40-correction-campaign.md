@@ -116,10 +116,11 @@ at sigma_eff 3.5-10, right at the `f` peak). The two configs are tuned to the
 same ACHIEVED back-slot reweighting so `a0hn` vs `a2lhn` stays controlled.
 
 Note the two quantities that are easy to conflate: the **mean loss weight**
-ratio (x3.05 / x3.71, computable from the configs and pinned by tests) and the
-**share of the realized weighted loss** (projected 5.6% -> ~19% for slot 6),
-which also depends on how the model's error varies with sigma inside the slot
-and is measured by the frozen-weight smoke before the chains launch.
+ratio (x8.14 / x8.52, computable from the configs and pinned by tests) and the
+**share of the realized weighted loss** (measured x11.19 for A0-HN, 1.44% ->
+13.9%), which also depends on how the model's error varies with sigma inside
+the slot. The A2-L share is projected from its weight profile and will be
+measured by the a2lhn smoke.
 
 ## 3. The dispersion question, and why it had never been answered
 
